@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────
+# 运行时数据 / 凭证 —— 一律不进仓库
+# （家在 $DSH_HOME/douyin-duty，本来就不在这个包里；这里只是防手滑拖进来）
+# ─────────────────────────────────────────────────────────────
+douyin_cookie.txt
+*.cookie
+*credential*.json
+account.json
+following.json
+config.json
+health.json
+collector.json
+notice.json
+seen.md
+charter.sha256
+reason.txt
+round-evidence.json
+forward-pick.json
+forward-msg.txt
+*.log
+
+chrome-profile/
+signer/
+toast/
+state/
+out/
+digest/
+inbox/
+
+# ─────────────────────────────────────────────────────────────
+# Python / Node 环境
+# ─────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.pyc
+node_modules/
+
+# ─────────────────────────────────────────────────────────────
+# 编辑器 / 系统垃圾
+# ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.tmp
+_probe-*
+Thumbs.db
+desktop.ini
+.DS_Store
