@@ -125,6 +125,11 @@ const MOCK = {
     context: { who: { nick: '测试好友' }, facts: ['喜欢猫', '在杭州'], recent: [], total_remembered: 11 },
   }),
   '/api/douyin-duty/chat/send': () => ({ ok: true, sent: true, to: '测试好友', len: 5 }),
+  '/api/douyin-duty/log': () => ({
+    ok: true, tail: '[示例日志]\n证据包已备好：12 条\n刷抖音开跑（manual）…',
+    lastRunAt: '2026-10-22T09:27:07.645Z', lastWhy: 'manual',
+    roundActive: false, canRun: true, pickedToday: 0, perDay: 5,
+  }),
   // 扫码登录：默认成功给出 qr_url
   '/api/douyin-duty/login/qr': () => ({ ok: true, qr_url: '/api/douyin-duty/login/qr.png?v=1', port: 9374 }),
   // 登录成功会真的把登录态翻过来 —— 面板随后 refresh() 必须看到 true
@@ -567,6 +572,24 @@ if (rChat) {
   else { console.log('  ❌ 卡片没标记'); fail++ }
 }
 
+/* ── 自动发送开关 ── */
+console.log('\n【自动发送开关】')
+if (/自动跑的时候，能不能往外发东西/.test(allText)) console.log('  ✅ 有自动发送开关卡片')
+else { console.log('  ❌ 没有自动发送开关'); fail++ }
+if (/关着（默认）/.test(allText)) console.log('  ✅ 默认显示"关着"')
+else { console.log('  ❌ 没说默认状态'); fail++ }
+if (/只管「插件自己在后台跑的轮次」/.test(allText)) console.log('  ✅ 说清了适用范围（只管后台轮次）')
+else { console.log('  ❌ 没说清适用范围'); fail++ }
+
+/* ── 看日志 ── */
+console.log('\n【看日志】')
+const rLog = await clickAndRender('看日志')
+if (rLog) {
+  if (/证据包已备好/.test(rLog.text)) console.log('  ✅ 日志内容显示出来了')
+  else { console.log('  ❌ 日志没显示'); fail++ }
+  if (/上次跑：/.test(rLog.text)) console.log('  ✅ 显示上次跑的时间')
+  else { console.log('  ❌ 没显示上次跑时间'); fail++ }
+}
+
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')
 process.exitCode = fail ? 1 : 0
-

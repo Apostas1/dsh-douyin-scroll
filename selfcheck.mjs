@@ -500,6 +500,50 @@ try {
   else bad('聊天发送不写记忆')
 } catch (e) { bad(`消息/聊天检查失败：${e.message}`) }
 
+/* ── 4o. 自动发送总开关 + 跑一轮的失败反馈（2026-10-22 用户要求） ── */
+console.log('\n4o. 自动发送开关 + 跑一轮反馈')
+try {
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+
+  // ① 配置项：autoSend 默认必须是 false
+  if (/autoSend:\s*z\.boolean\(\)\.default\(false\)/.test(idx)) ok('autoSend 配置项在，默认 false（后台跑一轮不发东西）')
+  else bad('没有 autoSend 配置项，或默认不是 false —— 后台会偷偷发东西')
+  if (/autoSend:\s*false/.test(idx)) ok('DEFAULTS 里 autoSend = false')
+  else bad('DEFAULTS 缺 autoSend')
+
+  // ② 提示词必须真的按这个开关分流
+  if (/!cfg\.autoSend[\s\S]{0,400}?一个字都不要往抖音发/.test(idx)) {
+    ok('自动跑的提示词：autoSend 关着时明确禁止发送')
+  } else bad('提示词没按 autoSend 分流 —— 关了也可能发')
+  if (/自动发送开着/.test(idx)) ok('autoSend 开着时提示词会放开（并区分评论开关）')
+  else bad('autoSend 开着时提示词没变化')
+
+  // ③ 面板必须有开关
+  if (/自动跑的时候，能不能往外发东西/.test(cl) && /autoSend/.test(cl)) ok('面板有「自动发送」开关')
+  else bad('面板没有自动发送开关')
+  if (/只管「插件自己在后台跑的轮次」/.test(cl)) ok('面板说清了适用范围（只管后台轮次，不影响当场对话）')
+  else bad('面板没说清适用范围 —— 用户会以为当场也不能发')
+
+  // ④ 跑一轮失败要能看见原因
+  if (/diagnoseFailure/.test(idx)) ok('有失败诊断（能认出 429 限流 / 找不到 dsh / 没登录 / 超时）')
+  else bad('没有失败诊断 —— 只给一个退出码，用户看不懂')
+  if (/RATE_LIMIT/.test(idx) && /rate_limit/.test(idx)) ok('能识别上游 429 限流（这是最常见的假故障）')
+  else bad('认不出 429 限流')
+  if (/lastFailure/.test(idx)) ok('失败原因会进通知（不是干巴巴一句"没产出报告"）')
+  else bad('失败原因不进通知')
+
+  // ⑤ /run 不许再谎报 ok:true
+  if (/const started = r && r\.started === true/.test(idx)) ok('/run 只在真启动时返回 ok:true（不再谎报）')
+  else bad('/run 还是无脑 ok:true —— 点了没反应还显示"已开跑"')
+  if (/message: started/.test(idx)) ok('/run 返回一句人话给面板')
+  else bad('/run 没给面板可显示的消息')
+
+  // ⑥ 面板要有"看日志"
+  if (/看日志/.test(cl) && idx.includes('/api/douyin-duty/log')) ok('面板有「看日志」（点了没反应能自己排查）')
+  else bad('面板没有看日志入口')
+} catch (e) { bad(`自动发送/跑一轮检查失败：${e.message}`) }
+
 /* ── 4e. 采集门槛 / 跨天记账 ── */
 console.log('\n4e. 采集门槛 / 跨天')
 try {

@@ -185,6 +185,8 @@ window.__ModuleLoader__.load({
       // 聊天：当前跟谁聊、消息列表、输入框
       const [chat, setChat] = React.useState(null)
       const [chatText, setChatText] = React.useState('')
+      // 最近一轮的日志
+      const [runLog, setRunLog] = React.useState(null)
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
@@ -357,6 +359,17 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
+      /* ── 最近一轮发生了什么 ── */
+      const loadRunLog = async () => {
+        if (runLog !== null) { setRunLog(null); return }
+        setBusy('log')
+        try {
+          const r = await jget('/log')
+          setRunLog(r || { tail: '(读不到)' })
+        } catch (e) { say('读日志失败：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+
       /* ── 消息收件箱 ── */
       const loadInbox = async () => {
         if (inbox !== null) { setInbox(null); return }
@@ -462,8 +475,20 @@ window.__ModuleLoader__.load({
 
       const onRun = async () => {
         setBusy('run')
-        try { await jpost('/run', {}); say('已经开跑了，跑完看报告', 'good') }
-        catch (e) { say('跑失败：' + String((e && e.message) || e), 'warn') }
+        try {
+          const r = await jpost('/run', {})
+          /**
+           * 🔴 2026-10-22 修：以前不管有没有真跑起来都说"已经开跑了"。
+           *    现在按返回的 ok 分流，并把**真原因**显示出来
+           *    （最常见的是上游模型 429 限流）。
+           */
+          if (r && r.ok) {
+            say(r.message || '已经开跑了，跑完会弹通知', 'good')
+          } else {
+            const why = (r && (r.error || r.message || r.hint)) || '没跑起来'
+            say('没跑起来：' + why, 'warn')
+          }
+        } catch (e) { say('跑失败：' + String((e && e.message) || e), 'warn') }
         finally { setBusy('') }
       }
 
@@ -588,6 +613,22 @@ window.__ModuleLoader__.load({
             'data-good': msgTone === 'good' ? '' : undefined,
             'data-warn': msgTone === 'warn' ? '' : undefined,
           }, msg) : null,
+          /* ⭐ 「看日志」—— 点一轮没反应时，让用户能自己看清发生了什么 */
+          h('div', { 'data-dy-row': '' },
+            h('button', { 'data-dy-mini': '', disabled: busy === 'log', onClick: loadRunLog },
+              runLog === null ? '看日志（跑一轮没反应就点这）' : '收起日志')),
+          runLog !== null
+            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '6px' } },
+              h('div', { 'data-dy-kv': '' },
+                `上次跑：${runLog.lastRunAt ? new Date(runLog.lastRunAt).toLocaleString('zh-CN') : '从没跑过'}`
+                + `　今天已挑 ${runLog.pickedToday || 0} / ${runLog.perDay || 0}`),
+              runLog.canRun === false
+                ? h('div', { 'data-dy-msg': '', 'data-warn': '' },
+                  runLog.roundActive ? '⚠️ 上一轮还在跑 —— 等它结束再点'
+                    : (runLog.pickedToday >= runLog.perDay ? '⚠️ 今天的配额用完了（改「每天挑几条」或等明天）' : '现在不能跑'))
+                : null,
+              h('pre', { 'data-dy-pre': '', style: { maxHeight: '300px' } }, runLog.tail || '(日志是空的)'))
+            : null,
           guide !== null
             ? h('pre', { 'data-dy-pre': '', style: { maxHeight: '380px' } }, guide)
             : null),
@@ -808,6 +849,31 @@ window.__ModuleLoader__.load({
               : null),
 
           h('div', { 'data-dy-sub': '' }, '两个都关 = 只在点「现在跑一轮」时跑。')),
+
+        /* ── 自动发送开关 ── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '自动跑的时候，能不能往外发东西'),
+              h('div', { 'data-dy-sub': '' },
+                (cfg.autoSend
+                  ? '⚠️ 开着：插件自己跑一轮时，可能会用你的号发私信 / 分享卡片'
+                    + (cfg.autoComment ? ' / 评论' : '') + '。'
+                  : '关着（默认）：插件自己跑一轮只写报告 + 弹通知，一个字都不往抖音发。'))),
+            h(Switch, {
+              on: Boolean(cfg.autoSend),
+              onChange: (v) => patch({ autoSend: v }, v
+                ? '⚠️ 已打开自动发送 —— 以后后台跑的轮次可能会用你的号发消息'
+                : '已关闭自动发送 —— 后台跑一轮只写报告'),
+            })),
+          h('div', { 'data-dy-sub': '', style: { marginTop: '2px' } },
+            '⚠️ 这个开关只管「插件自己在后台跑的轮次」。'
+            + '你当场在对话里让它发（比如「帮我发给他」），不受它影响 —— 那时你人在场、亲口说了要发。'),
+          cfg.autoSend
+            ? h('div', { 'data-dy-msg': '', 'data-warn': '' },
+              '⚠️ 已开启：插件可能在你不看着的时候，用你的账号给好友发私信、在别人视频下发评论。'
+              + '发错了删都来不及。建议先用几天、确认它判断靠谱了再开。')
+            : null),
 
         /* ── 每天挑几条 / 日报多细 ── */
         h('div', { 'data-dy-card': '' },

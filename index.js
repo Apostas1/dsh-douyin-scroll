@@ -84,6 +84,22 @@ export const Config = !z ? undefined : z.object({
   minComments: z.natural().default(3).extra('volatile', true),
   /** 自动评论并 @（默认关 —— 会拿用户的号说话） */
   autoComment: z.boolean().default(false).extra('volatile', true),
+  /**
+   * ⭐ **自动发送总开关**（2026-10-22 用户要求做成面板上明确的开关）
+   *
+   * 含义：**插件自己在后台跑一轮时**，允不允许它往外发东西
+   *      （私信 / 分享卡片 / 评论）。
+   *
+   * 🔴 默认 `false` —— 后台跑一轮只写报告、弹通知，**不发任何消息**。
+   *    为什么默认关：那是**使用者的号**在给好友发私信、在别人视频下发评论，
+   *    发错了删都来不及。要开必须使用者自己明确打开。
+   *
+   * ⚠️ 这个开关**只管"自动跑的轮次"**。
+   *    你当场在对话里让它发（比如"帮我发给他"），走的是另一条闸
+   *    （工具调用的 confirm 参数），不受这个开关影响 ——
+   *    因为那时你人就在场、亲口说了要发。
+   */
+  autoSend: z.boolean().default(false).extra('volatile', true),
   /** 评论执行器：off / builtin（不可用）/ browser / http */
   commentExecutor: z.string().default('off').extra('volatile', true),
   commentPerRun: z.natural().default(1).extra('volatile', true),
@@ -174,7 +190,7 @@ export function apply(ctx, config) {
     windows: [],
     keywords: [], channels: [], authors: [],
     minDescLen: 12, minComments: 3,
-    autoComment: false, commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
+    autoComment: false, autoSend: false, commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
     mentionName: '', httpCommentUrl: '',
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
     updateUrl: '',
@@ -1656,11 +1672,20 @@ export function apply(ctx, config) {
       + `采集：推荐流只读接口（不签名、不碰写接口）。`
       + `\n判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**）；读不出来/写不进去**必须在报告里明说**。`
       + `\n`
-      + (commentOn
-        ? `🔴 **自动评论是开着的**：每轮最多 ${Number(cfg.commentPerRun) || 0} 条，每条 **≤120 字**，`
-          + `**正文必须以「@${cfg.mentionName} 」开头**。发之前**先调 \`douyin_comment_status\`** 确认 allowed=true。`
-          + `⚠️ 只对**最有把握的「推荐」档**发，不是每条都发。`
-        : `🔴 **自动评论关着**：**一个字都不要往抖音发**（只写报告）。`)
+      /**
+       * ⭐ 自动发送总开关（autoSend）—— 这一段是"后台跑一轮时到底能不能发东西"的唯一判据。
+       *    默认关：一个字都不许发，只写报告。开了才允许发私信/卡片/评论。
+       */
+      + (!cfg.autoSend
+        ? `🔴 **自动发送关着（默认）**：**一个字都不要往抖音发** —— 不发私信、不发卡片、不发评论。`
+          + `\n   这一轮你只干两件事：① 读 round-evidence.json 判断 ② 写报告。`
+          + `\n   报告里可以写「建议发给他：xxx」，但**不要真的调用任何发送工具**。`
+        : (commentOn
+          ? `🔴 **自动发送开着 + 自动评论开着**：每轮最多 ${Number(cfg.commentPerRun) || 0} 条评论，每条 **≤120 字**，`
+            + `**正文必须以「@${cfg.mentionName} 」开头**。发之前**先调 \`douyin_comment_status\`** 确认 allowed=true。`
+            + `⚠️ 只对**最有把握的「推荐」档**发，不是每条都发。`
+          : `🟡 **自动发送开着，但自动评论关着**：可以发私信/分享卡片，**但不要发评论**。`
+            + `\n   发之前想清楚：这是拿使用者的号在跟好友说话，只发真正值得的，宁少勿多。`))
       + `\n⭐ 保底：不管发生什么，**报告至少留一行**（哪怕只写「本轮失败：原因是 X」），别让 out/ 空着。`
       + `\n最后用两三句话汇报你挑到了什么。`
   }
@@ -1669,6 +1694,69 @@ export function apply(ctx, config) {
    * ⭐ 保底：那一轮**没写出报告**时，宿主自己补一份"占位报告"。
    *    （bili-scroll 的用户实测反馈：卡住时 out/ 是空的 ⇒ 使用者完全看不到发生了什么）
    */
+  /** 最近一次的失败诊断（通知里用）—— 必须在使用前声明 */
+  let lastFailure = null
+
+  /**
+   * ⭐ 从日志尾部认出"这一轮为什么没跑成" —— 别只给一个退出码。
+   *   2026-10-22 实测：点「现在跑一轮」后 54 秒结束、code=1，
+   *   报告里只写"常见原因：工具连续失败" —— 真正原因是**上游模型 429 限流**，
+   *   使用者完全看不出来，以为插件坏了。
+   */
+  const diagnoseFailure = (code) => {
+    let tail = ''
+    try { tail = readFileSync(logFile, 'utf8').slice(-4000) } catch { return null }
+    // ① 上游限流（最常见：WorkBuddy / 其他 provider 的 429）
+    const m429 = /RATE_LIMIT[^\n]*?(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})[^\n]*?(UTC[+-]\d+)?/i.exec(tail)
+    if (/RATE_LIMIT|"code":\s*429|usage exceeds frequency limit/i.test(tail)) {
+      const when = m429 ? m429[1].replace('T', ' ') : ''
+      return {
+        kind: 'rate_limit',
+        title: '模型被限流了（429）',
+        detail: when
+          ? `上游模型这轮被限流，额度会在 ${when}（UTC+8）恢复。`
+          : '上游模型这轮被限流（429），等额度恢复后再试。',
+        fix: '要么等额度恢复，要么在「设置 → 模型」里换一个模型（插件会自动跟随桌面版当前模型）。这不是插件的问题。',
+      }
+    }
+    // ② 找不到 dsh / 起不来
+    if (/找不到 dsh|刷抖音起不来|spawn .* ENOENT/i.test(tail)) {
+      return {
+        kind: 'dsh_missing',
+        title: '找不到 dsh，那一轮根本没启动',
+        detail: '插件要去调 dsh 命令行来跑值班，但这台机器上没找到。',
+        fix: '在设置里把「dsh 路径」指到 <应用目录>/…/@deepseek-ai/dsh/lib/bin.js',
+      }
+    }
+    // ③ 登录/凭证
+    if (/还没登录|cred_missing|无有效 Cookie|sessionid/i.test(tail) && /失败|error|missing/i.test(tail)) {
+      return {
+        kind: 'no_login',
+        title: '可能没登录 / 登录过期了',
+        detail: '那一轮读不到数据。',
+        fix: '点「扫码登录」重新登一次，或先点「检查环境」看看。',
+      }
+    }
+    // ④ 超时
+    if (/超过 \d+ 分钟没结束|watchdog/i.test(tail)) {
+      return {
+        kind: 'timeout',
+        title: '那一轮跑超时被强制结束了',
+        detail: '可能卡在某个网络请求上。',
+        fix: '再试一次；连续超时的话把「每次最多筛选几个」调小。',
+      }
+    }
+    // ⑤ 其它
+    return code
+      ? {
+        kind: 'unknown',
+        title: `那一轮异常结束（退出码 ${code}）`,
+        detail: '日志里有线索，但没归到已知类型。',
+        fix: '看下面的日志尾部，或点「检查环境」。',
+      }
+      : null
+  }
+
   const stubReportIfMissing = (code) => {
     try {
       if (String(cfg.reportLevel || 'full') === 'off') return
@@ -1676,11 +1764,19 @@ export function apply(ctx, config) {
       if (existsSync(f)) return
       let tail = ''
       try { tail = readFileSync(logFile, 'utf8').slice(-1500) } catch { /* 读不到就算了 */ }
+      const diag = diagnoseFailure(code)
       writeFileSync(f, [
-        `# 刷抖音 · ${dayKey()} —— 这一轮没写出报告`,
+        `# 刷抖音 · ${dayKey()} —— 这一轮没跑成`,
         '',
-        `> ⚠️ 那一轮结束了，但没有生成正常报告（退出码 ${code}）。`,
-        '> 常见原因：工具连续失败、或者把预算烧完了。下一轮它会重来。',
+        diag
+          ? [
+            `> ❌ **${diag.title}**`,
+            `> ${diag.detail}`,
+            `> `,
+            `> **怎么办**：${diag.fix}`,
+          ].join('\n')
+          : `> ⚠️ 那一轮结束了，但没有生成正常报告（退出码 ${code}）。`,
+        '',
         '> 下面附日志尾部，方便定位（插件数据目录里的 `duty.log` 有完整版）。',
         '',
         '```',
@@ -1688,7 +1784,9 @@ export function apply(ctx, config) {
         '```',
         '',
       ].join('\n'), 'utf8')
-      log('这一轮没写报告 ⇒ 宿主补了一份占位报告')
+      log(`这一轮没写报告 ⇒ 已补占位报告${diag ? `（原因：${diag.title}）` : ''}`)
+      // 把诊断结果留在内存里，通知那边也能用
+      lastFailure = diag
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
 
@@ -1704,16 +1802,45 @@ export function apply(ctx, config) {
 
   /* ⭐ 防双开：内存标记 + 落盘标记（改配置会重新挂载插件，内存标记会丢） */
   let dutyRunning = false
-  const ROUND_STALE_MS = 30 * 60 * 1000
+  /**
+   * 一轮的"陈旧"阈值。
+   * 🔴 2026-10-22 实测事故：夜间那轮被 429 打断后 `roundActive` 没清，
+   *    而阈值是 **30 分钟** ⇒ 接下来半小时里点「现在跑一轮」全被"上一轮还在跑"挡掉，
+   *    面板还只显示"没跑起来"，用户以为按钮坏了。
+   *    现在：
+   *      ① 阈值降到 12 分钟（比看门狗的 15 分钟略短一点点，不会误杀正常轮次）
+   *      ② 每次启动插件时**主动清一次**残留（进程重启 = 上一轮的子进程已经没了）
+   *      ③ 被挡住时把**原因和时间**一起返回，面板能显示
+   */
+  const ROUND_STALE_MS = 12 * 60 * 1000
   const roundBusyInState = () => {
     try {
       const st = readJson(dutyStateFile, {})
       if (!st || !st.roundActive) return false
       const at = Number(st.dutyRunningAt || 0)
-      if (!at || Date.now() - at > ROUND_STALE_MS) { bumpState({ roundActive: false }); return false }
+      if (!at || Date.now() - at > ROUND_STALE_MS) {
+        bumpState({ roundActive: false, dutyRunningAt: 0 })
+        log('发现上一轮的"运行中"标记是陈旧的（超过 12 分钟）⇒ 已自动清掉')
+        return false
+      }
       return true
     } catch { return false }
   }
+  /**
+   * ⭐ 插件每次（重新）加载时，清掉上次残留的"运行中"标记。
+   *    理由：插件重新加载 = 宿主重建了 fiber ⇒ 上一轮起的 headless 子进程
+   *    要么已经被带走、要么已经结束，绝不可能还在"跑"。
+   *    不清的话就会出现"看着没在跑，但点不动"。
+   */
+  const clearStaleRoundOnBoot = () => {
+    try {
+      const st = readJson(dutyStateFile, {})
+      if (!st || !st.roundActive) return
+      bumpState({ roundActive: false, dutyRunningAt: 0 })
+      log('插件重新加载：清掉了上次残留的"运行中"标记（否则点「现在跑一轮」会被误挡）')
+    } catch { /* 清不掉不影响启动 */ }
+  }
+  clearStaleRoundOnBoot()
 
   /**
    * 一轮结束后：按 notifyMode 把结果推出去。
@@ -1734,9 +1861,27 @@ export function apply(ctx, config) {
       const fallback = `（这一轮没有产出报告，退出码 ${code}）`
 
       if (wantToast) {
-        const s = toastSummary(text || fallback, { day: dayKey() })
-        const r = toastSend({ title: s.title, body: s.body })
-        log(`通知：Toast ${r.sent ? '已弹出' : '失败'}${r.error ? ' / ' + r.error : ''}`)
+        /**
+         * ⭐ 失败时通知要说**真原因**，不能只说"没产出报告"。
+         *    2026-10-22 实测：429 限流时弹的是"（这一轮没有产出报告，退出码 1）"，
+         *    使用者完全不知道是被限流了，以为插件坏了。
+         */
+        let title, body
+        if (lastFailure) {
+          title = `刷抖音 · ${lastFailure.title}`
+          body = String(lastFailure.fix || lastFailure.detail || '').slice(0, 200)
+        } else {
+          const s = toastSummary(text || fallback, { day: dayKey() })
+          title = s.title
+          body = s.body
+        }
+        const r = toastSend({ title, body })
+        /**
+         * ⭐ 把**通知标题和正文**也写进日志。
+         *    2026-10-22 实测：只记"Toast 已弹出"，出问题时根本不知道弹的是什么内容，
+         *    没法判断"是通知内容错了"还是"用户没看见"。
+         */
+        log(`通知：Toast ${r.sent ? '已弹出' : '失败'}｜标题=${title}｜正文=${String(body).slice(0, 120)}${r.error ? ' / ' + r.error : ''}`)
       }
       if (!wantHook) return
       const url = String(cfg.webhookUrl || '').trim()
@@ -1838,8 +1983,32 @@ export function apply(ctx, config) {
   const runDuty = (why = 'window') => {
     try {
       if (dutyRunning || roundBusyInState()) {
-        log(`刷抖音已在跑，忽略这次触发（${why}）`)
-        return { started: false, why, busy: true, error: '上一轮还没结束，别重复点' }
+        /**
+         * ⭐ 被挡住时要说**具体是怎样**，不能只说"上一轮还没结束"：
+         *    - 已经跑了多久
+         *    - 什么时候会自己解除（12 分钟阈值）
+         *    - 如果确实卡死了，怎么手动解除
+         */
+        let detail = ''
+        try {
+          const st = readJson(dutyStateFile, {})
+          const at = Number(st.dutyRunningAt || 0)
+          if (at) {
+            const mins = Math.round((Date.now() - at) / 60000)
+            const leftMs = Math.max(0, ROUND_STALE_MS - (Date.now() - at))
+            detail = `上一轮从 ${new Date(at).toLocaleString('zh-CN')} 开始，已经 ${mins} 分钟；`
+              + (leftMs > 0
+                ? `${Math.ceil(leftMs / 60000)} 分钟后会自动解除。`
+                : '马上会自动解除，再点一次就行。')
+              + '如果它其实早就不跑了（比如那轮被限流打断了），等它自动解除或重启 dsh。'
+          }
+        } catch { /* 拿不到就只给通用说法 */ }
+        log(`刷抖音已在跑，忽略这次触发（${why}）：${detail || '上一轮未结束'}`)
+        return {
+          started: false, why, busy: true,
+          error: '上一轮还在跑，这次没启动',
+          hint: detail || '上一轮还没结束，等它跑完再点',
+        }
       }
       refreshCfg()
       syncCollectorCfg()
@@ -2173,7 +2342,25 @@ export function apply(ctx, config) {
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
-    if (req.method === 'POST' && path === '/api/douyin-duty/run') return sendJson(res, 200, { ok: true, ...runDuty('manual') })
+    /**
+     * ⭐ 「现在跑一轮」
+     * 🔴 2026-10-22 修：以前不管有没有真跑起来都返回 `ok: true`。
+     *    runDuty 可能因为「配额满了 / 上一轮还在跑 / 别的」直接拒绝，
+     *    面板却显示"已经开跑了" —— 使用者等半天没消息，以为点了没反应。
+     *    现在：**只有真的起来了才 ok:true**，否则把原因原样带回去。
+     */
+    if (req.method === 'POST' && path === '/api/douyin-duty/run') {
+      const r = runDuty('manual')
+      const started = r && r.started === true
+      return sendJson(res, 200, {
+        ...r,
+        ok: started,
+        // 给面板一句人话
+        message: started
+          ? (r.note || '已经开跑了，跑完会弹通知')
+          : (r.error || r.hint || '这次没跑起来'),
+      })
+    }
 
     /* ── 检查更新 ── */
     if (req.method === 'GET' && path === '/api/douyin-duty/update') {
@@ -2317,6 +2504,24 @@ export function apply(ctx, config) {
         log(`chat -> ${j.to || to}: 已发送（${text.length} 字）`)
       }
       return sendJson(res, 200, j)
+    }
+
+    /* ── 最近一轮发生了什么（面板「看日志」用） ── */
+    if (req.method === 'GET' && path === '/api/douyin-duty/log') {
+      const tail = (() => { try { return readFileSync(logFile, 'utf8').slice(-8000) } catch { return '' } })()
+      const st = readJson(dutyStateFile, {})
+      return sendJson(res, 200, {
+        ok: true,
+        logFile,
+        tail,
+        lastRunAt: st.lastRunAt || null,
+        lastWhy: st.lastWhy || null,
+        roundActive: Boolean(st.roundActive),
+        // ⭐ 现在能不能跑（把"为什么不能"提前说清楚，别等点了才说）
+        canRun: !dutyRunning && !roundBusyInState() && countPickedToday() < Number(cfg.perDay || 0),
+        pickedToday: countPickedToday(),
+        perDay: Number(cfg.perDay || 0),
+      })
     }
 
     /* ── 记忆：看有多少 / 清掉 ── */
