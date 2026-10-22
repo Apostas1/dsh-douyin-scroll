@@ -332,6 +332,32 @@ try {
   } else bad('面板没有新手流程入口 —— 用户还得自己去翻文档')
   if (existsSync(join(here, 'GUIDE.md'))) ok('GUIDE.md 在（新手流程正文）')
   else bad('缺 GUIDE.md')
+
+  /* ── ⑩ 登录后要显示"登录的哪个号" ── */
+  if (idx.includes('/api/douyin-duty/account')) ok('后端有 /account（当前登录的账号）')
+  else bad('后端缺 /account —— 面板没法显示登录的是哪个号')
+  if (/data-dy-account/.test(cl) && /acc\.nick/.test(cl)) ok('面板显示账号昵称')
+  else bad('面板没显示账号昵称 —— 用户不知道在给谁刷')
+  if (/account\.json/.test(idx)) ok('扫码成功后会记下账号（account.json）')
+  else bad('扫码成功后没记账号 —— 面板只能显示"已登录"三个字')
+
+  /* ── ⑪ 私信对象：既要点选，也要能手填 ── */
+  if (/自己写/.test(cl) && /manualDm/.test(cl)) ok('私信对象可以手填（不只是从会话里选）')
+  else bad('私信对象只能点选，不能手填')
+
+  /* ── ⑫ 这些基本功能不许再丢 ── */
+  const mustHave = [
+    ['每天挑几条', /每天挑几条/],
+    ['日报详细程度', /日报写多细/],
+    ['通知方式', /通知：/],
+    ['人设编辑', /我的人设/],
+  ]
+  for (const [name, re] of mustHave) {
+    if (re.test(cl)) ok(`面板有「${name}」`)
+    else bad(`面板缺「${name}」—— 功能又少了一块`)
+  }
+  if (idx.includes('/api/douyin-duty/persona')) ok('后端有 /persona（人设读写）')
+  else bad('后端缺 /persona')
 } catch (e) { bad(`新手流程检查失败：${e.message}`) }
 
 /* ── 4e. 采集门槛 / 跨天记账 ── */

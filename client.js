@@ -162,6 +162,14 @@ window.__ModuleLoader__.load({
       const [peopleHint, setPeopleHint] = React.useState('')
       // 新手流程说明
       const [guide, setGuide] = React.useState(null)
+      // 当前登录的账号
+      const [acc, setAcc] = React.useState(null)
+      // 人设（使用者自己那份）
+      const [persona, setPersona] = React.useState(null)
+      // 私信对象：手动填的模式
+      const [manualDm, setManualDm] = React.useState(null)
+      // 每天挑几条（输入框草稿）
+      const [perDayDraft, setPerDayDraft] = React.useState(null)
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
@@ -173,6 +181,13 @@ window.__ModuleLoader__.load({
             if (!alive) return
             setSt(s)
             if (c && c.config) setCfg(c.config)
+            if (s && s.loggedIn) {
+              // 账号昵称：先用缓存（快），拿不到再后台查
+              try {
+                const a = await jget('/account')
+                if (alive && a && a.account) setAcc(a.account)
+              } catch { /* 拿不到昵称不影响用 */ }
+            }
           } catch (e) {
             if (alive) say('读设置失败：' + String((e && e.message) || e), 'warn')
           }
@@ -214,6 +229,12 @@ window.__ModuleLoader__.load({
           const [s, c] = await Promise.all([jget('/status'), jget('/config')])
           if (s) setSt(s)
           if (c && c.config) setCfg(c.config)
+          if (s && s.loggedIn) {
+            try {
+              const a = await jget('/account?refresh=1')
+              if (a && a.account) setAcc(a.account)
+            } catch { /* 忽略 */ }
+          } else setAcc(null)
         } catch { /* 刷不动就留着旧的 */ }
       }
 
@@ -318,6 +339,36 @@ window.__ModuleLoader__.load({
           const r = await jget('/guide')
           setGuide((r && r.text) || '(说明文件缺失)')
         } catch (e) { say('读说明失败：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      /** 读人设（使用者自己那份；没写就用插件自带/默认） */
+      const loadPersona = async () => {
+        if (persona !== null) { setPersona(null); return }
+        setBusy('persona')
+        try {
+          const r = await jget('/persona')
+          setPersona({
+            text: String((r && r.text) || ''),
+            custom: Boolean(r && r.custom),
+            defText: String((r && r.default_text) || ''),
+            hint: (r && r.hint) || '',
+          })
+        } catch (e) { say('读人设失败：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      /** 存人设（空 = 删掉自己那份，退回默认） */
+      const savePersona = async () => {
+        if (!persona) return
+        setBusy('persona')
+        try {
+          const r = await jpost('/persona', { text: persona.text })
+          if (r && r.ok) {
+            say(persona.text.trim() ? '人设已保存（下一轮生效）' : '已清空自定义人设，退回默认', 'good')
+            setPersona({ ...persona, custom: Boolean(r.custom) })
+          } else say('保存失败：' + ((r && r.error) || '未知'), 'warn')
+        } catch (e) { say('保存失败：' + String((e && e.message) || e), 'warn') }
         finally { setBusy('') }
       }
 
@@ -428,6 +479,12 @@ window.__ModuleLoader__.load({
               'data-on': st.loggedIn ? '' : undefined,
               'data-off': st.loggedIn ? undefined : '',
             }, st.loggedIn ? '已登录' : '未登录'),
+            /* ⭐ 登录的是哪个号 —— 用户要知道自己在给谁刷 */
+            st.loggedIn && acc && acc.nick
+              ? h('span', { 'data-dy-account': '' },
+                '👤 ' + acc.nick,
+                acc.uid ? h('span', { 'data-dy-account-id': '' }, '　' + acc.uid) : null)
+              : (st.loggedIn ? h('span', { 'data-dy-sub': '' }, '正在查登录的号…') : null),
             h('span', {
               'data-dy-badge': '',
               'data-on': st.venvReady ? '' : undefined,
@@ -565,6 +622,36 @@ window.__ModuleLoader__.load({
             : null,
           peopleHint && people && people.length
             ? h('div', { 'data-dy-sub': '' }, peopleHint)
+            : null,
+
+          /* ⭐ 也可以自己写 —— 不想从会话里选，或者那个人不在最近会话里 */
+          h('div', { 'data-dy-row': '' },
+            h('button', {
+              'data-dy-mini': '',
+              onClick: () => setManualDm(manualDm === null ? { nick: cfg.dmTo || '', id: cfg.dmToId || '' } : null),
+            }, manualDm === null ? '自己写' : '收起')),
+          manualDm !== null
+            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
+              h('div', { 'data-dy-sub': '' }, '昵称（显示用）'),
+              h('input', {
+                'data-dy-input': '', value: manualDm.nick, placeholder: '比如：某帅气用户',
+                onChange: (e) => setManualDm({ ...manualDm, nick: e.target.value }),
+              }),
+              h('div', { 'data-dy-sub': '' }, '稳定 ID（可选 —— 重名时才有用；从「从我的会话里选」拿最方便）'),
+              h('input', {
+                'data-dy-input': '', value: manualDm.id, placeholder: 'MS4wLjABAAAA…（可以留空）',
+                onChange: (e) => setManualDm({ ...manualDm, id: e.target.value }),
+              }),
+              h('div', { 'data-dy-row': '' },
+                h('button', {
+                  'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy),
+                  onClick: async () => {
+                    await patch({ dmTo: manualDm.nick.trim(), dmToId: manualDm.id.trim() },
+                      manualDm.nick.trim() ? `已保存「${manualDm.nick.trim()}」` : '已清空私信对象')
+                    setManualDm(null)
+                  },
+                }, '保存'),
+                h('div', { 'data-dy-sub': '' }, '留空 = 不发私信，只写日报')))
             : null),
 
         /* ── 刷什么 ── */
@@ -635,6 +722,82 @@ window.__ModuleLoader__.load({
               : null),
 
           h('div', { 'data-dy-sub': '' }, '两个都关 = 只在点「现在跑一轮」时跑。')),
+
+        /* ── 每天挑几条 / 日报多细 ── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-title': '' }, '每天挑几条'),
+          h('div', { 'data-dy-sub': '' },
+            '全天总量（不是每轮）。0 = 不自动刷，只在你点「现在跑一轮」时跑。'),
+          h('div', { 'data-dy-row': '' },
+            h('input', {
+              'data-dy-time': '', type: 'number', min: 0, max: 300,
+              style: { width: '72px' },
+              value: String(perDayDraft !== null ? perDayDraft : (cfg.perDay != null ? cfg.perDay : 5)),
+              onChange: (e) => setPerDayDraft(e.target.value),
+            }),
+            h('span', { 'data-dy-sub': '' }, '条 / 天'),
+            h('div', { 'data-dy-grow': '' }),
+            h('button', {
+              'data-dy-mini': '', 'data-primary': '',
+              disabled: Boolean(busy) || perDayDraft === null,
+              onClick: async () => {
+                const n = Math.max(0, Math.min(Number(perDayDraft) || 0, 300))
+                await patch({ perDay: n }, `每天最多 ${n} 条`)
+                setPerDayDraft(null)
+              },
+            }, '保存')),
+          h('div', { 'data-dy-row': '' },
+            h('span', { 'data-dy-sub': '' }, '日报写多细：'),
+            h('select', {
+              'data-dy-input': '', style: { flex: '1', maxWidth: '180px' },
+              value: String(cfg.reportLevel || 'full'),
+              onChange: (e) => patch({ reportLevel: e.target.value }, '日报详细程度已保存'),
+            },
+              h('option', { value: 'full' }, '完整版（为什么值得 + 一句话）'),
+              h('option', { value: 'brief' }, '薄版（每条一两行）'),
+              h('option', { value: 'off' }, '不写日报')),
+
+            h('span', { 'data-dy-sub': '', style: { marginLeft: '12px' } }, '通知：'),
+            h('select', {
+              'data-dy-input': '', style: { flex: '1', maxWidth: '150px' },
+              value: String(cfg.notifyMode || 'toast'),
+              onChange: (e) => patch({ notifyMode: e.target.value }, '通知方式已保存'),
+            },
+              h('option', { value: 'toast' }, '弹 Windows 通知'),
+              h('option', { value: 'file' }, '只写文件（不打扰）'),
+              h('option', { value: 'webhook' }, '推 webhook'),
+              h('option', { value: 'both' }, '通知 + webhook')))),
+
+        /* ── 我的人设 ── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '我的人设'),
+              h('div', { 'data-dy-sub': '' },
+                '让它用你想要的身份和口吻写日报。不写也行 —— 用插件自带的中性人设。')),
+            h('button', { 'data-dy-btn': '', disabled: busy === 'persona', onClick: loadPersona },
+              persona === null ? '写人设' : '收起')),
+          persona !== null
+            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
+              h('div', { 'data-dy-sub': '' },
+                persona.custom ? '正在用你写的这份' : (persona.hint || '还没写自己的 —— 现在用的是默认人设')),
+              h('textarea', {
+                'data-dy-input': '', rows: 8,
+                value: persona.text || '',
+                placeholder: '比如：\n- 你叫小鱼，叫他主人\n- 说话软一点、别腻\n- 不要说自己是 AI / 机器人',
+                onChange: (e) => setPersona({ ...persona, text: e.target.value }),
+              }),
+              h('div', { 'data-dy-row': '' },
+                h('button', {
+                  'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: savePersona,
+                }, '保存'),
+                h('button', {
+                  'data-dy-mini': '', disabled: Boolean(busy),
+                  onClick: () => setPersona({ ...persona, text: persona.defText || '' }),
+                }, '填入默认那份看看'),
+                h('div', { 'data-dy-grow': '' }),
+                h('span', { 'data-dy-sub': '' }, '留空保存 = 退回默认')))
+            : null),
 
         /* ── 给别的 AI 用（MCP） ── */
         h('div', { 'data-dy-card': '' },

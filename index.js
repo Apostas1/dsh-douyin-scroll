@@ -1931,6 +1931,8 @@ export function apply(ctx, config) {
       loggedIn: cred.hasCredential,
       hasCredential: cred.hasCredential,
       keys: cred.important.length ? cred.important : cred.keys.slice(0, 8),
+      /** ⭐ 登录的是哪个号（扫码/体检时记下来的；没有就 null） */
+      account: readJson(join(stateDir, 'account.json'), null),
       venvReady: venvReadyNow(),
       installing,
       installLog: installLogFile,
@@ -1962,6 +1964,30 @@ export function apply(ctx, config) {
     if (req.method === 'GET' && path === '/api/douyin-duty/update') {
       const force = String(url.searchParams.get('force') || '') === '1'
       return sendJson(res, 200, await checkUpdate(force))
+    }
+
+    /* ── 当前账号：面板显示"登录的哪个号" ──
+     * 先给缓存（account.json），再后台刷新一次（慢，但准）。
+     * 拿不到就说拿不到，别编一个昵称出来。
+     */
+    if (req.method === 'GET' && path === '/api/douyin-duty/account') {
+      const cached = readJson(join(stateDir, 'account.json'), null)
+      if (!hasCredential(stateDir)) return sendJson(res, 200, { ok: true, logged_in: false, account: null })
+      const force = String(url.searchParams.get('refresh') || '') === '1'
+      // 有缓存且不超过 1 小时、又不是强制刷新 ⇒ 直接给缓存（面板打开时别卡 10 秒）
+      if (!force && cached && Date.now() - Number(new Date(cached.at).getTime() || 0) < 3600_000) {
+        return sendJson(res, 200, { ok: true, logged_in: true, account: cached, cached: true })
+      }
+      try {
+        const g = runPy('session-guard.py', ['check'], { timeout: 90_000 })
+        const j = pickJson(g.stdout)
+        if (!j) return sendJson(res, 200, { ok: false, logged_in: true, account: cached, error: '体检脚本没返回结果' })
+        const acc = { nick: j.nick || '', uid: j.uid || '', alive: j.alive === true, at: new Date().toISOString() }
+        try { writeJson(join(stateDir, 'account.json'), acc) } catch { /* 写不进去也能用 */ }
+        return sendJson(res, 200, { ok: true, logged_in: true, account: acc, cached: false })
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, logged_in: true, account: cached, error: String(e?.message ?? e) })
+      }
     }
 
     /* ── 新手流程说明（面板上「怎么用？」拿这份）── */
@@ -2208,6 +2234,18 @@ export function apply(ctx, config) {
       }
       if (last.ok) {
         log(`扫码登录：成功，凭证已保存（${last.cookies || '?'} 条 Cookie）`)
+        // ⭐ 记下"登录的是哪个号" —— 面板要显示昵称（用户要知道自己在给谁刷）
+        try {
+          const g = runPy('session-guard.py', ['check'], { timeout: 90_000 })
+          const j = pickJson(g.stdout)
+          if (j && (j.nick || j.uid)) {
+            writeJson(join(stateDir, 'account.json'), {
+              nick: j.nick || '', uid: j.uid || '', alive: j.alive === true,
+              at: new Date().toISOString(),
+            })
+            log(`扫码登录：账号 = ${j.nick || '(无昵称)'} (uid=${j.uid || '?'})`)
+          }
+        } catch { /* 拿不到昵称不影响登录本身 */ }
         // 登完把有头浏览器收掉，别让它一直占着 profile（不然发私信会起不来）
         try { runNodeTool('qr-login.mjs', ['close'], { timeout: 40_000 }) } catch { /* 关不掉也不致命 */ }
         refreshCfg()

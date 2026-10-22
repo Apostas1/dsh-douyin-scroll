@@ -85,6 +85,13 @@ const MOCK = {
   }),
   '/api/douyin-duty/report': () => ({ ok: true, text: '# 报告\n### 7401234567890123401' }),
   '/api/douyin-duty/guide': () => ({ ok: true, text: '# 新手流程\n\n① 装环境\n② 扫码登录\n③ 用' }),
+  '/api/douyin-duty/account': () => ({
+    ok: true, logged_in: state.loggedIn,
+    account: state.loggedIn ? { nick: '贪吃的可爱大肥鱼', uid: '4376484329564484', alive: true, at: new Date().toISOString() } : null,
+  }),
+  '/api/douyin-duty/persona': () => ({
+    ok: true, custom: false, text: '', default_text: '# 默认人设\n\n中性、不扮演任何人。', hint: '还没写自己的 —— 现在用的是默认人设',
+  }),
   // 扫码登录：默认成功给出 qr_url
   '/api/douyin-duty/login/qr': () => ({ ok: true, qr_url: '/api/douyin-duty/login/qr.png?v=1', port: 9374 }),
   // 登录成功会真的把登录态翻过来 —— 面板随后 refresh() 必须看到 true
@@ -397,6 +404,53 @@ const rGuide = await clickAndRender('怎么用？')
 if (rGuide) {
   if (/新手流程/.test(rGuide.text) && /扫码登录/.test(rGuide.text)) console.log('  ✅ 展开了新手流程说明')
   else { console.log('  ❌ 没展开说明'); fail++ }
+}
+
+/* ── 登录后要显示账号 ── */
+console.log('\n【登录后显示账号】')
+if (/贪吃的可爱大肥鱼/.test(allText)) console.log('  ✅ 显示了登录的账号昵称')
+else { console.log('  ❌ 没显示账号昵称 —— 用户不知道在给谁刷'); fail++ }
+if (/4376484329564484/.test(allText)) console.log('  ✅ 显示了账号 ID')
+else { console.log('  ❌ 没显示账号 ID'); fail++ }
+
+/* ── 私信对象：也要能自己写 ── */
+console.log('\n【私信对象：自己写】')
+const rManual = await clickAndRender('自己写')
+if (rManual) {
+  const nickInput = rManual.flat.find((n) => n.tag === 'input' && n.props && String(n.props.placeholder || '').includes('某帅气用户'))
+  const idInput = rManual.flat.find((n) => n.tag === 'input' && n.props && String(n.props.placeholder || '').includes('MS4wLjABAAAA'))
+  if (nickInput) console.log('  ✅ 有昵称输入框')
+  else { console.log('  ❌ 没有昵称输入框'); fail++ }
+  if (idInput) console.log('  ✅ 有稳定 ID 输入框（可留空）')
+  else { console.log('  ❌ 没有稳定 ID 输入框'); fail++ }
+}
+
+/* ── 补回来的功能：每天几条 / 日报多细 / 通知方式 ── */
+console.log('\n【每天挑几条 / 日报 / 通知】')
+const r10 = await renderNow()
+const flatAll = walk(r10)
+const txtAll = flatAll.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
+for (const [label, re] of [
+  ['每天挑几条', /每天挑几条/],
+  ['日报详细程度', /日报写多细/],
+  ['通知方式', /通知：/],
+]) {
+  if (re.test(txtAll)) console.log(`  ✅ ${label}`)
+  else { console.log(`  ❌ 缺「${label}」`); fail++ }
+}
+const selects = flatAll.filter((n) => n.tag === 'select')
+if (selects.length >= 2) console.log(`  ✅ ${selects.length} 个下拉框`)
+else { console.log(`  ❌ 下拉框只有 ${selects.length} 个`); fail++ }
+
+/* ── 人设：能写、能存 ── */
+console.log('\n【我的人设】')
+const rPersona = await clickAndRender('写人设')
+if (rPersona) {
+  const ta = rPersona.flat.find((n) => n.tag === 'textarea')
+  if (ta) console.log('  ✅ 人设文本框出来了')
+  else { console.log('  ❌ 人设文本框没出来'); fail++ }
+  if (/默认人设|还没写自己的/.test(rPersona.text)) console.log('  ✅ 说明了当前用的是哪份')
+  else { console.log('  ❌ 没说当前用哪份'); fail++ }
 }
 
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')
