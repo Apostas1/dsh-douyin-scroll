@@ -87,7 +87,7 @@ const MOCK = {
   '/api/douyin-duty/guide': () => ({ ok: true, text: '# 新手流程\n\n① 装环境\n② 扫码登录\n③ 用' }),
   '/api/douyin-duty/account': () => ({
     ok: true, logged_in: state.loggedIn,
-    account: state.loggedIn ? { nick: '贪吃的可爱大肥鱼', uid: '4376484329564484', alive: true, at: new Date().toISOString() } : null,
+    account: state.loggedIn ? { nick: '测试账号昵称', uid: '9999000011112222', alive: true, at: new Date().toISOString() } : null,
   }),
   '/api/douyin-duty/persona': () => ({
     ok: true, custom: false, text: '', default_text: '# 默认人设\n\n中性、不扮演任何人。', hint: '还没写自己的 —— 现在用的是默认人设',
@@ -100,31 +100,31 @@ const MOCK = {
     at_n: 2,
     dm_n: 1,
     at: [
-      { nickname: '某帅气用户', content: '@贪吃的可爱大肥鱼 大肥鱼出来下', before: '没回过',
+      { nickname: '测试好友', content: '@测试账号昵称 出来一下', before: '没回过',
         aweme_id: '7693806860863802662', comment_id: '7699090731688952613',
         video_url: 'https://www.douyin.com/video/7693806860863802662',
         my_comments_here: [{ at: '2026-10-22', text: '我之前在这说过一句', mention: '' }] },
-      { nickname: '另一个朋友', content: '@贪吃的可爱大肥鱼 出来见人', before: '回过',
+      { nickname: '另一个朋友', content: '@测试账号昵称 出来见人', before: '回过',
         aweme_id: '7694192415963368730', comment_id: '7699009624113152825',
         video_url: 'https://www.douyin.com/video/7694192415963368730', my_comments_here: [] },
     ],
     dm: [
-      { nick: '某帅气用户', sec_uid: 'MS4wLjABAAAA_test1', preview: '我也爱你', duplicate: false,
+      { nick: '测试好友', sec_uid: 'MS4wLjABAAAA_test1', preview: '我也爱你', duplicate: false,
         remembered: 11, their_last: { text: '我也爱你', at: '2026-10-22' }, last_from: 'them', needs_reply: true },
     ],
     errors: [],
   }),
   '/api/douyin-duty/chat/read': () => ({
-    ok: true, to: '某帅气用户', to_sec_uid: 'MS4wLjABAAAA_test1',
+    ok: true, to: '测试好友', to_sec_uid: 'MS4wLjABAAAA_test1',
     count: 3, mine: 2, them: 1, unknown: 0,
     messages: [
       { from: 'me', text: '主人，爱你。', awe: 700 },
       { from: 'them', text: '我也爱你', awe: 700 },
       { from: 'me', text: '这条想让你看看', awe: 800 },
     ],
-    context: { who: { nick: '某帅气用户' }, facts: ['喜欢猫', '在杭州'], recent: [], total_remembered: 11 },
+    context: { who: { nick: '测试好友' }, facts: ['喜欢猫', '在杭州'], recent: [], total_remembered: 11 },
   }),
-  '/api/douyin-duty/chat/send': () => ({ ok: true, sent: true, to: '某帅气用户', len: 5 }),
+  '/api/douyin-duty/chat/send': () => ({ ok: true, sent: true, to: '测试好友', len: 5 }),
   // 扫码登录：默认成功给出 qr_url
   '/api/douyin-duty/login/qr': () => ({ ok: true, qr_url: '/api/douyin-duty/login/qr.png?v=1', port: 9374 }),
   // 登录成功会真的把登录态翻过来 —— 面板随后 refresh() 必须看到 true
@@ -134,7 +134,7 @@ const MOCK = {
   '/api/douyin-duty/dm/people': () => ({
     ok: true, count: 2,
     people: [
-      { nick: '某帅气用户', sec_uid: 'MS4wLjABAAAA_test1', preview: '30分钟内在线', has_id: true, duplicate: false },
+      { nick: '测试好友', sec_uid: 'MS4wLjABAAAA_test1', preview: '30分钟内在线', has_id: true, duplicate: false },
       { nick: '另一个朋友', sec_uid: 'MS4wLjABAAAA_test2', preview: '好的', has_id: true, duplicate: true },
     ],
     no_id_count: 0,
@@ -419,7 +419,7 @@ if (rDoc) {
 console.log('\n【私信发给谁】')
 const rPeople = await clickAndRender('从我的会话里选')
 if (rPeople) {
-  if (/某帅气用户/.test(rPeople.text)) console.log('  ✅ 列出会话里的人')
+  if (/测试好友/.test(rPeople.text)) console.log('  ✅ 列出会话里的人')
   else { console.log('  ❌ 没列出会话里的人'); fail++ }
   if (/重名/.test(rPeople.text)) console.log('  ✅ 同名的人标了「重名」')
   else { console.log('  ❌ 同名没标出来'); fail++ }
@@ -447,9 +447,9 @@ if (rGuide) {
 
 /* ── 登录后要显示账号 ── */
 console.log('\n【登录后显示账号】')
-if (/贪吃的可爱大肥鱼/.test(allText)) console.log('  ✅ 显示了登录的账号昵称')
+if (/测试账号昵称/.test(allText)) console.log('  ✅ 显示了登录的账号昵称')
 else { console.log('  ❌ 没显示账号昵称 —— 用户不知道在给谁刷'); fail++ }
-if (/4376484329564484/.test(allText)) { console.log('  ❌ 还显示了账号 ID —— 用户说只要昵称就行'); fail++ }
+if (/9999000011112222/.test(allText)) { console.log('  ❌ 还显示了账号 ID —— 用户说只要昵称就行'); fail++ }
 else console.log('  ✅ 只显示昵称，不显示 ID')
 
 /* ── 私信对象：也要能自己写 ── */
@@ -509,7 +509,7 @@ const rInbox = await clickAndRender('看看谁找我')
 if (rInbox) {
   if (/评论区 @ 我：2 条/.test(rInbox.text)) console.log('  ✅ 显示评论区 @ 的数量')
   else { console.log('  ❌ 没显示 @ 数量'); fail++ }
-  if (/大肥鱼出来下/.test(rInbox.text)) console.log('  ✅ 列出 @ 我的内容')
+  if (/出来一下/.test(rInbox.text)) console.log('  ✅ 列出 @ 我的内容')
   else { console.log('  ❌ 没列出 @ 内容'); fail++ }
   if (/我之前在这说过一句/.test(rInbox.text)) console.log('  ✅ 带上了"我在这条视频下说过什么"（记忆）')
   else { console.log('  ❌ 没带"我说过什么"'); fail++ }
@@ -549,7 +549,7 @@ if (chatPersonBtn) {
   else { console.log('  ❌ 点了人但聊天界面没出来'); fail++ }
 } else { console.log('  ❌ 找不到可点的私信人'); fail++ }
 if (rChat) {
-  if (/跟 某帅气用户 聊/.test(rChat.text)) console.log('  ✅ 打开了聊天界面')
+  if (/跟 测试好友 聊/.test(rChat.text)) console.log('  ✅ 打开了聊天界面')
   else { console.log('  ❌ 没打开聊天界面'); fail++ }
   if (/记得关于他的：喜欢猫、在杭州/.test(rChat.text)) console.log('  ✅ 显示了记忆里的长期事实')
   else { console.log('  ❌ 没显示记忆事实'); fail++ }
@@ -569,3 +569,4 @@ if (rChat) {
 
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')
 process.exitCode = fail ? 1 : 0
+

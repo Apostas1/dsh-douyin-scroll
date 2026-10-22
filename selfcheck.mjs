@@ -136,9 +136,20 @@ try {
     ok('默认人设 prompts/persona.default.md 带身份牌 persona: default')
   } else bad('默认人设缺身份牌 —— 发布包必须自带一份中性人设，否则普通用户装了什么都没有')
   // 🔴 发布边界：作者自己那份人设不许进仓库
-  const gi = readFileSync(join(here, '.gitignore'), 'utf8')
-  if (/^prompts\/persona\.md$/m.test(gi)) ok('.gitignore 排除了作者自己的 prompts/persona.md（不随包发布）')
-  else bad('.gitignore 没排除 prompts/persona.md —— 作者的人设会被推到公开仓库')
+  //    ⚠️ 2026-10-22：这一项只在**开发者仓库**里成立（靠 .gitignore 拦）。
+  //    从 npm 装下来的包**没有 .gitignore** —— 那时应该检查的是
+  //    "包里到底有没有那份作者人设"，不能因为缺 .gitignore 就判失败。
+  const giFile = join(here, '.gitignore')
+  if (existsSync(giFile)) {
+    const gi = readFileSync(giFile, 'utf8')
+    if (/^prompts\/persona\.md$/m.test(gi)) ok('.gitignore 排除了作者自己的 prompts/persona.md（不随包发布）')
+    else bad('.gitignore 没排除 prompts/persona.md —— 作者的人设会被推到公开仓库')
+  } else {
+    // 发布包形态：直接看包里有没有"作者那份"（有就是事故）
+    const authorPersona = join(here, 'prompts', 'persona.md')
+    if (!existsSync(authorPersona)) ok('发布包里没有作者人设 prompts/persona.md（只有 persona.default.md）')
+    else bad('发布包里带了作者人设 prompts/persona.md —— 必须删掉')
+  }
 } catch (e) { bad(`人设分家检查失败：${e.message}`) }
 
 /* ── 4f. 自定义时段 ──

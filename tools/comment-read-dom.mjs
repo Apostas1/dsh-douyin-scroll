@@ -10,16 +10,33 @@
  *
  * 用法:
  *   node tools/comment-read-dom.mjs --aweme <id>                  # 读前 N 条评论
- *   node tools/comment-read-dom.mjs --aweme <id> --mine           # 只找「贪吃的可爱大肥鱼」发的
+ *   node tools/comment-read-dom.mjs --aweme <id> --mine           # 只找「我自己」发的
  *   node tools/comment-read-dom.mjs --aweme <id> --mine --scroll 6 # 往下滚 6 屏再找
  *   node tools/comment-read-dom.mjs --aweme <id> --grep 关键词
  *
  * 输出：一行 JSON {ok, aweme_id, total, mine_n, items:[{nick, text, mine}]}
  * ============================================================================
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { openPage, sleep } from '../lib/chrome.mjs'
 
-const ME = process.env.DOUYIN_ME_NICK || '贪吃的可爱大肥鱼'
+/**
+ * ⭐ "我"的抖音昵称 —— **不能写死**（写死的是作者自己的号，别人装了永远匹配不上）。
+ *    顺序：环境变量 DOUYIN_ME_NICK → 插件家目录 account.json 里的 nick → 空
+ *    account.json 是扫码登录/体检时自动记下来的（见 index.js /account）。
+ *    拿不到就返回空串 ⇒ --mine 只按"记忆里我发过的正文"匹配，不瞎猜昵称。
+ */
+const ME = (() => {
+  const fromEnv = String(process.env.DOUYIN_ME_NICK || '').trim()
+  if (fromEnv) return fromEnv
+  try {
+    const home = process.env.DOUYIN_HOME || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'douyin-duty')
+    const j = JSON.parse(readFileSync(join(home, 'account.json'), 'utf8'))
+    return String(j.nick || '').trim()
+  } catch { return '' }
+})()
 
 const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode = o.ok ? 0 : 1 }
 
@@ -102,7 +119,9 @@ async function main() {
     let items = []
     try { items = JSON.parse(raw) || [] } catch { items = [] }
     items = items.filter((o) => o && o.nick && o.text)
-    items.forEach((o) => { o.mine = o.nick === ME })
+    // ⚠️ ME 可能是空串（没登录 / 拿不到 account.json）⇒ 不能拿 '' 去比对，否则全是 false
+    //    这时 mine 一律 false，并在输出里说明"不知道自己是谁"
+    items.forEach((o) => { o.mine = Boolean(ME) && o.nick === ME })
 
     let sel = items
     if (MINE) sel = items.filter((o) => o.mine)
@@ -112,6 +131,7 @@ async function main() {
       ok: true,
       aweme_id: AWEME,
       chrome: chromed,
+      me_nick: ME || '(不知道 —— 先扫码登录，或设 DOUYIN_ME_NICK)',
       total_scraped: items.length,
       mine_n: items.filter((o) => o.mine).length,
       matched_n: sel.length,
