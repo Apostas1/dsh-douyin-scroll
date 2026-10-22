@@ -145,6 +145,7 @@ dsh plugin --profile web add link:<本目录绝对路径>
 | 公开仓库被人考古 | 日报里可能写着你的账号和你看过什么。建议**先私有**，真要开源就把 `out/` 整个排除并且别把它当示例贴进 README |
 | `files` 整目录会带上 `__pycache__` | `package.json` 的 `files` 写 `tools` ⇒ npm 把 `tools/__pycache__/*.pyc` 也打进包（根 `.npmignore` 拦不住被 files 点名的目录）。**解法：`tools/.npmignore` 里写 `__pycache__/`** —— 2026-10-22 实测 59→51 个文件、-81KB |
 | headless overlay 挂 MCP 插件要用 `- insert:` | Loader 方言：带 `id` 的条目是「覆盖已有行」，目标不存在**静默跳过**；新增插件必须写 `- insert: [...]`（见 `index.js` 的 `ensureOverlay` 注释） |
+| git push 连不上 github.com（`Failed to connect ... port 443`） | 本机直连 github.com 不通、但 127.0.0.1:7897 有代理。给 git 配**仅对 GitHub 走代理** + 换 OpenSSL 后端（schannel 握手会挂）：`git config --global http.https://github.com.proxy http://127.0.0.1:7897` + `git config --global http.sslBackend openssl` —— 2026-10-22 实测生效 |
 
 ---
 
