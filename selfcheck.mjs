@@ -506,11 +506,11 @@ try {
   const idx = readFileSync(join(here, 'index.js'), 'utf8')
   const cl = readFileSync(join(here, 'client.js'), 'utf8')
 
-  // ① 配置项：autoSend 默认必须是 false
-  if (/autoSend:\s*z\.boolean\(\)\.default\(false\)/.test(idx)) ok('autoSend 配置项在，默认 false（后台跑一轮不发东西）')
-  else bad('没有 autoSend 配置项，或默认不是 false —— 后台会偷偷发东西')
-  if (/autoSend:\s*false/.test(idx)) ok('DEFAULTS 里 autoSend = false')
-  else bad('DEFAULTS 缺 autoSend')
+  // ① 配置项：autoSend 默认**必须是 true**（2026-10-22 用户明确要求"默认就是要发消息"）
+  if (/autoSend:\s*z\.boolean\(\)\.default\(true\)/.test(idx)) ok('autoSend 配置项在，默认 true（用户要求：默认就发）')
+  else bad('autoSend 默认不是 true —— 用户要的是"默认就发消息"')
+  if (/autoSend:\s*true/.test(idx)) ok('DEFAULTS 里 autoSend = true')
+  else bad('DEFAULTS 里 autoSend 不是 true')
 
   // ② 提示词必须真的按这个开关分流
   if (/!cfg\.autoSend[\s\S]{0,400}?一个字都不要往抖音发/.test(idx)) {
@@ -519,9 +519,36 @@ try {
   if (/自动发送开着/.test(idx)) ok('autoSend 开着时提示词会放开（并区分评论开关）')
   else bad('autoSend 开着时提示词没变化')
 
-  // ③ 面板必须有开关
-  if (/自动跑的时候，能不能往外发东西/.test(cl) && /autoSend/.test(cl)) ok('面板有「自动发送」开关')
+  // ③ 面板必须有开关，而且要在**显眼位置**（不能埋在长面板底部）
+  if (/自动发送/.test(cl) && /autoSend/.test(cl)) ok('面板有「自动发送」开关')
   else bad('面板没有自动发送开关')
+  {
+    const iAuto = cl.indexOf("'自动发送'")
+    const iStart = cl.indexOf("'开始使用'")
+    if (iAuto > 0 && iStart > iAuto) ok('自动发送卡在「开始使用」之前（不用滚到底才看见）')
+    else bad('自动发送卡位置太靠后 —— 用户找不到')
+  }
+
+  /* ── ④ 「在评论区 @ 你」（用户 2026-10-22 要求，加在自动发送下面） ── */
+  if (/commentAtMe:\s*z\.boolean\(\)\.default\(false\)/.test(idx)) ok('commentAtMe 配置项在，默认 false')
+  else bad('缺 commentAtMe 配置项')
+  if (/commentSelfName:\s*z\.string\(\)/.test(idx)) ok('commentSelfName 配置项在（想 @ 别的号时用）')
+  else bad('缺 commentSelfName')
+  if (/在评论区 @ 你/.test(cl)) ok('面板有「在评论区 @ 你」开关')
+  else bad('面板没有「在评论区 @ 你」')
+  // 位置：自动发送之后、开始使用之前
+  {
+    const iSend = cl.indexOf("'自动发送'")
+    const iAtMe = cl.indexOf("'在评论区 @ 你'")
+    const iStart = cl.indexOf("'开始使用'")
+    if (iSend >= 0 && iAtMe > iSend && iStart > iAtMe) ok('「在评论区 @ 你」位置正确（自动发送下面）')
+    else bad(`「在评论区 @ 你」位置不对（自动发送@${iSend} @你@${iAtMe} 开始使用@${iStart}）`)
+  }
+  // 提示词必须真的让模型去做这件事
+  if (/「在评论区 @ 你」开着 —— 这是这一轮的重点任务/.test(idx)) ok('提示词写了「在评论区 @ 你」的具体做法')
+  else bad('提示词没写怎么在评论区 @ 你 —— 开了也不会发')
+  if (/只在\*\*最值得的那一条\*\*发/.test(idx)) ok('限制只发最值得的 1 条（不会刷屏）')
+  else bad('没限制条数 —— 可能每条都发')
   if (/只管「插件自己在后台跑的轮次」/.test(cl)) ok('面板说清了适用范围（只管后台轮次，不影响当场对话）')
   else bad('面板没说清适用范围 —— 用户会以为当场也不能发')
 

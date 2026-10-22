@@ -74,6 +74,7 @@ const MOCK = {
     config: {
       perDay: 5, maxPerRun: 12, noon: true, night: true, keywords: ['猫', '搞笑'],
       windows: [{ start: '09:00', end: '11:00', label: '上午' }],
+      autoSend: true, commentAtMe: false, commentSelfName: '',
     },
   }),
   '/api/douyin-duty/update': () => ({
@@ -574,12 +575,35 @@ if (rChat) {
 
 /* ── 自动发送开关 ── */
 console.log('\n【自动发送开关】')
-if (/自动跑的时候，能不能往外发东西/.test(allText)) console.log('  ✅ 有自动发送开关卡片')
+if (/自动发送/.test(allText) && /会自动发|只写报告/.test(allText)) console.log('  ✅ 有自动发送开关卡片')
 else { console.log('  ❌ 没有自动发送开关'); fail++ }
-if (/关着（默认）/.test(allText)) console.log('  ✅ 默认显示"关着"')
-else { console.log('  ❌ 没说默认状态'); fail++ }
+// ⭐ 2026-10-22 用户明确要求：默认就是发。所以已登录状态下应该显示"会自动发"
+if (/会自动发/.test(allText)) console.log('  ✅ 默认显示"会自动发"')
+else { console.log('  ❌ 默认状态不对（应该是"会自动发"）'); fail++ }
 if (/只管「插件自己在后台跑的轮次」/.test(allText)) console.log('  ✅ 说清了适用范围（只管后台轮次）')
 else { console.log('  ❌ 没说清适用范围'); fail++ }
+// 卡片位置：应该在「开始使用」之前（别埋在长面板底部）
+{
+  const iAuto = allText.indexOf('自动发送')
+  const iStart = allText.indexOf('开始使用')
+  if (iAuto > 0 && iStart > iAuto) console.log('  ✅ 自动发送卡在「开始使用」之前（不用滚到底才看见）')
+  else { console.log('  ❌ 自动发送卡位置太靠后'); fail++ }
+}
+
+/* ── 「在评论区 @ 你」（加在自动发送下面） ── */
+console.log('\n【在评论区 @ 你】')
+if (/在评论区 @ 你/.test(allText)) console.log('  ✅ 有「在评论区 @ 你」开关')
+else { console.log('  ❌ 没有「在评论区 @ 你」'); fail++ }
+if (/关着：不往评论区发任何东西/.test(allText)) console.log('  ✅ 默认显示"关着"')
+else { console.log('  ❌ 默认状态没说'); fail++ }
+// 位置：必须在「自动发送」之后、「开始使用」之前
+{
+  const iSend = allText.indexOf('自动发送')
+  const iAtMe = allText.indexOf('在评论区 @ 你')
+  const iStart = allText.indexOf('开始使用')
+  if (iSend >= 0 && iAtMe > iSend && iStart > iAtMe) console.log('  ✅ 位置正确（自动发送下面、开始使用之前）')
+  else { console.log(`  ❌ 位置不对（自动发送@${iSend} 评论区@我@${iAtMe} 开始使用@${iStart}）`); fail++ }
+}
 
 /* ── 看日志 ── */
 console.log('\n【看日志】')

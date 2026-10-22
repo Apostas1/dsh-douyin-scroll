@@ -17,6 +17,14 @@ window.__ModuleLoader__.load({
 
     const API = '/api/douyin-duty'
 
+    /**
+     * ⭐ 面板构建号 —— **每次改完 client.js 就 +1**。
+     *    为什么需要它：改 client.js 后如果不重启/刷新，浏览器会一直用缓存的旧 bundle，
+     *    面板看起来"没变化"，很难判断是代码错了还是没加载。
+     *    对一下面板右上角显示的 `v0.2.0·b<N>` 就知道。
+     */
+    const PANEL_BUILD = 13
+
     const asJson = async (res) => {
       if (res.ok) return res.json()
       const why = res.status === 401 ? '（未登录 / 没权限）' : res.status === 403 ? '（被宿主拦了）' : ''
@@ -187,6 +195,8 @@ window.__ModuleLoader__.load({
       const [chatText, setChatText] = React.useState('')
       // 最近一轮的日志
       const [runLog, setRunLog] = React.useState(null)
+      // 「在评论区 @ 你」要 @ 的昵称（输入框草稿）
+      const [atMeDraft, setAtMeDraft] = React.useState(null)
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
@@ -585,7 +595,11 @@ window.__ModuleLoader__.load({
                 '峰谷时段自动刷一轮，把值得看的挑出来写成日报。不催你、不刷屏。')),
             h('button', { 'data-dy-mini': '', disabled: busy === 'guide', onClick: toggleGuide },
               guide === null ? '怎么用？' : '收起说明'),
-            h('span', { 'data-dy-badge': '' }, 'v' + (st.version || '?'))),
+            /* ⭐ 面板构建号 —— 改完面板对一下这个数，就知道浏览器有没有拿到新代码 */
+            h('span', {
+              'data-dy-badge': '', title: '面板构建版本（改完面板对一下这个数）',
+              style: { fontVariantNumeric: 'tabular-nums' },
+            }, 'v' + (st.version || '?') + '·b' + PANEL_BUILD)),
           h('div', { 'data-dy-row': '' },
             h('span', {
               'data-dy-badge': '',
@@ -631,6 +645,68 @@ window.__ModuleLoader__.load({
             : null,
           guide !== null
             ? h('pre', { 'data-dy-pre': '', style: { maxHeight: '380px' } }, guide)
+            : null),
+
+        /* ── 自动发送开关（放在**最上面**，别埋在长面板底部） ── */
+        h('div', { 'data-dy-card': '', 'data-dy-highlight': cfg.autoSend ? '' : undefined },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '自动发送'),
+              h('div', { 'data-dy-sub': '' },
+                (cfg.autoSend
+                  ? '✅ 开着（默认）：插件自己跑一轮时，会把值得的视频发给你'
+                    + (cfg.autoComment ? '，也会发评论' : '') + '。'
+                  : '关着：插件自己跑一轮只写报告 + 弹通知，不往抖音发任何东西。'))),
+            h(Switch, {
+              on: Boolean(cfg.autoSend),
+              onChange: (v) => patch({ autoSend: v }, v
+                ? '✅ 已打开自动发送'
+                : '已关闭自动发送 —— 后台跑一轮只写报告'),
+            })),
+          h('div', { 'data-dy-row': '' },
+            h('span', { 'data-dy-badge': '', 'data-on': cfg.autoSend ? '' : undefined, 'data-off': cfg.autoSend ? undefined : '' },
+              cfg.autoSend ? '会自动发' : '只写报告'),
+            h('span', { 'data-dy-sub': '' },
+              '发给：' + (cfg.dmTo ? cfg.dmTo : '（还没选私信对象，去下面「私信发给谁」选一个）'))),
+          h('div', { 'data-dy-sub': '' },
+            '⚠️ 只管「插件自己在后台跑的轮次」。你当场在对话里让它发，不受这个开关影响。'),
+
+          /* ⭐⭐ 「在评论区 @ 你」—— 用户 2026-10-22 要求，加在自动发送下面 */
+          h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '在评论区 @ 你'),
+              h('div', { 'data-dy-sub': '' },
+                (cfg.commentAtMe
+                  ? '✅ 开着：挑到最值得的那条时，会在它的评论区发一条 @ 你的评论 —— 你刷抖音就能看到通知。'
+                  : '关着：不往评论区发任何东西。'))),
+            h(Switch, {
+              on: Boolean(cfg.commentAtMe),
+              disabled: !cfg.autoSend,
+              onChange: (v) => patch({ commentAtMe: v }, v
+                ? '✅ 已打开「在评论区 @ 你」'
+                : '已关闭「在评论区 @ 你」'),
+            })),
+          !cfg.autoSend
+            ? h('div', { 'data-dy-sub': '' }, '（先打开上面的「自动发送」，这个才有用）')
+            : null,
+          cfg.commentAtMe && cfg.autoSend
+            ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px' } },
+              '会在**最值得的那一条**下发一次，提醒内容以「@你的昵称」开头。'
+              + (cfg.commentSelfName ? `（会 @「${cfg.commentSelfName}」）` : '（会 @ 你登录的这个号）'))
+            : null,
+          /* 想 @ 别的号才需要填 */
+          cfg.commentAtMe
+            ? h('div', { 'data-dy-row': '' },
+              h('input', {
+                'data-dy-input': '', style: { flex: '1' },
+                placeholder: '想 @ 别的号才填昵称（留空 = @ 你登录的这个号）',
+                value: atMeDraft !== null ? atMeDraft : String(cfg.commentSelfName || ''),
+                onChange: (e) => setAtMeDraft(e.target.value),
+              }),
+              h('button', {
+                'data-dy-mini': '', disabled: Boolean(busy) || atMeDraft === null,
+                onClick: async () => { await patch({ commentSelfName: String(atMeDraft || '').trim() }, '已保存要 @ 的昵称'); setAtMeDraft(null) },
+              }, '保存'))
             : null),
 
         /* ── 开始使用：三步装机 + 扫码登录 ── 
@@ -849,31 +925,6 @@ window.__ModuleLoader__.load({
               : null),
 
           h('div', { 'data-dy-sub': '' }, '两个都关 = 只在点「现在跑一轮」时跑。')),
-
-        /* ── 自动发送开关 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '自动跑的时候，能不能往外发东西'),
-              h('div', { 'data-dy-sub': '' },
-                (cfg.autoSend
-                  ? '⚠️ 开着：插件自己跑一轮时，可能会用你的号发私信 / 分享卡片'
-                    + (cfg.autoComment ? ' / 评论' : '') + '。'
-                  : '关着（默认）：插件自己跑一轮只写报告 + 弹通知，一个字都不往抖音发。'))),
-            h(Switch, {
-              on: Boolean(cfg.autoSend),
-              onChange: (v) => patch({ autoSend: v }, v
-                ? '⚠️ 已打开自动发送 —— 以后后台跑的轮次可能会用你的号发消息'
-                : '已关闭自动发送 —— 后台跑一轮只写报告'),
-            })),
-          h('div', { 'data-dy-sub': '', style: { marginTop: '2px' } },
-            '⚠️ 这个开关只管「插件自己在后台跑的轮次」。'
-            + '你当场在对话里让它发（比如「帮我发给他」），不受它影响 —— 那时你人在场、亲口说了要发。'),
-          cfg.autoSend
-            ? h('div', { 'data-dy-msg': '', 'data-warn': '' },
-              '⚠️ 已开启：插件可能在你不看着的时候，用你的账号给好友发私信、在别人视频下发评论。'
-              + '发错了删都来不及。建议先用几天、确认它判断靠谱了再开。')
-            : null),
 
         /* ── 每天挑几条 / 日报多细 ── */
         h('div', { 'data-dy-card': '' },

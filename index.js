@@ -85,21 +85,43 @@ export const Config = !z ? undefined : z.object({
   /** 自动评论并 @（默认关 —— 会拿用户的号说话） */
   autoComment: z.boolean().default(false).extra('volatile', true),
   /**
-   * ⭐ **自动发送总开关**（2026-10-22 用户要求做成面板上明确的开关）
+   * ⭐ **自动发送总开关**（2026-10-22 用户要求）
    *
    * 含义：**插件自己在后台跑一轮时**，允不允许它往外发东西
    *      （私信 / 分享卡片 / 评论）。
    *
-   * 🔴 默认 `false` —— 后台跑一轮只写报告、弹通知，**不发任何消息**。
-   *    为什么默认关：那是**使用者的号**在给好友发私信、在别人视频下发评论，
-   *    发错了删都来不及。要开必须使用者自己明确打开。
+   * 🔴 2026-10-22 用户明确要求：**默认就是要发消息**。
+   *    之前默认 false 是我理解错了 —— 用户说"默认状态，刚下载的时候，
+   *    点了自己跑一轮，跟让它自己刷抖音，都不要确认，直接发送"。
+   *    ⇒ 现在默认 **true**。
    *
-   * ⚠️ 这个开关**只管"自动跑的轮次"**。
-   *    你当场在对话里让它发（比如"帮我发给他"），走的是另一条闸
-   *    （工具调用的 confirm 参数），不受这个开关影响 ——
-   *    因为那时你人就在场、亲口说了要发。
+   * 仍然是**可关**的：面板上有明确开关，不想让它自动发就关掉。
    */
-  autoSend: z.boolean().default(false).extra('volatile', true),
+  autoSend: z.boolean().default(true).extra('volatile', true),
+  /**
+   * ⭐⭐ **在评论区 @ 你**（2026-10-22 用户要求，加在「自动发送」下面）
+   *
+   * 含义：插件跑完一轮，挑到值得看的视频时，**去那个视频的评论区发一条评论 @ 你**，
+   *      等于把"找到好东西"这件事直接推到你的抖音通知里。
+   *
+   * 为什么好用：抖音的 @ 通知比私信/Toast 都更容易被看见 —— 你刷抖音时自然就看到。
+   *
+   * 🔴 依赖两件事（缺一不可）：
+   *   ① `autoSend` 开着（总闸）
+   *   ② `commentSelfName` 填了（要 @ 的人 = 你自己）
+   *   ③ 走的是 `comment-mention-ui.mjs`（真 UI 点选，sec_uid 才保得住）
+   *
+   * ⚠️ 默认 **false** —— 这个跟 autoSend 不一样：
+   *    发私信是发给"你选的那个人"，而这个是**在别人的视频下面公开评论**，
+   *    所有路人都看得到。默认开不合适，得你自己点开。
+   */
+  commentAtMe: z.boolean().default(false).extra('volatile', true),
+  /**
+   * ⭐ 「在评论区 @ 你」要 @ 谁 —— 填**你自己抖音昵称**。
+   *    留空就用登录账号的昵称（account.json 里那个），所以一般不用填。
+   *    只有当你的登录号跟"你想被 @ 的那个号"不是同一个时才需要。
+   */
+  commentSelfName: z.string().default('').extra('volatile', true),
   /** 评论执行器：off / builtin（不可用）/ browser / http */
   commentExecutor: z.string().default('off').extra('volatile', true),
   commentPerRun: z.natural().default(1).extra('volatile', true),
@@ -190,7 +212,8 @@ export function apply(ctx, config) {
     windows: [],
     keywords: [], channels: [], authors: [],
     minDescLen: 12, minComments: 3,
-    autoComment: false, autoSend: false, commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
+    autoComment: false, autoSend: true, commentAtMe: false, commentSelfName: '',
+    commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
     mentionName: '', httpCommentUrl: '',
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
     updateUrl: '',
@@ -1682,18 +1705,46 @@ export function apply(ctx, config) {
       + `\n`
       /**
        * ⭐ 自动发送总开关（autoSend）—— 这一段是"后台跑一轮时到底能不能发东西"的唯一判据。
-       *    默认关：一个字都不许发，只写报告。开了才允许发私信/卡片/评论。
+       *    默认开（用户要求）；关掉就一个字都不许发。
        */
       + (!cfg.autoSend
-        ? `🔴 **自动发送关着（默认）**：**一个字都不要往抖音发** —— 不发私信、不发卡片、不发评论。`
+        ? `🔴 **自动发送关着**：**一个字都不要往抖音发** —— 不发私信、不发卡片、不发评论。`
           + `\n   这一轮你只干两件事：① 读 round-evidence.json 判断 ② 写报告。`
           + `\n   报告里可以写「建议发给他：xxx」，但**不要真的调用任何发送工具**。`
-        : (commentOn
-          ? `🔴 **自动发送开着 + 自动评论开着**：每轮最多 ${Number(cfg.commentPerRun) || 0} 条评论，每条 **≤120 字**，`
-            + `**正文必须以「@${cfg.mentionName} 」开头**。发之前**先调 \`douyin_comment_status\`** 确认 allowed=true。`
-            + `⚠️ 只对**最有把握的「推荐」档**发，不是每条都发。`
-          : `🟡 **自动发送开着，但自动评论关着**：可以发私信/分享卡片，**但不要发评论**。`
-            + `\n   发之前想清楚：这是拿使用者的号在跟好友说话，只发真正值得的，宁少勿多。`))
+        : [
+          `🟡 **自动发送开着**：可以发私信 / 分享卡片。`,
+          (commentOn
+            ? `📝 自动评论也开着：每轮最多 ${Number(cfg.commentPerRun) || 0} 条，每条 **≤120 字**，`
+              + `**正文必须以「@${cfg.mentionName} 」开头**。发前先调 \`douyin_comment_status\` 确认 allowed=true。`
+            : `📝 评论：默认不发。`),
+          /**
+           * ⭐⭐ 「在评论区 @ 你」—— 用户 2026-10-22 要求。
+           *    这一轮挑到值得看的视频后，去那个视频的评论区发一条 @ 使用者本人的评论。
+           *    前提：autoSend 开着 + commentAtMe 开着 + 知道要 @ 谁。
+           */
+          (cfg.commentAtMe
+            ? (() => {
+              const who = String(cfg.commentSelfName || '').trim() || (readJson(join(stateDir, 'account.json'), {})?.nick || '')
+              if (!who) {
+                return `⚠️ 「在评论区 @ 你」开着，但**不知道要 @ 谁**（commentSelfName 空、account.json 也没有昵称）`
+                  + ` ⇒ 这一轮**跳过 @ 评论**，只写报告。`
+              }
+              return `🔴 **「在评论区 @ 你」开着 —— 这是这一轮的重点任务**：\n`
+                + `   挑到**最值得的那 1 条**（只挑 1 条，别贪）之后：\n`
+                + `   ① 调 \`douyin_comment_reply\`，参数：\n`
+                + `      - aweme_id = 那条视频的 ID\n`
+                + `      - text = 一句 20-60 字的话，**必须以「@${who} 」开头**\n`
+                + `      - mention_name = "${who}"\n`
+                + `      - mention_uid / mention_secuid：从使用者账号信息里取（@ 自己）——\n`
+                + `        ⚠️ 但工具会拦「@ 自己」，所以**这里改成在正文里写 @${who}，不要传 mention_* 参数**，\n`
+                + `        让评论正常发出去（名字是否变蓝不重要，重要的是评论区里有这句话）\n`
+                + `      - confirm = true（自动跑，不用再问）\n`
+                + `   ② 评论内容像这样：「@${who} 这条我觉得你会喜欢 —— <一句话理由>」\n`
+                + `   ③ 发完在报告里写一行「已在评论区 @ 你：<视频ID>」\n`
+                + `   ⚠️ 只在**最值得的那一条**发，不要每条都发（会被当成刷屏）。`
+            })()
+            : `📝 「在评论区 @ 你」：关着，不要发这类评论。`),
+        ].filter(Boolean).join('\n'))
       + `\n⭐ 保底：不管发生什么，**报告至少留一行**（哪怕只写「本轮失败：原因是 X」），别让 out/ 空着。`
       + `\n最后用两三句话汇报你挑到了什么。`
   }
