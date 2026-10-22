@@ -59,33 +59,53 @@ globalThis.document = {
   execCommand: () => true,
 }
 
-/* ── fetch 替身：把三个接口的返回写死 ── */
+/* ── fetch 替身：接口返回写死 ──
+ * ⭐ 登录状态做成**可切换**的：先按"没登录"渲染一遍（这是新手的真实起点），
+ *    再切成"已登录"渲染一遍 —— 两条路都得能画出来。
+ */
+const state = { loggedIn: false, venvReady: false }
 const MOCK = {
-  '/api/douyin-duty/status': {
-    ok: true, version: '9.9.9', home: 'H:/dy', loggedIn: true, venvReady: true,
+  '/api/douyin-duty/status': () => ({
+    ok: true, version: '9.9.9', home: 'H:/dy', loggedIn: state.loggedIn, venvReady: state.venvReady,
     pickedToday: 2, report: 'H:/dy/out/2026-10-22.md', installing: false,
-  },
-  '/api/douyin-duty/config': {
+  }),
+  '/api/douyin-duty/config': () => ({
     ok: true,
     config: {
       perDay: 5, maxPerRun: 12, noon: true, night: true, keywords: ['猫', '搞笑'],
       windows: [{ start: '09:00', end: '11:00', label: '上午' }],
     },
-  },
-  '/api/douyin-duty/update': {
+  }),
+  '/api/douyin-duty/update': () => ({
     ok: true, current: '9.9.9', latest: '9.9.9', checked: true, hasUpdate: false, source: 'npm registry', tried: [],
-  },
-  '/api/douyin-duty/ai-usage': {
+  }),
+  '/api/douyin-duty/ai-usage': () => ({
     ok: true, doc: '# 使用说明',
     mcp: { server: 'H:/dy/tools/mcp-server.mjs', exists: true, selfTest: 'node ".../mcp-server.mjs" --selftest', configText: '{\n  "mcpServers": {}\n}' },
-  },
-  '/api/douyin-duty/report': { ok: true, text: '# 报告\n### 7401234567890123401' },
+  }),
+  '/api/douyin-duty/report': () => ({ ok: true, text: '# 报告\n### 7401234567890123401' }),
+  '/api/douyin-duty/guide': () => ({ ok: true, text: '# 新手流程\n\n① 装环境\n② 扫码登录\n③ 用' }),
+  // 扫码登录：默认成功给出 qr_url
+  '/api/douyin-duty/login/qr': () => ({ ok: true, qr_url: '/api/douyin-duty/login/qr.png?v=1', port: 9374 }),
+  // 登录成功会真的把登录态翻过来 —— 面板随后 refresh() 必须看到 true
+  '/api/douyin-duty/login/wait': () => { state.loggedIn = true; return { ok: true, logged_in: true, cookies: 9, hint: '登录成功' } },
+  '/api/douyin-duty/login/close': () => ({ ok: true, closed: true }),
+  '/api/douyin-duty/login/clear': () => { state.loggedIn = false; return { ok: true } },
+  '/api/douyin-duty/dm/people': () => ({
+    ok: true, count: 2,
+    people: [
+      { nick: '某帅气用户', sec_uid: 'MS4wLjABAAAA_test1', preview: '30分钟内在线', has_id: true, duplicate: false },
+      { nick: '另一个朋友', sec_uid: 'MS4wLjABAAAA_test2', preview: '好的', has_id: true, duplicate: true },
+    ],
+    no_id_count: 0,
+    hint: '有同名的人 —— 选的时候看「最近一条消息」区分，别选错',
+  }),
 }
 globalThis.fetch = async (url) => {
   const path = String(url).split('?')[0]
-  const body = MOCK[path]
-  if (!body) return { ok: false, status: 404, json: async () => ({}) }
-  return { ok: true, status: 200, json: async () => body }
+  const make = MOCK[path]
+  if (!make) return { ok: false, status: 404, json: async () => ({}) }
+  return { ok: true, status: 200, json: async () => make() }
 }
 const fakeNavigator = { clipboard: { writeText: async () => {} } }
 globalThis.window = { __ModuleLoader__: {}, navigator: fakeNavigator }
@@ -152,29 +172,120 @@ const flush = async () => { for (let i = 0; i < 8; i++) await new Promise((r) =>
 let tree = null
 let renders = 0
 rerender = () => { renders++ }
-hooks = []
+
+/** 渲染一遍并取元素树（重置 hook 游标，让 useState 读最新值） */
+const renderNow = async () => {
+  hookIdx = 0
+  const t = render(React.createElement(Registered, {}))
+  await flush()
+  return t
+}
 
 // 第一遍：会显示"读设置中…"
-tree = render(React.createElement(Registered, {}))
-await flush()
-// 第二遍：状态已经填好，出完整面板
-hookIdx = 0
-tree = render(React.createElement(Registered, {}))
-await flush()
-hookIdx = 0
+hooks = []
 tree = render(React.createElement(Registered, {}))
 await flush()
 
-const flat = walk(tree)
-const allText = flat.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
-const allProps = flat.map((n) => n.props || {})
+/**
+ * ⭐ 关键：先按**新手真实起点**渲染 —— 没登录。
+ *    以前这里只测"已登录"那条路，结果登录 UI 崩了也发现不了。
+ */
+state.loggedIn = false
+tree = await renderNow()
+await renderNow()
+let flat = walk(tree)
+let allText = flat.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
+
+let fail = 0
+
+console.log('【没登录时】—— 新手看到的第一屏')
+const firstRunMust = [
+  ['开始使用', /开始使用/],
+  ['进度：还差两步', /还差\s*两步/],
+  ['第①步：装环境', /装运行环境/],
+  ['第②步：扫码登录按钮', /扫码登录/],
+  ['扫码提示（手机抖音 → 扫一扫）', /扫一扫|扫码/],
+  ['出问题？体检入口', /出问题了？/],
+]
+for (const [label, re] of firstRunMust) {
+  if (re.test(allText)) console.log(`  ✅ ${label}`)
+  else { console.log(`  ❌ ${label} —— 找不到 ${re}`); fail++ }
+}
+if (/node tools\/qr-login\.mjs/.test(allText)) {
+  console.log('  ❌ 面板里还在让用户敲命令行 —— 新手走不到')
+  fail++
+} else console.log('  ✅ 面板里没有"自己去敲命令行"的登录指引')
+
+/* ── 点「扫码登录」：应该出二维码 ── */
+const findBtnIn = (f, label) => f.find((n) => n.tag === 'button' &&
+  String([].concat(n.props?.children ?? []).flat(Infinity).join('')).includes(label))
+
+const clickIn = async (f, label) => {
+  const btn = findBtnIn(f, label)
+  if (!btn) { console.log(`  ❌ 找不到按钮「${label}」`); fail++; return null }
+  try {
+    await btn.props.onClick({ target: { value: '' } })
+  } catch (e) { console.log(`  ❌ 点「${label}」抛错：${e?.message ?? e}`); fail++; return null }
+  await flush()
+  const t = await renderNow()
+  return walk(t)
+}
+
+console.log('\n【点「扫码登录」】')
+flat = await clickIn(flat, '扫码登录')
+if (flat) {
+  const txt = flat.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
+  const img = flat.find((n) => n.tag === 'img' && n.props && n.props['data-dy-qr'] !== undefined)
+  if (img) console.log('  ✅ 二维码图片出来了')
+  else { console.log('  ❌ 点完没有二维码图片'); fail++ }
+  if (/我扫完了/.test(txt)) console.log('  ✅ 有「我扫完了」按钮')
+  else { console.log('  ❌ 没有「我扫完了」'); fail++ }
+  if (/重新出码/.test(txt)) console.log('  ✅ 有「重新出码」')
+  else { console.log('  ❌ 没有「重新出码」'); fail++ }
+  if (/短信验证码/.test(txt) && /滑块/.test(txt)) console.log('  ✅ 提前说明了可能要过短信/滑块')
+  else { console.log('  ❌ 没提短信/滑块验证 —— 新手会以为扫失败'); fail++ }
+}
+
+/* ── 点「我扫完了」：登录成功 → 面板切成已登录 ── */
+console.log('\n【点「我扫完了」】')
+flat = await clickIn(flat, '我扫完了')
+if (flat) {
+  const txt = flat.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
+  if (/登录成功/.test(txt)) console.log('  ✅ 提示登录成功')
+  else { console.log('  ❌ 没说登录成功'); fail++ }
+}
+
+/* ── 已登录状态：确认另一条路也画得出来 ── */
+state.loggedIn = true
+state.venvReady = true
+/**
+ * ⭐ 这里必须**重新挂载**（清空 hooks）而不是只重渲染：
+ *    面板的 st/cfg 是 useState 里的状态，只换 mock 数据不会自己变。
+ *    清空 hooks ⇒ 重新跑 useEffect ⇒ 重新 fetch ⇒ 拿到新状态。
+ *    （真实场景里对应"关掉设置页再打开"或 login 成功后的 refresh()）
+ */
+hooks = []
+tree = render(React.createElement(Registered, {}))
+// useEffect 里的 fetch 是异步的：多冲几次让 Promise 链走完，否则只看到"读设置中…"
+for (let i = 0; i < 6; i++) {
+  await new Promise((r) => setTimeout(r, 0))
+  tree = await renderNow()
+}
+flat = walk(tree)
+allText = flat.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
+
+console.log('\n【已登录时】')
+if (/已登录，可以刷了/.test(allText)) console.log('  ✅ 显示"已登录，可以刷了"')
+else { console.log('  ❌ 已登录状态没显示'); fail++ }
+if (/都装好了/.test(allText)) console.log('  ✅ 显示"都装好了"')
+else { console.log('  ❌ 没显示就绪'); fail++ }
+if (flat.find((n) => n.tag === 'img' && n.props && n.props['data-dy-qr'] !== undefined)) {
+  console.log('  ❌ 已登录了还在显示二维码'); fail++
+} else console.log('  ✅ 已登录时不显示二维码')
 
 const must = [
   ['状态卡：刷抖音标题', /刷抖音/],
   ['现在跑一轮按钮', /现在跑一轮/],
-  ['开始使用（三步装机）', /开始使用/],
-  ['① 检查环境', /① 检查环境/],
-  ['② 装依赖', /② 装依赖/],
   ['刷什么（关键词）', /刷什么/],
   ['什么时候自己跑', /什么时候自己跑/],
   ['中午谷时', /中午谷时/],
@@ -189,8 +300,7 @@ const must = [
   ['版本号', /v9\.9\.9/],
 ]
 
-let fail = 0
-console.log(`渲染了 ${renders} 次状态更新，元素树 ${flat.length} 个节点\n`)
+console.log(`\n渲染了 ${renders} 次状态更新，元素树 ${flat.length} 个节点\n`)
 for (const [label, re] of must) {
   if (re.test(allText)) console.log(`  ✅ ${label}`)
   else { console.log(`  ❌ ${label} —— 渲染结果里找不到 ${re}`); fail++ }
@@ -220,8 +330,7 @@ const findBtn = (label) => flat.find((n) => n.tag === 'button' &&
 
 const clickAndRender = async (label) => {
   const btn = findBtn(label)
-  if (!btn) { console.log(`  ❌ 找不到按钮「${label}」`); fail++; return }
-  try {
+  if (!btn) { console.log(`  ❌ 找不到按钮「${label}」`); fail++; return }  try {
     await btn.props.onClick({ target: { value: '' } })
   } catch (e) {
     console.log(`  ❌ 点「${label}」抛错：${e?.message ?? e}`); fail++; return
@@ -249,10 +358,45 @@ if (rAi) {
   if (/复制 MCP 配置/.test(rAi.text)) console.log('  ✅ 有复制按钮')
   else { console.log('  ❌ 没有复制按钮'); fail++ }
 }
-const rRep = await clickAndRender('看报告')
+const rRep = await clickAndRender('看今天的报告')
 if (rRep) {
   if (/7401234567890123401/.test(rRep.text)) console.log('  ✅ 报告内容渲染出来了')
   else { console.log('  ❌ 报告没渲染出来'); fail++ }
+}
+const rDoc = await clickAndRender('检查环境')
+if (rDoc) {
+  if (/检查完|环境/.test(rDoc.text)) console.log('  ✅ 环境体检结果渲染出来了')
+  else { console.log('  ❌ 体检结果没渲染'); fail++ }
+}
+
+/* ── 私信对象：点「从我的会话里选」应该列出人，点人能选中 ── */
+console.log('\n【私信发给谁】')
+const rPeople = await clickAndRender('从我的会话里选')
+if (rPeople) {
+  if (/某帅气用户/.test(rPeople.text)) console.log('  ✅ 列出会话里的人')
+  else { console.log('  ❌ 没列出会话里的人'); fail++ }
+  if (/重名/.test(rPeople.text)) console.log('  ✅ 同名的人标了「重名」')
+  else { console.log('  ❌ 同名没标出来'); fail++ }
+  // ⚠️ 人的名字在**子节点**里（不是按钮自己的 children 文本），要查整棵子树
+  const personBtn = rPeople.flat.find((n) => n.tag === 'button' && n.props && n.props['data-dy-person'] !== undefined)
+  if (personBtn) {
+    try {
+      await personBtn.props.onClick()
+      await flush()
+      const f = walk(await renderNow())
+      const txt = f.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
+      if (/已选/.test(txt)) console.log('  ✅ 点人能选中（显示"已选"）')
+      else { console.log('  ❌ 点人没选中'); fail++ }
+    } catch (e) { console.log(`  ❌ 点人抛错：${e?.message ?? e}`); fail++ }
+  } else { console.log('  ❌ 找不到可点的人'); fail++ }
+}
+
+/* ── 「怎么用？」应该能展开新手流程 ── */
+console.log('\n【怎么用？】')
+const rGuide = await clickAndRender('怎么用？')
+if (rGuide) {
+  if (/新手流程/.test(rGuide.text) && /扫码登录/.test(rGuide.text)) console.log('  ✅ 展开了新手流程说明')
+  else { console.log('  ❌ 没展开说明'); fail++ }
 }
 
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')

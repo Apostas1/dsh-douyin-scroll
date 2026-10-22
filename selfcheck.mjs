@@ -264,8 +264,10 @@ try {
 /* ── 4j. 设置页真的能渲染出来 ──
  * 🔴 2026-10-22 教训：`node --check` 只查语法。面板整块消失的原因是**渲染/加载时抛错**，
  *    语法完全合法。这一段用极小 React 替身把 Panel 真跑一遍 —— 白屏会在推之前被抓住。
+ *    ⭐ 而且它同时验证**新手流程**：没登录时看到什么、点「扫码登录」出什么、
+ *      点「从我的会话里选」能不能列出人。
  */
-console.log('\n4j. 设置页渲染（真跑一遍）')
+console.log('\n4j. 设置页渲染 + 新手流程')
 try {
   const r = spawnSync(process.execPath, [join(here, 'tools', 'panel-render-check.mjs')], {
     encoding: 'utf8', timeout: 120_000,
@@ -278,6 +280,59 @@ try {
     bad(`设置页渲染失败：${why || String(r.stderr || '').slice(0, 200)}`)
   }
 } catch (e) { bad(`渲染检查跑不起来：${e.message}`) }
+
+/* ── 4k. 新手流程：登录 + 私信对象都不许让用户去敲命令行 / 手填 sec_uid ── */
+console.log('\n4k. 新手流程（登录 / 私信对象）')
+try {
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const qr = readFileSync(join(here, 'tools', 'qr-login.mjs'), 'utf8')
+  const ims = readFileSync(join(here, 'tools', 'im-send.mjs'), 'utf8')
+
+  // ① 面板必须有扫码登录按钮，不能只写命令行
+  //    ⚠️ 查的是**代码**，注释里提到旧做法（"以前只写一句命令行跑…"）不算
+  const clCode = cl.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/[^\n]*$/gm, '')
+  if (/扫码登录/.test(clCode) && /\/login\/qr/.test(clCode)) ok('面板有「扫码登录」按钮（不是只写命令行）')
+  else bad('面板没有扫码登录入口 —— 新手又要自己去敲 node tools/qr-login.mjs')
+  if (/node tools\/qr-login\.mjs/.test(clCode)) bad('面板里还在教用户敲命令 —— 应该直接点按钮')
+  else ok('面板里没有"自己去敲命令行"的登录指引')
+  // ② 必须提前说明可能要过短信/滑块验证
+  if (/短信验证码/.test(cl) && /滑块/.test(cl)) ok('面板提前说明了可能还要过短信/滑块验证')
+  else bad('面板没提短信/滑块 —— 用户扫完卡在验证页会以为失败了')
+  // ③ 「我扫完了」按钮
+  if (/我扫完了/.test(cl) && /\/login\/wait/.test(cl)) ok('有「我扫完了」按钮（轮询到登录成功）')
+  else bad('没有「我扫完了」—— 用户不知道什么时候算登录好')
+  // ④ 后端四个登录路由
+  for (const [p, name] of [['/login/qr', '出二维码'], ['/login/wait', '等登录'], ['/login/close', '关窗口'], ['/login/qr.png', '二维码图']]) {
+    if (idx.includes(`/api/douyin-duty${p}`)) ok(`后端有 ${p}（${name}）`)
+    else bad(`后端缺 ${p}（${name}）`)
+  }
+  // ⑤ 已登录时不许截首页冒充二维码
+  if (/already_logged_in/.test(qr)) ok('qr-login 会先判断"已登录"并直接导 Cookie（不会截首页冒充二维码）')
+  else bad('qr-login 不判断已登录状态 —— 会截一张首页图当二维码给用户')
+  if (/document\.cookie\.indexOf\('sessionid='\)/.test(qr)) bad('还在用 document.cookie 判登录 —— sessionid 是 HttpOnly，永远读不到')
+  else ok('没有用 document.cookie 判登录（HttpOnly 读不到，必须走 CDP）')
+  // ⑥ profile 互斥要有明确提示
+  // ⑥ profile 互斥要有明确提示（conflict 由 qr-login.mjs 产生，index.js 原样透传给面板）
+  if (/profile_in_use/.test(qr) && /conflict/.test(idx)) ok('后台无头浏览器占着 Chrome 配置时会明确提示（不用干等 60 秒）')
+  else bad('profile 被占时没有明确提示 —— 用户会干等 60 秒看到"连不上"')
+  // ⑦ 私信对象必须能"从会话里选"，不许让用户手填 sec_uid
+  if (/--list/.test(ims) && /mode: 'list'/.test(ims)) ok('im-send.mjs 有 --list（列出会话里的人）')
+  else bad('im-send.mjs 没有 --list —— 面板列不出人')
+  if (/dm\/people/.test(idx)) ok('后端有 /dm/people（读会话里的人）')
+  else bad('后端缺 /dm/people')
+  if (/从我的会话里选/.test(cl) && /pickPerson/.test(cl)) ok('面板能"从我的会话里选"人（不用手填 sec_uid）')
+  else bad('面板还在让用户手填私信对象')
+  // ⑧ 同名必须标出来
+  if (/duplicate/.test(ims) && /重名/.test(cl)) ok('同名的人会被标出来（避免选错）')
+  else bad('同名的人没标 —— 重名时可能选错人')
+  // ⑨ 新手流程说明要能看到（不用让用户去翻 GitHub）
+  if (/怎么用？/.test(cl) && /\/guide/.test(cl) && idx.includes('/api/douyin-duty/guide')) {
+    ok('面板有「怎么用？」能展开新手流程')
+  } else bad('面板没有新手流程入口 —— 用户还得自己去翻文档')
+  if (existsSync(join(here, 'GUIDE.md'))) ok('GUIDE.md 在（新手流程正文）')
+  else bad('缺 GUIDE.md')
+} catch (e) { bad(`新手流程检查失败：${e.message}`) }
 
 /* ── 4e. 采集门槛 / 跨天记账 ── */
 console.log('\n4e. 采集门槛 / 跨天')
@@ -332,20 +387,29 @@ try {
   if (/from '\.\.\/lib\/(paths|chrome)\.mjs'/.test(doc) && !/spawnSync\([^)]*doctor\.py/.test(doc)) {
     ok('doctor.mjs 是纯 Node（不需要 Python 就能跑）')
   } else bad('doctor.mjs 依赖了 Python —— 第一次装时必然「环境没装好」，用户卡死')
-  // ② 设置页必须有「检查环境」按钮，且在「装依赖」之前（文案可变，位置不能变）
+  // ② 设置页必须是「先装环境 → 再登录」的顺序（文案可变，位置不能变）
+  //    ⚠️ 2026-10-22 面板改版：从「① 检查环境 / ② 装依赖」变成
+  //       「第①步 装环境 / 第②步 扫码登录」，并额外保留一个「检查环境」按钮（出问题时用）。
+  //    判据用**步骤序号 + 各自的完成条件**（比在代码里找中文稳）：
+  //       第 1 步的完成条件是 st.venvReady（装环境），第 2 步是 st.loggedIn（登录）。
   const cl = readFileSync(join(here, 'client.js'), 'utf8')
-  const iDoc = cl.search(/①\s*检查环境/)
-  const iIns = cl.search(/②[^\n']*依赖/)
-  if (iDoc > 0 && iIns > iDoc) ok('设置页顺序正确：① 检查环境 → ② 装依赖')
-  else bad('设置页没有「先检查再装」的顺序 —— 用户不知道该装什么')
-  // ③ 没检查过不许点装（简化版面板里 doctor 只是可选步骤，此项仅提示）
-  if (/disabled: busy === 'install' \|\| !doctorOk/.test(cl)) ok('没检查过环境时「装依赖」是禁用的')
-  else warn('「装依赖」没跟体检结果绑定（简化面板里算可选优化，不算失败）')
+  const step1 = /st\.venvReady \? '' : undefined \}, st\.venvReady \? '✓' : '1'/.test(cl)
+  const step2 = /st\.loggedIn \? '' : undefined \}, st\.loggedIn \? '✓' : '2'/.test(cl)
+  const i1 = cl.indexOf("st.venvReady ? '✓' : '1'")
+  const i2 = cl.indexOf("st.loggedIn ? '✓' : '2'")
+  if (step1 && step2 && i1 > 0 && i2 > i1) ok('设置页顺序正确：第 1 步装环境 → 第 2 步扫码登录')
+  else bad(`设置页没有「先装环境再登录」的步骤顺序（step1=${step1}@${i1} step2=${step2}@${i2}）—— 用户不知道该先做什么`)
+  // ③ 体检入口还在（出问题时能查）
+  if (/检查环境/.test(cl)) ok('设置页保留「检查环境」按钮（出问题时用）')
+  else bad('设置页没有环境体检入口')
   // ④ 扫码之后可能要过验证 —— 必须告诉用户
   if (/短信验证码|滑块/.test(cl)) ok('设置页写明了扫码后可能还要过短信/滑块验证')
   else bad('设置页没提扫码后的验证 —— 用户会以为扫码失败，反复重扫')
   const qr = readFileSync(join(here, 'tools', 'qr-login.mjs'), 'utf8')
-  if (/verifyHint/.test(qr) && /滑块|短信/.test(qr)) ok('qr-login.mjs check 会识别「卡在验证」并说清卡在哪一步')
+  // ⚠️ 2026-10-22 重构：验证识别逻辑从 `verifyHint` 字符串搬到了 `doCheck()` 的结构化返回
+  //    （check 和 watch 共用）。所以查的是「有验证识别」这件事本身，不是某个变量名。
+  const hasVerifyProbe = /短信验证码/.test(qr) && /滑块\/拼图/.test(qr) && /verifyKinds|verifyKinds\.length|verify:/.test(qr)
+  if (hasVerifyProbe) ok('qr-login.mjs 会识别「卡在验证」并说清卡在哪一步（短信 / 滑块 / 新设备）')
   else bad('qr-login.mjs 只看 cookie —— 用户卡在验证页时只会被告知「还没扫」')
 } catch (e) { bad(`装机流程检查失败：${e.message}`) }
 

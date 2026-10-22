@@ -83,6 +83,26 @@ window.__ModuleLoader__.load({
 [data-dy-mini][data-danger]{color:#f87171;}
 [data-dy-wrow]{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;}
 [data-dy-sep]{font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-dy-step]{flex:none;width:20px;height:20px;border-radius:50%;font-size:11px;font-weight:600;
+  display:inline-flex;align-items:center;justify-content:center;
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.18));
+  color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-dy-step][data-done]{background:rgba(34,197,94,.18);color:#22c55e;}
+[data-dy-loginbox]:empty{display:none;}
+[data-dy-qr]{display:block;}
+[data-dy-people]{display:flex;flex-direction:column;gap:4px;max-height:260px;overflow:auto;
+  padding:4px;border-radius:9px;background:var(--dsw-alias-bg-overlay,rgba(0,0,0,.16));}
+[data-dy-person]{display:flex;align-items:center;gap:8px;width:100%;text-align:left;cursor:pointer;
+  padding:7px 9px;border-radius:7px;border:0;background:transparent;color:inherit;font-family:inherit;font-size:12px;}
+[data-dy-person]:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.22));}
+[data-dy-person][data-picked]{background:rgba(59,130,246,.14);}
+[data-dy-person][disabled]{cursor:default;opacity:.6;}
+[data-dy-person-name]{font-weight:600;flex:none;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+[data-dy-person-sub]{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-dy-tag]{flex:none;font-size:10px;padding:1px 6px;border-radius:5px;
+  background:rgba(245,158,11,.16);color:#f59e0b;}
+[data-dy-tag][data-ok]{background:rgba(34,197,94,.16);color:#22c55e;}
 `
 
     function Switch({ on, onChange, disabled }) {
@@ -134,6 +154,14 @@ window.__ModuleLoader__.load({
       const [upd, setUpd] = React.useState(null)
       const [ai, setAi] = React.useState(null)
       const [copied, setCopied] = React.useState('')
+      // 扫码登录：qr = { url }，qrHint = 一句人话（出不来码时说什么）
+      const [qr, setQr] = React.useState(null)
+      const [qrHint, setQrHint] = React.useState('')
+      // 私信对象：列表 + 选中的那个人
+      const [people, setPeople] = React.useState(null)
+      const [peopleHint, setPeopleHint] = React.useState('')
+      // 新手流程说明
+      const [guide, setGuide] = React.useState(null)
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
@@ -177,6 +205,119 @@ window.__ModuleLoader__.load({
         setBusy('install')
         try { await jpost('/install', {}); say('开始装依赖，进度看日志', 'good') }
         catch (e) { say('装依赖失败：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      /** 刷新状态（登录成功 / 装完之后要让按钮和进度条变） */
+      const refresh = async () => {
+        try {
+          const [s, c] = await Promise.all([jget('/status'), jget('/config')])
+          if (s) setSt(s)
+          if (c && c.config) setCfg(c.config)
+        } catch { /* 刷不动就留着旧的 */ }
+      }
+
+      /**
+       * ⭐ 扫码登录 · 第一步：出二维码
+       * @param {boolean} force 强制重来（先关掉后台无头浏览器 —— 它占着同一个 Chrome 配置）
+       */
+      const onQr = async (force) => {
+        setBusy('login'); setQrHint(''); setQr(null)
+        try {
+          const r = await jpost('/login/qr', { force: force ? '1' : '' })
+          if (r && r.ok && r.qr_url) {
+            setQr({ url: r.qr_url })
+            say('二维码出来了 —— 用手机抖音扫一下', 'good')
+          } else if (r && r.ok && r.already_logged_in) {
+            // ⭐ 浏览器里本来就登录着，不用扫码 —— 直接把凭证导出来了
+            setQrHint('')
+            say('这个浏览器里本来就登录着，已经直接登录好了', 'good')
+            await refresh()
+          } else if (r && r.ok && r.no_qr_element) {
+            // 没截到二维码图 —— 别放一张首页截图骗人，让用户看那个窗口
+            setQrHint(r.hint || '没能自动截到二维码，请直接看那个 Chrome 窗口')
+            say('二维码没截到，请看弹出的浏览器窗口', 'warn')
+          } else if (r && r.conflict === 'profile_in_use') {
+            setQrHint(r.error + ' —— 点「重新出码」，我会先把后台那个关掉再出。')
+            say('后台浏览器占着窗口，需要先关掉它', 'warn')
+          } else {
+            setQrHint((r && (r.error || r.detail)) || '出二维码失败')
+            say('出二维码失败', 'warn')
+          }
+        } catch (e) { setQrHint('出二维码失败：' + String((e && e.message) || e)); say('出二维码失败', 'warn') }
+        finally { setBusy('') }
+      }
+
+      /** 第二步：我扫完了（轮询到成功；成功后会顺带关掉登录窗口） */
+      const onWaitLogin = async () => {
+        setBusy('wait')
+        try {
+          const r = await jpost('/login/wait', { seconds: 120 })
+          if (r && r.ok) {
+            setQr(null)
+            say('登录成功 —— 可以刷了', 'good')
+            await refresh()
+          } else {
+            const why = (r && (r.hint || r.error)) || '还没好'
+            setQrHint(why)
+            say(r && r.timeout ? '没等到，再试一次' : '还没好', 'warn')
+          }
+        } catch (e) { setQrHint('等待登录失败：' + String((e && e.message) || e)); say('等待失败', 'warn') }
+        finally { setBusy('') }
+      }
+
+      const onCloseLogin = async () => {
+        try { await jpost('/login/close', {}) } catch { /* 关不掉也无所谓 */ }
+        setQr(null); setQrHint('登录窗口已关。想继续就再点一次「扫码登录」。')
+      }
+
+      const onLogout = async () => {
+        setBusy('login')
+        try {
+          await jpost('/login/clear', {})
+          setQr(null)
+          say('已退出登录（Cookie 删了）', 'good')
+          await refresh()
+        } catch (e) { say('退出失败：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      /**
+       * ⭐ 列出会话里的人 —— 让用户点选，不用手填 sec_uid。
+       *    （2026-10-22 用户指出：新手不可能知道「稳定 id」是什么，更找不到）
+       */
+      const loadPeople = async () => {
+        setBusy('people'); setPeopleHint('')
+        try {
+          const r = await jpost('/dm/people', {})
+          if (r && r.ok) {
+            setPeople(r.people || [])
+            setPeopleHint(r.hint || '')
+            if (!(r.people || []).length) say('会话列表是空的', 'warn')
+            else say(`找到 ${r.people.length} 个人`, 'good')
+          } else {
+            setPeople([])
+            setPeopleHint((r && (r.hint || r.error)) || '读不到会话列表')
+            say('读不到会话列表', 'warn')
+          }
+        } catch (e) { setPeopleHint('读不到会话列表：' + String((e && e.message) || e)); say('读失败', 'warn') }
+        finally { setBusy('') }
+      }
+
+      /** 选定一个人：把 dmTo（昵称）+ dmToId（sec_uid）一起存 */
+      const pickPerson = async (p) => {
+        await patch({ dmTo: p.nick, dmToId: p.sec_uid || '' },
+          p.sec_uid ? `已选「${p.nick}」` : `已选「${p.nick}」，但没拿到稳定 id`)
+      }
+
+      /** 展开 / 收起「怎么用」（新手流程） */
+      const toggleGuide = async () => {
+        if (guide !== null) { setGuide(null); return }
+        setBusy('guide')
+        try {
+          const r = await jget('/guide')
+          setGuide((r && r.text) || '(说明文件缺失)')
+        } catch (e) { say('读说明失败：' + String((e && e.message) || e), 'warn') }
         finally { setBusy('') }
       }
 
@@ -278,6 +419,8 @@ window.__ModuleLoader__.load({
               h('div', { 'data-dy-title': '' }, '刷抖音'),
               h('div', { 'data-dy-sub': '' },
                 '峰谷时段自动刷一轮，把值得看的挑出来写成日报。不催你、不刷屏。')),
+            h('button', { 'data-dy-mini': '', disabled: busy === 'guide', onClick: toggleGuide },
+              guide === null ? '怎么用？' : '收起说明'),
             h('span', { 'data-dy-badge': '' }, 'v' + (st.version || '?'))),
           h('div', { 'data-dy-row': '' },
             h('span', {
@@ -301,23 +444,128 @@ window.__ModuleLoader__.load({
             'data-dy-msg': '',
             'data-good': msgTone === 'good' ? '' : undefined,
             'data-warn': msgTone === 'warn' ? '' : undefined,
-          }, msg) : null),
+          }, msg) : null,
+          guide !== null
+            ? h('pre', { 'data-dy-pre': '', style: { maxHeight: '380px' } }, guide)
+            : null),
 
-        /* ── 三步装机 ── */
+        /* ── 开始使用：三步装机 + 扫码登录 ── 
+         * 🔴 2026-10-22：以前这里只写一句「命令行跑 node tools/qr-login.mjs start」——
+         *    对新手等于"你自己去折腾"。现在做成**点按钮 → 出二维码 → 手机扫 → 点我扫完了**。
+         *    进度条按状态自己算：没环境 → 没登录 → 能用了。 */
         h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-title': '' }, '开始使用'),
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-btn': '', disabled: busy === 'doctor', onClick: onDoctor }, '① 检查环境'),
-            h('button', { 'data-dy-btn': '', disabled: busy === 'install', onClick: onInstall }, '② 装依赖'),
-            h('button', { 'data-dy-btn': '', disabled: busy === 'report', onClick: onShowReport }, '③ 看报告')),
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '开始使用'),
+              h('div', { 'data-dy-sub': '' },
+                st.venvReady && st.loggedIn
+                  ? '✅ 都装好了，可以直接用'
+                  : `还差 ${!st.venvReady ? '两步' : '一步'} —— 跟着数字点就行`)),
+            h('span', {
+              'data-dy-badge': '',
+              'data-on': (st.venvReady && st.loggedIn) ? '' : undefined,
+            }, (st.venvReady && st.loggedIn) ? '就绪' : '未就绪')),
+
+          /* 第 ① 步 */
+          h('div', { 'data-dy-row': '' },
+            h('span', { 'data-dy-step': '', 'data-done': st.venvReady ? '' : undefined }, st.venvReady ? '✓' : '1'),
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-sub': '' }, st.venvReady ? '运行环境好了' : '装运行环境（约 30 秒，一次就够）')),
+            st.venvReady
+              ? null
+              : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'install', onClick: onInstall },
+                busy === 'install' ? '装着…' : '装环境')),
+
+          /* 第 ② 步 —— 扫码登录（新手最容易卡的地方，做成主按钮） */
+          h('div', { 'data-dy-row': '' },
+            h('span', { 'data-dy-step': '', 'data-done': st.loggedIn ? '' : undefined }, st.loggedIn ? '✓' : '2'),
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-sub': '' }, st.loggedIn ? '已登录，可以刷了' : '扫码登录抖音（用手机抖音扫一下）')),
+            st.loggedIn
+              ? h('button', { 'data-dy-btn': '', disabled: busy === 'login', onClick: onLogout }, '退出登录')
+              : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'login', onClick: onQr },
+                busy === 'login' ? '准备中…' : '扫码登录')),
+
+          /* 二维码区：只在没登录时出现 */
+          !st.loggedIn
+            ? h('div', { 'data-dy-loginbox': '' },
+              qr && qr.url
+                ? h('div', { 'data-dy-row': '', style: { flexDirection: 'column', alignItems: 'center', gap: '10px', padding: '6px 0' } },
+                  h('img', {
+                    'data-dy-qr': '', src: qr.url, alt: '抖音登录二维码',
+                    style: { width: '190px', height: '190px', borderRadius: '10px', background: '#fff', padding: '6px' },
+                  }),
+                  h('div', { 'data-dy-sub': '', style: { textAlign: 'center' } },
+                    '手机抖音 → 右上角「≡」→ 扫一扫'),
+                  h('div', { 'data-dy-row': '' },
+                    h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'wait', onClick: onWaitLogin },
+                      busy === 'wait' ? '等你扫…' : '我扫完了'),
+                    h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: () => onQr(true) }, '重新出码'),
+                    h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: onCloseLogin }, '关掉窗口')),
+                  h('div', { 'data-dy-sub': '', style: { textAlign: 'center', maxWidth: '420px' } },
+                    '扫完如果抖音还弹「短信验证码」或「拖动滑块」—— 在那个弹出的浏览器窗口里做完，再点「我扫完了」。不用重新扫。'))
+                : h('div', { 'data-dy-sub': '' },
+                  qrHint || '点上面的「扫码登录」，会弹出一个浏览器窗口显示二维码，手机扫一下就行。'))
+            : null),
+
+        /* ── 环境体检 ── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '出问题了？'),
+              h('div', { 'data-dy-sub': '' }, '点一下，9 项环境逐个查，哪项红了直接告诉你怎么办')),
+            h('button', { 'data-dy-btn': '', disabled: busy === 'doctor', onClick: onDoctor },
+              busy === 'doctor' ? '查着…' : '检查环境')),
           doctor
             ? h('div', { 'data-dy-kv': '' },
               (doctor.items || []).map((it, i) => h('div', { key: 'd' + i },
                 (it.state === 'ok' ? '✅ ' : it.state === 'warn' ? '⚠️ ' : '❌ ')
                 + it.item + '：' + it.detail)))
             : null,
-          h('div', { 'data-dy-sub': '' },
-            '登录：命令行跑 node tools/qr-login.mjs start 扫码。扫完若还要短信/滑块验证，在那个浏览器窗口里做完。')),
+          h('div', { 'data-dy-row': '' },
+            h('button', { 'data-dy-mini': '', disabled: busy === 'report', onClick: onShowReport }, '看今天的报告'))),
+
+        /* ── 私信发给谁（点选，不用手填 sec_uid） ── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '私信发给谁'),
+              h('div', { 'data-dy-sub': '' },
+                cfg.dmTo
+                  ? `现在是「${cfg.dmTo}」${cfg.dmToId ? '' : '（⚠️ 没记下稳定 id，重名时可能选错）'}`
+                  : '想让插件把好玩的发给你，先在这里选一个人。不选也行 —— 那就只写日报，不发私信。')),
+            h('button', {
+              'data-dy-btn': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
+            }, busy === 'people' ? '读取中…' : (people === null ? '从我的会话里选' : '重新读取'))),
+
+          !st.loggedIn
+            ? h('div', { 'data-dy-sub': '' }, '（要先在上面扫码登录，才能读到你的人）')
+            : null,
+
+          people && people.length
+            ? h('div', { 'data-dy-people': '' },
+              people.map((p, i) => h('button', {
+                key: 'p' + i,
+                'data-dy-person': '',
+                'data-picked': (cfg.dmToId && p.sec_uid && cfg.dmToId === p.sec_uid)
+                  || (!cfg.dmToId && cfg.dmTo === p.nick) ? '' : undefined,
+                disabled: Boolean(busy),
+                onClick: () => pickPerson(p),
+              },
+                h('span', { 'data-dy-person-name': '' }, p.nick),
+                p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
+                p.preview ? h('span', { 'data-dy-person-sub': '' }, p.preview) : null,
+                ((cfg.dmToId && p.sec_uid && cfg.dmToId === p.sec_uid) || (!cfg.dmToId && cfg.dmTo === p.nick))
+                  ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已选')
+                  : null)))
+            : null,
+
+          people && !people.length
+            ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, peopleHint || '会话列表是空的')
+            : null,
+          peopleHint && people && people.length
+            ? h('div', { 'data-dy-sub': '' }, peopleHint)
+            : null),
 
         /* ── 刷什么 ── */
         h('div', { 'data-dy-card': '' },

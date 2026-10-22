@@ -1964,9 +1964,17 @@ export function apply(ctx, config) {
       return sendJson(res, 200, await checkUpdate(force))
     }
 
+    /* ── 新手流程说明（面板上「怎么用？」拿这份）── */
+    if (req.method === 'GET' && path === '/api/douyin-duty/guide') {
+      let text = ''
+      let err = ''
+      try { text = readFileSync(join(pluginDir, 'GUIDE.md'), 'utf8') } catch (e) { err = String(e?.message ?? e) }
+      return sendJson(res, 200, { ok: true, text, file: join(pluginDir, 'GUIDE.md'), error: err || undefined })
+    }
+
     /* ── 给别的 AI 用：MCP 配置 + 使用说明 ──
      * 面板上「复制这段配置」拿的就是这里生成的东西 —— 路径按**这台机器**算好，
-     * 不写死盘符（不然别人抄过去一定错）。
+     * 不写盘符（不然别人抄过去一定错）。
      */
     if (req.method === 'GET' && path === '/api/douyin-duty/ai-usage') {
       const serverPath = join(pluginDir, 'tools', 'mcp-server.mjs')
@@ -2134,6 +2142,102 @@ export function apply(ctx, config) {
         backend: 'feed（只读推荐流接口）',
       })
     }
+
+    /* ⭐ 扫码登录（2026-10-22 加）—— 以前只写在文档里让人敲命令行，新手根本走不到。
+     *   现在面板一键：出二维码 → 手机扫 → 点「我扫完了」。
+     *
+     *   QR 是**有头** Chrome 截的图，存 $DOUYIN_HOME/login-qr.png；
+     *   面板拿 `qr_url` 直接 <img> 显示（同一个 webServer 下加了一条静态路由）。
+     */
+    if (req.method === 'POST' && path === '/api/douyin-duty/login/qr') {
+      const force = String((await readBody(req))?.force || '') === '1'
+      // 先确保后台无头浏览器不占着 profile —— 它和扫码窗口共用一个 user-data-dir
+      if (force) {
+        runNodeTool('qr-login.mjs', ['close'], { timeout: 40_000 })
+        await new Promise((r) => setTimeout(r, 1200))
+      }
+      const r = runNodeTool('qr-login.mjs', ['start'], { timeout: 120_000 })
+      const j = pickJson(r.stdout)
+      if (!j) {
+        log(`扫码登录：出码失败（exit=${r.status}）${String(r.stderr || '').slice(0, 160)}`)
+        return sendJson(res, 200, {
+          ok: false,
+          error: '出二维码失败',
+          detail: String(r.stderr || r.stdout || '').slice(-600),
+          hint: '常见原因：没装浏览器 / Chrome 被别的进程锁住。点「关掉后台浏览器重试」再试一次',
+        })
+      }
+      if (!j.ok) {
+        log(`扫码登录：${j.conflict || '失败'} ${j.error || ''}`)
+        return sendJson(res, 200, j)
+      }
+      // 转成浏览器能直接 <img src> 的地址
+      const qrName = String(j.qr || '').split(/[\\/]/).pop() || 'login-qr.png'
+      log(`扫码登录：二维码已出（${qrName}，端口 ${j.port}）`)
+      return sendJson(res, 200, {
+        ...j,
+        qr_url: `/api/douyin-duty/login/qr.png?v=${Date.now()}`,
+      })
+    }
+    // 二维码图片本身（面板 <img src> 用）
+    if (req.method === 'GET' && path === '/api/douyin-duty/login/qr.png') {
+      const f = join(stateDir, 'login-qr.png')
+      if (!existsSync(f)) { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); return res.end('还没有二维码 —— 先点「扫码登录」') }
+      try {
+        const buf = readFileSync(f)
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' })
+        return res.end(buf)
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+        return res.end(String(e?.message ?? e))
+      }
+    }
+    // 「我扫完了」：轮询到登录成功（最多 ~120 秒）
+    if (req.method === 'POST' && path === '/api/douyin-duty/login/wait') {
+      const body = await readBody(req)
+      const sec = Math.max(10, Math.min(Number(body?.seconds) || 120, 300))
+      const r = runNodeTool('qr-login.mjs', ['watch', String(sec)], { timeout: (sec + 30) * 1000 })
+      // watch 会打多行 JSON，取最后一个完整对象
+      const lines = String(r.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)
+      let last = null
+      for (let i = lines.length - 1; i >= 0 && !last; i--) {
+        try { last = JSON.parse(lines[i]) } catch { /* 继续往上找 */ }
+      }
+      if (!last) {
+        return sendJson(res, 200, { ok: false, error: '没等到结果', detail: String(r.stderr || r.stdout || '').slice(-400) })
+      }
+      if (last.ok) {
+        log(`扫码登录：成功，凭证已保存（${last.cookies || '?'} 条 Cookie）`)
+        // 登完把有头浏览器收掉，别让它一直占着 profile（不然发私信会起不来）
+        try { runNodeTool('qr-login.mjs', ['close'], { timeout: 40_000 }) } catch { /* 关不掉也不致命 */ }
+        refreshCfg()
+      }
+      return sendJson(res, 200, last)
+    }
+    // 关掉登录用的浏览器（用户嫌窗口碍事 / 出码失败要重来时）
+    if (req.method === 'POST' && path === '/api/douyin-duty/login/close') {
+      const r = runNodeTool('qr-login.mjs', ['close'], { timeout: 40_000 })
+      return sendJson(res, 200, pickJson(r.stdout) || { ok: true })
+    }
+
+    /* ⭐ 列出会话里的人（昵称 + sec_uid）—— 让用户点选"私信发给谁"，
+     *    别再让他手填 sec_uid（新手根本不知道那是什么，也找不到）。只读。 */
+    if (req.method === 'POST' && path === '/api/douyin-duty/dm/people') {
+      if (!hasCredential(stateDir)) return sendJson(res, 200, { ok: false, error: '还没登录', hint: '先在上面扫码登录' })
+      // 后台无头浏览器可能正在跑；先让它别占着（跟登录窗口同一个 profile）
+      const r = runNodeTool('im-send.mjs', ['--list'], { timeout: 180_000 })
+      const j = pickJson(r.stdout)
+      if (!j) {
+        return sendJson(res, 200, {
+          ok: false, error: '没读到会话列表',
+          detail: String(r.stderr || r.stdout || '').slice(-500),
+          hint: '确认已登录；如果一直读不到，点「检查环境」看看浏览器那一项',
+        })
+      }
+      if (j.ok) log(`会话列表：${j.count} 个人${j.no_id_count ? `（${j.no_id_count} 个没拿到稳定 id）` : ''}`)
+      return sendJson(res, 200, j)
+    }
+
     if (req.method === 'POST' && path === '/api/douyin-duty/login/save') {
       const body = await readBody(req)
       const r = saveCookie(stateDir, String(body?.cookie ?? ''), log)

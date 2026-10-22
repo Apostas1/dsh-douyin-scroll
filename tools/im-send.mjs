@@ -38,6 +38,8 @@ const FILE = argOf('--file', '')
 const TEXT = argOf('--text', '')
 const DRY = argv.includes('--dry')
 const READ = argv.includes('--read')
+/** ⭐ --list：只列出会话里的人（昵称 + sec_uid），不发东西 */
+const LIST = argv.includes('--list')
 
 const bodyText = async (ev) => (await ev(`(document.body?document.body.innerText:'')||''`)) || ''
 
@@ -234,6 +236,51 @@ async function openConversation(ev, send, who, whoId) {
 }
 
 async function main() {
+  /**
+   * ⭐ `--list`：把**会话列表里的人**列出来（昵称 + sec_uid + 头像）。
+   *    为什么要有：设置页原来让人手填「私信发给谁」和「稳定 ID」——
+   *    新手根本不知道 sec_uid 是什么，更找不到。现在直接点选。
+   *    只读，不发任何东西。
+   */
+  if (LIST) {
+    const c = await openPage({ url: 'https://www.douyin.com/chat' })
+    try {
+      const url = String(await c.ev('location.href'))
+      if (!url.includes('/chat')) {
+        await c.send('Page.navigate', { url: 'https://www.douyin.com/chat' })
+        await sleep(5000)
+      }
+      await sleep(2500)
+      const raw = await listConversations(c.ev)
+      let list = []
+      try { list = JSON.parse(raw) || [] } catch { list = [] }
+      const people = list.map((x) => {
+        const nick = nickOf(x.text)
+        // 会话项文本是「昵称 时间 最后一句话」，去掉昵称和时间，剩下的是预览
+        const preview = String(x.text || '').slice(nick.length).trim()
+          .replace(/^\d{1,2}:\d{2}\s*/, '')
+          .replace(/^(昨天|前天|\d+月\d+日)\s*/, '')
+          .slice(0, 50)
+        return { nick, sec_uid: x.sec_uid || '', preview, has_id: Boolean(x.sec_uid) }
+      }).filter((p) => p.nick)
+      // 同名的人标出来（这种必须用 sec_uid 区分）
+      const counts = {}
+      for (const p of people) counts[p.nick] = (counts[p.nick] || 0) + 1
+      for (const p of people) p.duplicate = counts[p.nick] > 1
+      return out({
+        ok: true, mode: 'list', read_only: true,
+        count: people.length,
+        people,
+        no_id_count: people.filter((p) => !p.has_id).length,
+        hint: people.length
+          ? (people.some((p) => p.duplicate)
+            ? '有同名的人 —— 选的时候看「最近一条消息」区分，别选错'
+            : '这些都是你最近聊过的人，直接选一个就行')
+          : '会话列表是空的 —— 先在抖音里跟要发的人聊一句，再回来这里选',
+      })
+    } finally { c.close() }
+  }
+
   const text = FILE ? readFileSync(FILE, 'utf8').trim() : String(TEXT || '').trim()
   if (!READ) {
     if (!text) return out({ ok: false, error: '没有正文（用 --text 或 --file）' })
