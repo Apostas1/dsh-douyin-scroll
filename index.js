@@ -99,6 +99,13 @@ export const Config = !z ? undefined : z.object({
   dmToId: z.string().default('').extra('volatile', true),
   webhookUrl: z.string().default('').extra('volatile', true),
   webhookPreset: z.string().default('custom').extra('volatile', true),
+  /**
+   * ⭐ 检查更新的地址（可选）。留空 = 自动：
+   *   ① npm registry 的 `/<包名>/latest`（包要是发到 npm 了才查得到）
+   *   ② 包里 `repository` 指向 GitHub 时，读仓库根目录的 package.json
+   * 填了就只查这一个（要返回 JSON，至少有 { "version": "x.y.z" }）。
+   */
+  updateUrl: z.string().default('').extra('volatile', true),
   /** 日报形态：full / brief / off */
   reportLevel: z.string().default('full').extra('volatile', true),
   /** Python：指向 venv 里那个最好 */
@@ -165,6 +172,7 @@ export function apply(ctx, config) {
     autoComment: false, commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
     mentionName: '', httpCommentUrl: '',
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
+    updateUrl: '',
     dmTo: '', dmToId: '',
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
@@ -1077,6 +1085,13 @@ export function apply(ctx, config) {
   })
 
   tool({
+    name: 'douyin_update',
+    description: '检查「刷抖音」插件有没有新版本。只读，不安装、不自动升级 —— 只告诉你当前版本、最新版本和升级命令。',
+    parameters: { force: { type: 'boolean', description: '忽略 10 分钟缓存，立刻重查（默认 false）' } },
+    async execute(args = {}) { return checkUpdate(args?.force === true) },
+  })
+
+  tool({
     name: 'douyin_notify',
     description: '**往用户屏幕上发一条消息**（Windows 通知）。不给参数就用当前通知方式做一次连通性测试；'
       + '给了 title/body 就直接把这条内容弹出去。返回到底弹没弹成功。',
@@ -1796,6 +1811,106 @@ export function apply(ctx, config) {
     req.on('error', () => finish({}))
   })
 
+  /* ─────────────── 检查更新 ───────────────
+   * 🔴 三条设计约束：
+   *   ① **不能拖慢面板**：走异步 fetch + 3 秒超时，查不到就报"查不到"，绝不让设置页转圈。
+   *   ② **不写死仓库地址**：发布者可能换 GitHub 用户名、也可能只发 npm ⇒ 按下面顺序自己找。
+   *   ③ **不自动升级**：只告诉有没有新版本 + 怎么升。装插件是使用者的事（改 profile 是他的机器）。
+   *   查过的结果落 `<家>/update.json`，10 分钟内不重复打网络（面板会反复渲染）。
+   */
+  const updateFile = join(stateDir, 'update.json')
+  let updateCache = null
+  const cmpVer = (a, b) => {
+    const pa = String(a || '').replace(/^v/i, '').split(/[.+-]/).map((x) => parseInt(x, 10) || 0)
+    const pb = String(b || '').replace(/^v/i, '').split(/[.+-]/).map((x) => parseInt(x, 10) || 0)
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0
+      const y = pb[i] || 0
+      if (x !== y) return x > y ? 1 : -1
+    }
+    return 0
+  }
+  const pkgMeta = () => {
+    try { return JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8')) } catch { return {} }
+  }
+  /** 从 package.json 的 repository 里掏出 owner/repo（支持字符串和对象两种写法） */
+  const repoSlug = () => {
+    const r = pkgMeta().repository
+    const url = typeof r === 'string' ? r : (r && r.url) || ''
+    const m = /github\.com[/:]([^/]+)\/([^/.]+)/i.exec(String(url))
+    return m ? `${m[1]}/${m[2]}` : ''
+  }
+  const fetchJson = async (url, timeoutMs = 3000) => {
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), timeoutMs)
+    try {
+      const res = await fetch(url, { signal: ac.signal, headers: { accept: 'application/json' } })
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
+      return { ok: true, json: await res.json() }
+    } catch (e) {
+      return { ok: false, error: String(e?.name === 'AbortError' ? `超时（${timeoutMs}ms）` : (e?.message ?? e)).slice(0, 160) }
+    } finally { clearTimeout(timer) }
+  }
+  /**
+   * 查一次最新版本。没网/没发布都不算错，返回 checked:false + 为什么。
+   * @param {boolean} force 忽略 10 分钟缓存
+   */
+  const checkUpdate = async (force = false) => {
+    const cur = myVersion()
+    const explicit = String(cfg.updateUrl || '').trim()
+    // ⚠️ 缓存必须带**来源指纹**：改了「更新地址」还拿旧缓存，用户会以为新地址没生效
+    //    （2026-10-22 实测踩过：把 updateUrl 指到本地假服务，面板还显示旧结果）
+    const sig = `${cur}|${explicit}`
+    const cached = readJson(updateFile, null)
+    const fresh = (o) => o && Date.now() - Number(o.at || 0) < 600_000 && o.sig === sig
+    if (!force && fresh(updateCache)) return { ...updateCache, cached: true }
+    if (!force && fresh(cached)) return { ...cached, cached: true }
+    const meta = pkgMeta()
+    const name = String(meta.name || 'dsh-douyin-scroll')
+    const sources = []
+    if (explicit) sources.push({ kind: 'url', name: '自定义地址', url: explicit })
+    sources.push({ kind: 'npm', name: 'npm registry', url: `https://registry.npmjs.org/${encodeURIComponent(name)}/latest` })
+    const slug = repoSlug()
+    if (slug) {
+      for (const br of ['main', 'master']) {
+        sources.push({ kind: 'github', name: `GitHub ${slug}@${br}`, url: `https://raw.githubusercontent.com/${slug}/${br}/package.json` })
+      }
+    }
+    const tried = []
+    let latest = ''
+    let from = ''
+    for (const s of sources) {
+      const r = await fetchJson(s.url)
+      if (r.ok && r.json && r.json.version) {
+        latest = String(r.json.version)
+        from = s.name
+        tried.push({ source: s.name, ok: true, version: latest })
+        break
+      }
+      tried.push({ source: s.name, ok: false, error: r.error || '没有 version 字段' })
+    }
+    const out = {
+      ok: true,
+      current: cur,
+      latest: latest || '',
+      source: from,
+      checked: Boolean(latest),
+      hasUpdate: Boolean(latest) && cmpVer(latest, cur) > 0,
+      tried,
+      sig,
+      at: Date.now(),
+      // 升级怎么做——别让使用者猜
+      how: latest && cmpVer(latest, cur) > 0
+        ? `dsh plugin --profile <你的profile> add ${name}@${latest}  然后重启 dsh`
+        : '',
+      note: latest ? '' : `查不到最新版本（试了 ${sources.length} 个来源）。插件可能还没发布到 npm / GitHub，或者这台机器连不上外网 —— 可以在设置里填「更新地址」。`,
+    }
+    updateCache = out
+    try { writeJson(updateFile, out) } catch { /* 写不进去不影响 */ }
+    log(`检查更新：当前 ${cur} / 最新 ${latest || '(查不到)'}${from ? '（' + from + '）' : ''}`)
+    return out
+  }
+
   const status = () => {
     refreshCfg()
     const st = rollDay()
@@ -1842,6 +1957,60 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
     if (req.method === 'POST' && path === '/api/douyin-duty/run') return sendJson(res, 200, { ok: true, ...runDuty('manual') })
+
+    /* ── 检查更新 ── */
+    if (req.method === 'GET' && path === '/api/douyin-duty/update') {
+      const force = String(url.searchParams.get('force') || '') === '1'
+      return sendJson(res, 200, await checkUpdate(force))
+    }
+
+    /* ── 给别的 AI 用：MCP 配置 + 使用说明 ──
+     * 面板上「复制这段配置」拿的就是这里生成的东西 —— 路径按**这台机器**算好，
+     * 不写死盘符（不然别人抄过去一定错）。
+     */
+    if (req.method === 'GET' && path === '/api/douyin-duty/ai-usage') {
+      const serverPath = join(pluginDir, 'tools', 'mcp-server.mjs')
+      const mcpConfig = {
+        mcpServers: {
+          douyin: {
+            command: 'node',
+            args: [serverPath],
+            env: { DOUYIN_HOME: stateDir },
+          },
+        },
+      }
+      let doc = ''
+      let docError = ''
+      try { doc = readFileSync(join(pluginDir, 'AI-USAGE.md'), 'utf8') } catch (e) { docError = String(e?.message ?? e) }
+      return sendJson(res, 200, {
+        ok: true,
+        doc,
+        doc_error: docError || undefined,
+        file: join(pluginDir, 'AI-USAGE.md'),
+        mcp: {
+          server: serverPath,
+          exists: existsSync(serverPath),
+          selfTest: `node "${serverPath}" --selftest`,
+          home: stateDir,
+          config: mcpConfig,
+          configText: JSON.stringify(mcpConfig, null, 2),
+          note: '任何支持 MCP 的工具（Claude Code / Cursor / Cline / 另一个 DSH）把这段填进它的 MCP 配置即可。',
+        },
+        // DSH 自己也能把这份 server 挂成 MCP —— 给一段可以直接抄的 patch
+        dshPatch: [
+          '- id: mcp-douyin',
+          "  name: '@deepseek-ai/dsh-mcp-client'",
+          '  config:',
+          '    serverName: douyin',
+          '    transport: stdio',
+          `    command: 'node'`,
+          `    args: ['${serverPath.replace(/\\/g, '/')}']`,
+          '    env:',
+          `      DOUYIN_HOME: '${stateDir.replace(/\\/g, '/')}'`,
+          '',
+        ].join('\n'),
+      })
+    }
 
     /* ── 环境体检（纯 Node，不需要 Python —— 用户第一次点它时还没有 venv） ── */
     if (req.method === 'POST' && path === '/api/douyin-duty/doctor') {

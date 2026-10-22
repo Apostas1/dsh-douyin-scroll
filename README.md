@@ -189,7 +189,8 @@ node selfcheck.mjs
 |---|---|---|
 | 每天最多挑几条 | 5 | **全天总量**；0 = 不自动刷 |
 | 每次最多筛选几个 | 12 | 证据包上限（传给 `forward-pick.py --limit`，最多 30） |
-| 峰谷时段自动刷 | 关 | 打开后展开「午间 12:00–14:00」「夜间 18:00–09:00」 |
+| 中午谷时 / 晚上谷时 | 开 / 开 | 12:00–14:00 / 18:00–次日 09:00 |
+| **自定义时段** | 空 | 想加几个加几个（`09:00–11:00`、跨零点的 `23:00–02:00` 都行）；**跟上面两个叠加**，任意一个命中就跑，每个时段每天一次 |
 | 关键词 / 分类 / 作者 | 空 | 一行一个；**只当报告标注**，采集侧不按词搜 |
 | 文案太短阈值 / 评论少阈值 | 12 / 3 | **两个条件同时成立**才跳过 |
 | 自动评论并 @ | 关 | 危险，默认关 |
@@ -198,6 +199,7 @@ node selfcheck.mjs
 | 日报写多细 | full | full / brief（薄）/ off（不写） |
 | pythonPath / dshBin | 自动 | 一般不用改 |
 | 发私信给谁（昵称 / 稳定 ID） | 空 | `dmTo` 只显示；`dmToId` 才决定发给谁 |
+| 更新地址 `updateUrl` | 空 | 留空 = 自动查 npm / GitHub；填了就只查这一个 |
 
 > 2026-10-21 删掉了「采集来源」和「工作区」两项：前者只剩一条路（只读推荐流），
 > 后者是"读外部 AGENTS.md 当人设"的口子，已封死 —— 人设只读插件自带的 `prompts/persona.md`。
@@ -288,16 +290,22 @@ dsh-douyin-scroll/
 ├── package.json / cordis.patch.yml   # 插件声明（entry id 必须 = douyin-scroll）
 ├── index.js                          # 宿主半端：配置/工具/定时器/证据包/headless 跑一轮/HTTP
 ├── client.js                         # 设置页（非 ESM 自注册脚本）
-├── selfcheck.mjs                     # 本地预检（59 项）
+├── AI-USAGE.md                       # ⭐ 给别的 AI 看的使用说明（MCP 接入 + 安全红线）
+├── selfcheck.mjs                     # 本地预检（110 项）
 ├── tools/
+│   ├── mcp-server.mjs                # ⭐ 标准 MCP server（stdio，零依赖）—— 别的 agent 工具接进来
+│   ├── panel-render-check.mjs        # ⭐ 设置页真渲染一遍（抓白屏，语法检查查不出）
+│   ├── doctor.mjs                    # ⭐ 环境体检（纯 Node，不依赖 Python）
 │   ├── forward-pick.py               # ⭐ 取候选 + 硬筛 + 打分 + dropped 计数
 │   ├── forward-run.mjs               # 命令行一键：拉候选 + 弹通知
 │   ├── api-comments.py               # 签名拉评论
 │   ├── notice-read.py                # 签名读通知（含 @ 我）
 │   ├── api-reply.py                  # 签名回评论（只读先通才写）
-│   ├── comment-api.mjs               # 无头页面里发评论/回复（真 @ 需带 mention_* 参数）
+│   ├── comment-api.mjs               # 无头页面里发评论/回复
+│   ├── comment-mention-ui.mjs        # 真 @ 提及（只有 UI 点选才算数）
 │   ├── comment-delete.mjs            # 删自己的评论（页面里 POST /comment/delete/）
 │   ├── comment-reply.mjs             # 真实 UI 回某条评论（保守方案）
+│   ├── comment-read-dom.mjs          # 从评论区 DOM 读（绕开"只翻前 80 条"的接口盲区）
 │   ├── card-share.mjs                # 分享卡片（无头页面点「分享给朋友」）
 │   ├── im-send.mjs                   # 私信发送 + 回读（头像左右判发送方）
 │   ├── mk-msg.mjs                    # 把清单拼成私信正文
@@ -308,6 +316,8 @@ dsh-douyin-scroll/
 │   └── smoke.py                      # 判断层自检（离线）
 ├── lib/
 │   ├── hostdeps.mjs                  # 三级兜底取宿主依赖
+│   ├── paths.mjs                     # ⭐ 家目录/插件目录的唯一来源（不写死盘符）
+│   ├── chrome.mjs                    # 无头浏览器（找不到 Chrome 就找 Edge/Chromium）
 │   ├── state.mjs                     # 家目录 / 谷时窗口 / 章程记账 / Cookie 脱敏
 │   ├── credential.mjs                # Cookie 存取
 │   ├── notify.mjs                    # webhook + 报告摘要 + URL 脱敏
@@ -315,14 +325,36 @@ dsh-douyin-scroll/
 │   └── uvfetch.mjs                   # 机器上没有 uv/python 时自动下一份
 ├── prompts/
 │   ├── duty.md                       # 一轮的章程（判据 + 红线 + 报告格式）
-│   ├── persona.md                    # 插件自带人设（第一行带身份牌）
+│   ├── persona.default.md            # 中性默认人设（随包发布）
 │   └── sample-candidates.json        # 内置示例（离线演示用）
 └── requirements.txt                  # 只有 curl_cffi + httpx
 ```
 
-> 2026-10-21 砍掉了 `vendor/douyin-mcp/`（33 文件 / 506 KB 的内置 Python MCP）和
-> `lib/mcp.mjs`：那几个驱动（bb-browser / playwright / cookie）**一个真数据都没跑通过**，
-> 还绑着"必须开浏览器"。现在采集/发送全部直连 `tools/*`。
+---
+
+## 给别的 AI 用（MCP）
+
+插件自带一个**标准 MCP server**（`tools/mcp-server.mjs`，stdio，**零依赖**）。
+Claude Code / Cursor / Cline / 另一个 DSH 都能接：
+
+```json
+{
+  "mcpServers": {
+    "douyin": {
+      "command": "node",
+      "args": ["<插件目录>/tools/mcp-server.mjs"],
+      "env": { "DOUYIN_HOME": "<插件家目录>" }
+    }
+  }
+}
+```
+
+设置页「**给别的 AI 用 → 看接入方式**」里有一键复制（路径按你这台机器算好）。
+完整说明见 [AI-USAGE.md](AI-USAGE.md)，或者直接让那个 AI 调 `douyin_guide`。
+
+> 为什么不做成"任何 AI 都能直接装"：MCP 是各家通用的接口，但**它只解决"能调工具"**。
+> 「按点刷一轮 → 写日报」那条值班链路仍然在 DSH 里（要 headless 会话 + 定时器）。
+> 两件事分开：**能力走 MCP，值班走 DSH 插件。**
 
 ---
 

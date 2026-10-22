@@ -29,7 +29,10 @@ console.log('1. 文件清单')
 const required = [
   'package.json', 'cordis.patch.yml', 'index.js', 'client.js', 'requirements.txt',
   'lib/hostdeps.mjs', 'lib/state.mjs', 'lib/credential.mjs', 'lib/notify.mjs', 'lib/toast.mjs', 'lib/uvfetch.mjs',
+  'lib/paths.mjs', 'lib/chrome.mjs',
   'prompts/duty.md', 'prompts/persona.default.md', 'prompts/sample-candidates.json',
+  // 给别的 AI / MCP 用的那一层
+  'AI-USAGE.md', 'tools/mcp-server.mjs', 'tools/doctor.mjs', 'check-client.mjs',
   // 采集 / 发送这一层：全是自带的脚本（2026-10-21 起不再有 vendor/ 里的内置 MCP）
   'tools/forward-pick.py', 'tools/forward-run.mjs', 'tools/notice-read.py', 'tools/api-comments.py',
   'tools/comment-api.mjs', 'tools/comment-delete.mjs', 'tools/card-share.mjs', 'tools/im-send.mjs',
@@ -62,7 +65,9 @@ try {
 
 /* ── 4. JS 语法 ── */
 console.log('\n4. JS 语法（node --check）')
-for (const f of ['index.js', 'client.js', ...readdirSync(join(here, 'lib')).filter((x) => x.endsWith('.mjs')).map((x) => join('lib', x))]) {
+for (const f of ['index.js', 'client.js',
+  ...readdirSync(join(here, 'lib')).filter((x) => x.endsWith('.mjs')).map((x) => join('lib', x)),
+  ...readdirSync(join(here, 'tools')).filter((x) => x.endsWith('.mjs')).map((x) => join('tools', x))]) {
   const r = spawnSync(process.execPath, ['--check', join(here, f)], { encoding: 'utf8' })
   if (r.status === 0) ok(f)
   else bad(`${f}：${(r.stderr || '').split('\n').slice(0, 3).join(' ')}`)
@@ -167,6 +172,112 @@ try {
   if (/\+ 加一个时段/.test(cl)) ok('设置页有自定义时段入口')
   else warn('设置页暂时没有自定义时段入口（后端已就绪，加回来只是一个卡片的事）')
 } catch (e) { bad(`自定义时段检查失败：${e.message}`) }
+
+/* ── 4g. 给别的 AI 用（MCP server） ── */
+console.log('\n4g. 给别的 AI 用')
+try {
+  const mcpFile = join(here, 'tools', 'mcp-server.mjs')
+  const mcp = existsSync(mcpFile) ? readFileSync(mcpFile, 'utf8') : ''
+  if (!mcp) bad('缺 tools/mcp-server.mjs —— 别的 agent 工具接不进来')
+  else {
+    // ① 必须零依赖：只许 import node: 内置模块 + 相对路径
+    const imports = [...mcp.matchAll(/^import .*?from '([^']+)'/gm)].map((m) => m[1])
+    const external = imports.filter((s) => !s.startsWith('node:') && !s.startsWith('.'))
+    if (external.length) bad(`mcp-server.mjs 引入了外部依赖：${external.join(', ')} —— 这个包没有 node_modules，会直接崩`)
+    else ok(`mcp-server.mjs 零依赖（${imports.length} 个 import 全是 node: / 相对路径）`)
+    // ② stdout 只能出 JSON-RPC
+    if (/console\.log/.test(mcp.replace(/--selftest[\s\S]*$/, ''))) {
+      bad('mcp-server.mjs 正文里用了 console.log —— 会污染 JSON-RPC 的 stdout，客户端会崩')
+    } else ok('mcp-server.mjs 正文不往 stdout 打日志（只走 stderr）')
+    // ③ 真跑一遍协议握手
+    const st = spawnSync(process.execPath, [mcpFile, '--selftest'], {
+      encoding: 'utf8', timeout: 60_000,
+      env: { ...process.env, PYTHONUTF8: '1' },
+    })
+    const out = String(st.stdout || '')
+    if (st.status === 0 && /#1 initialize -> ok/.test(out) && /#2 tools\/list -> \d+ tools/.test(out)) {
+      const n = (out.match(/#2 tools\/list -> (\d+) tools/) || [])[1]
+      ok(`mcp-server.mjs 自测通过（initialize + tools/list，${n} 个工具）`)
+    } else bad(`mcp-server.mjs 自测失败：${(out || st.stderr || '').split('\n').slice(0, 3).join(' ')}`)
+    // ④ 会发东西的工具必须有 confirm 闸
+    const sendTools = ['douyin_share_card', 'douyin_dm', 'douyin_comment_reply']
+    const missing = sendTools.filter((t) => {
+      const i = mcp.indexOf(`name: '${t}'`)
+      if (i < 0) return true
+      const seg = mcp.slice(i, i + 2500)
+      return !/confirm: \{ type: 'boolean'/.test(seg) || !/args\?\.confirm !== true/.test(seg)
+    })
+    if (missing.length) bad(`这些 MCP 工具没有 confirm 闸：${missing.join(', ')}`)
+    else ok(`${sendTools.length} 个会发东西的 MCP 工具都带 confirm 闸`)
+  }
+  // ⑤ 使用说明必须存在，且写清「先卡片后文字」
+  const doc = join(here, 'AI-USAGE.md')
+  if (existsSync(doc)) {
+    const d = readFileSync(doc, 'utf8')
+    if (/先卡片，后文字/.test(d)) ok('AI-USAGE.md 写明了「先卡片，后文字」')
+    else bad('AI-USAGE.md 没写「先卡片，后文字」—— 别的 AI 会按错的顺序发')
+    if (/confirm: true/.test(d) || /confirm:true/.test(d)) ok('AI-USAGE.md 写明了 confirm 闸')
+    else bad('AI-USAGE.md 没写 confirm 闸 —— 别的 AI 会直接发')
+    if (/不读画面|ASR/.test(d)) ok('AI-USAGE.md 写明了「看不到画面」')
+    else bad('AI-USAGE.md 没写「看不到画面」—— 别的 AI 会以为它能看视频')
+  } else bad('缺 AI-USAGE.md —— 别的 AI 不知道怎么用')
+} catch (e) { bad(`MCP / 使用说明检查失败：${e.message}`) }
+
+/* ── 4h. 检查更新 ── */
+console.log('\n4h. 检查更新')
+try {
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+  if (/updateUrl:\s*z\.string\(\)/.test(idx)) ok('Config 有 updateUrl（可以指定自己的更新源）')
+  else bad('Config 缺 updateUrl')
+  if (/const checkUpdate\s*=/.test(idx) && /registry\.npmjs\.org/.test(idx)) ok('检查更新会查 npm registry')
+  else bad('检查更新没有 npm 来源')
+  if (/repoSlug/.test(idx) && /raw\.githubusercontent\.com/.test(idx)) ok('有 GitHub 来源（从 package.json 的 repository 推出来）')
+  else bad('没有 GitHub 来源 —— 只发 GitHub 不验证 npm 的包永远查不到')
+  // 🔴 只查不装：绝不能自动升级（改使用者的 profile 是他的机器）
+  //    判据看**行为**：checkUpdate 那段里不许出现任何会去执行 `plugin add` 的调用。
+  const updSeg = (() => {
+    const i = idx.indexOf('const checkUpdate')
+    return i < 0 ? '' : idx.slice(i, i + 3500)
+  })()
+  const installsItself = /spawn(Sync)?\([^)]*'plugin'/.test(updSeg)
+    || /runNodeTool\('install\.mjs'/.test(updSeg)
+    || /execSync\(/.test(updSeg)
+  if (installsItself) bad('checkUpdate 里出现了会真去装包的调用 —— 检查更新只许"告诉有没有"，不许自己动')
+  else ok('检查更新只查不装（不自动改 profile）')
+  if (/\/update/.test(cl) && /检查更新/.test(cl)) ok('设置页有「检查更新」按钮')
+  else bad('设置页没有检查更新入口')
+} catch (e) { bad(`检查更新检查失败：${e.message}`) }
+
+/* ── 4i. 设置页「给别的 AI 用」 ── */
+console.log('\n4i. 设置页的 AI 接入块')
+try {
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+  if (/给别的 AI 用/.test(cl)) ok('设置页有「给别的 AI 用」卡片')
+  else bad('设置页没有「给别的 AI 用」卡片')
+  if (/\/ai-usage/.test(cl)) ok('卡片会调 /ai-usage 拿配置和说明')
+  else bad('卡片没接 /ai-usage')
+  if (/copy\(/.test(cl) && /clipboard/.test(cl)) ok('有复制按钮（clipboard + execCommand 兜底）')
+  else bad('没有复制按钮 —— 让人手抄路径不现实')
+} catch (e) { bad(`AI 接入块检查失败：${e.message}`) }
+
+/* ── 4j. 设置页真的能渲染出来 ──
+ * 🔴 2026-10-22 教训：`node --check` 只查语法。面板整块消失的原因是**渲染/加载时抛错**，
+ *    语法完全合法。这一段用极小 React 替身把 Panel 真跑一遍 —— 白屏会在推之前被抓住。
+ */
+console.log('\n4j. 设置页渲染（真跑一遍）')
+try {
+  const r = spawnSync(process.execPath, [join(here, 'tools', 'panel-render-check.mjs')], {
+    encoding: 'utf8', timeout: 120_000,
+  })
+  if (r.status === 0) {
+    const n = (String(r.stdout || '').match(/元素树 (\d+) 个节点/) || [])[1]
+    ok(`设置页能渲染（${n || '?'} 个节点，所有卡片都在）`)
+  } else {
+    const why = String(r.stdout || r.stderr || '').split('\n').filter((l) => l.includes('❌')).slice(0, 3).join(' ')
+    bad(`设置页渲染失败：${why || String(r.stderr || '').slice(0, 200)}`)
+  }
+} catch (e) { bad(`渲染检查跑不起来：${e.message}`) }
 
 /* ── 4e. 采集门槛 / 跨天记账 ── */
 console.log('\n4e. 采集门槛 / 跨天')

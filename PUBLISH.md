@@ -149,16 +149,34 @@ dsh plugin --profile web add link:<本目录绝对路径>
 ## 8. 这个包现在有什么（推之前对一眼）
 
 ```
-index.js  client.js  cordis.patch.yml  package.json
-lib/           6 个（state / credential / notify / toast / hostdeps / uvfetch）
-prompts/       duty.md（值班章程）、persona.md（人设）、sample-candidates.json
-tools/         15 个（采集 / 评论 / 私信 / 发卡片 / 扫码 / 自检）
-selfcheck.mjs  59 项预检，不用装 dsh 也能跑
+index.js  client.js  cordis.patch.yml  package.json  AI-USAGE.md
+lib/           8 个（state / credential / notify / toast / hostdeps / uvfetch / paths / chrome）
+prompts/       duty.md（值班章程）、persona.default.md（中性默认人设）、sample-candidates.json
+tools/         20 个（采集 / 评论 / 私信 / 发卡片 / 扫码 / 自检 / MCP server / 渲染检查）
+selfcheck.mjs  110 项预检，不用装 dsh 也能跑
 requirements.txt  只有 curl_cffi + httpx
 ```
 
 推之前跑一遍：
 
 ```powershell
-node selfcheck.mjs      # 应该 59 通过 / 0 失败
+node selfcheck.mjs      # 应该 110 通过 / 0 失败
 ```
+
+> ⚠️ 仓库里**没有** `prompts/persona.md`（作者自己的人设，`.gitignore` 拦着）。
+> 别人 clone 下来只有 `persona.default.md`（中性那份）—— 这是有意的，别"补回去"。
+
+## 9. 发到 npm（可选，但推荐）
+
+`dsh plugin add` 装的是 npm 包，所以想让人一条命令装上，就发 npm：
+
+```powershell
+cd D:\aiagent\deepseek\dsh-douyin-scroll
+npm publish --access public
+```
+
+发了之后，别人就能 `dsh plugin --profile <profile> add dsh-douyin-scroll`。
+
+⭐ **发 npm 还有个副作用是好的**：设置页的「检查更新」能直接查到新版本
+（它按 `registry.npmjs.org/<包名>/latest` 查）。只发 GitHub 也能查
+（插件会读仓库根目录的 `package.json`，前提是 `package.json` 里填了 `repository`）。
