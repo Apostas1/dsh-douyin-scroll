@@ -95,6 +95,36 @@ const MOCK = {
   '/api/douyin-duty/memory': () => ({
     ok: true, stats: { dir: 'H:/dy/memory', dm: 2, comment: 1, bytes: 4096 },
   }),
+  '/api/douyin-duty/inbox': () => ({
+    ok: true,
+    at_n: 2,
+    dm_n: 1,
+    at: [
+      { nickname: '某帅气用户', content: '@贪吃的可爱大肥鱼 大肥鱼出来下', before: '没回过',
+        aweme_id: '7693806860863802662', comment_id: '7699090731688952613',
+        video_url: 'https://www.douyin.com/video/7693806860863802662',
+        my_comments_here: [{ at: '2026-10-22', text: '我之前在这说过一句', mention: '' }] },
+      { nickname: '另一个朋友', content: '@贪吃的可爱大肥鱼 出来见人', before: '回过',
+        aweme_id: '7694192415963368730', comment_id: '7699009624113152825',
+        video_url: 'https://www.douyin.com/video/7694192415963368730', my_comments_here: [] },
+    ],
+    dm: [
+      { nick: '某帅气用户', sec_uid: 'MS4wLjABAAAA_test1', preview: '我也爱你', duplicate: false,
+        remembered: 11, their_last: { text: '我也爱你', at: '2026-10-22' }, last_from: 'them', needs_reply: true },
+    ],
+    errors: [],
+  }),
+  '/api/douyin-duty/chat/read': () => ({
+    ok: true, to: '某帅气用户', to_sec_uid: 'MS4wLjABAAAA_test1',
+    count: 3, mine: 2, them: 1, unknown: 0,
+    messages: [
+      { from: 'me', text: '主人，爱你。', awe: 700 },
+      { from: 'them', text: '我也爱你', awe: 700 },
+      { from: 'me', text: '这条想让你看看', awe: 800 },
+    ],
+    context: { who: { nick: '某帅气用户' }, facts: ['喜欢猫', '在杭州'], recent: [], total_remembered: 11 },
+  }),
+  '/api/douyin-duty/chat/send': () => ({ ok: true, sent: true, to: '某帅气用户', len: 5 }),
   // 扫码登录：默认成功给出 qr_url
   '/api/douyin-duty/login/qr': () => ({ ok: true, qr_url: '/api/douyin-duty/login/qr.png?v=1', port: 9374 }),
   // 登录成功会真的把登录态翻过来 —— 面板随后 refresh() 必须看到 true
@@ -183,7 +213,13 @@ let tree = null
 let renders = 0
 rerender = () => { renders++ }
 
-/** 渲染一遍并取元素树（重置 hook 游标，让 useState 读最新值） */
+/**
+ * 渲染一遍并取元素树。
+ * ⚠️ hook 游标（hookIdx）必须在**每次渲染开始时**归零，让 useState 按调用顺序重新对齐；
+ *    hooks 数组本身**不能清**（那是状态存储）。
+ *    之前的 bug：renderNow() 里清了 hooks，导致点按钮 setState 写进去的值，
+ *    下一次渲染读到的是初始值（聊天界面就是这么"测不出来"的）。
+ */
 const renderNow = async () => {
   hookIdx = 0
   const t = render(React.createElement(Registered, {}))
@@ -465,6 +501,70 @@ if (rMem) {
   } else { console.log('  ❌ 记忆统计没显示'); fail++ }
   if (/清空全部记忆/.test(rMem.text)) console.log('  ✅ 有「清空全部记忆」按钮')
   else { console.log('  ❌ 没有清空按钮'); fail++ }
+}
+
+/* ── 消息：评论区 @ 我 + 谁私信我 ── */
+console.log('\n【消息（收件箱）】')
+const rInbox = await clickAndRender('看看谁找我')
+if (rInbox) {
+  if (/评论区 @ 我：2 条/.test(rInbox.text)) console.log('  ✅ 显示评论区 @ 的数量')
+  else { console.log('  ❌ 没显示 @ 数量'); fail++ }
+  if (/大肥鱼出来下/.test(rInbox.text)) console.log('  ✅ 列出 @ 我的内容')
+  else { console.log('  ❌ 没列出 @ 内容'); fail++ }
+  if (/我之前在这说过一句/.test(rInbox.text)) console.log('  ✅ 带上了"我在这条视频下说过什么"（记忆）')
+  else { console.log('  ❌ 没带"我说过什么"'); fail++ }
+  if (/该回了/.test(rInbox.text)) console.log('  ✅ 私信标了「该回了」')
+  else { console.log('  ❌ 私信没标该不该回'); fail++ }
+  if (/记 11/.test(rInbox.text)) console.log('  ✅ 显示跟这个人记得多少条')
+  else { console.log('  ❌ 没显示记忆条数'); fail++ }
+}
+
+/* ── 聊天模式（带记忆） ── */
+console.log('\n【聊天模式】')
+/**
+ * ⚠️ 这里不能复用 clickAndRender：它内部用的 `flat` 是**初次渲染**那棵树，
+ *    收件箱是后面点出来的，节点在 rInbox.flat 里。
+ *    ⚠️ 而且 rInbox.flat 里**也包含**「私信发给谁」那张卡的人（也带 data-dy-person），
+ *       点那个只会"选中收件人"，不会打开聊天 ⇒ 用 `data-dy-inbox-dm` 精确区分。
+ */
+const chatPersonBtn = (rInbox ? rInbox.flat : []).find((n) =>
+  n.tag === 'button' && n.props && n.props['data-dy-inbox-dm'] !== undefined)
+let rChat = null
+if (chatPersonBtn) {
+  try {
+    await chatPersonBtn.props.onClick()
+  } catch (e) { console.log(`  ❌ 点人抛错：${e?.message ?? e}`); fail++ }
+  await flush()
+  // 连渲染几次，让 openChat 里的 await jpost → setChat 走完
+  for (let i = 0; i < 4; i++) {
+    await new Promise((r) => setTimeout(r, 0))
+    hookIdx = 0
+    const t = render(React.createElement(Registered, {}))
+    await flush()
+    const f = walk(t)
+    const txt = f.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
+    if (/跟 .+ 聊/.test(txt)) { rChat = { flat: f, text: txt }; break }
+  }
+  if (rChat) console.log('  ✅ 点人能打开聊天')
+  else { console.log('  ❌ 点了人但聊天界面没出来'); fail++ }
+} else { console.log('  ❌ 找不到可点的私信人'); fail++ }
+if (rChat) {
+  if (/跟 某帅气用户 聊/.test(rChat.text)) console.log('  ✅ 打开了聊天界面')
+  else { console.log('  ❌ 没打开聊天界面'); fail++ }
+  if (/记得关于他的：喜欢猫、在杭州/.test(rChat.text)) console.log('  ✅ 显示了记忆里的长期事实')
+  else { console.log('  ❌ 没显示记忆事实'); fail++ }
+  const bubbles = rChat.flat.filter((n) => n.props && n.props['data-dy-bubble'] !== undefined)
+  if (bubbles.length >= 3) console.log(`  ✅ 渲染了 ${bubbles.length} 条消息气泡`)
+  else { console.log(`  ❌ 消息气泡只有 ${bubbles.length} 条`); fail++ }
+  const mineB = rChat.flat.find((n) => n.props && n.props['data-dy-bubble'] !== undefined && n.props['data-mine'] !== undefined)
+  const themB = rChat.flat.find((n) => n.props && n.props['data-dy-bubble'] !== undefined && n.props['data-them'] !== undefined)
+  if (mineB && themB) console.log('  ✅ 我的和他的气泡分开了')
+  else { console.log('  ❌ 气泡没区分谁发的'); fail++ }
+  const input = rChat.flat.find((n) => n.tag === 'input' && n.props && String(n.props.placeholder || '').includes('说点什么'))
+  if (input) console.log('  ✅ 有输入框')
+  else { console.log('  ❌ 没有输入框'); fail++ }
+  if (/分享卡片/.test(rChat.text)) console.log('  ✅ 分享卡片有标记')
+  else { console.log('  ❌ 卡片没标记'); fail++ }
 }
 
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')

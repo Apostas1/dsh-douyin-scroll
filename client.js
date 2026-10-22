@@ -103,6 +103,14 @@ window.__ModuleLoader__.load({
 [data-dy-tag]{flex:none;font-size:10px;padding:1px 6px;border-radius:5px;
   background:rgba(245,158,11,.16);color:#f59e0b;}
 [data-dy-tag][data-ok]{background:rgba(34,197,94,.16);color:#22c55e;}
+[data-dy-msgrow]{padding:7px 9px;border-radius:8px;background:var(--dsw-alias-bg-overlay,rgba(0,0,0,.14));}
+[data-dy-chat]{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow:auto;
+  padding:8px;border-radius:9px;background:var(--dsw-alias-bg-overlay,rgba(0,0,0,.16));}
+[data-dy-bubble]{max-width:78%;padding:7px 10px;border-radius:10px;font-size:12px;line-height:17px;
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.2));align-self:flex-start;}
+[data-dy-bubble][data-mine]{align-self:flex-end;background:rgba(59,130,246,.22);}
+[data-dy-bubble][data-them]{align-self:flex-start;background:rgba(128,128,128,.24);}
+[data-dy-bubble-text]{white-space:pre-wrap;word-break:break-word;}
 `
 
     function Switch({ on, onChange, disabled }) {
@@ -172,6 +180,11 @@ window.__ModuleLoader__.load({
       const [perDayDraft, setPerDayDraft] = React.useState(null)
       // 记忆统计
       const [mem, setMem] = React.useState(null)
+      // 消息（收件箱）：评论区 @ 我 + 谁私信我
+      const [inbox, setInbox] = React.useState(null)
+      // 聊天：当前跟谁聊、消息列表、输入框
+      const [chat, setChat] = React.useState(null)
+      const [chatText, setChatText] = React.useState('')
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
@@ -344,8 +357,62 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
-      /** 记忆：看统计 / 清空 */
-      const loadMem = async () => {
+      /* ── 消息收件箱 ── */
+      const loadInbox = async () => {
+        if (inbox !== null) { setInbox(null); return }
+        setBusy('inbox')
+        try {
+          const r = await jget('/inbox')
+          if (r && r.ok) {
+            setInbox(r)
+            const n = (r.at_n || 0) + (r.dm_n || 0)
+            say(n ? `有 ${n} 条可能要回` : '没有需要回的消息', n ? 'warn' : 'good')
+          } else {
+            setInbox({ ok: false, at: [], dm: [], errors: [(r && (r.error || r.hint)) || '读不到'] })
+            say('读消息失败', 'warn')
+          }
+        } catch (e) {
+          setInbox({ ok: false, at: [], dm: [], errors: [String((e && e.message) || e)] })
+          say('读消息失败', 'warn')
+        } finally { setBusy('') }
+      }
+
+      /* ── 聊天模式 ── */
+      const openChat = async (who) => {
+        setBusy('chat')
+        try {
+          const r = await jpost('/chat/read', { to: who.nick, to_id: who.sec_uid || '' })
+          if (r && r.ok) {
+            setChat({ who: { nick: r.to || who.nick, sec_uid: r.to_sec_uid || who.sec_uid }, data: r })
+            setChatText('')
+            say(`打开了和「${r.to || who.nick}」的对话`, 'good')
+          } else {
+            say('读不到会话：' + ((r && (r.error || r.hint)) || '未知'), 'warn')
+          }
+        } catch (e) { say('读不到会话：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      const sendChat = async () => {
+        const text = String(chatText || '').trim()
+        if (!text || !chat) return
+        setBusy('send')
+        try {
+          const r = await jpost('/chat/send', { to: chat.who.nick, to_id: chat.who.sec_uid || '', text, confirm: true })
+          if (r && r.ok && r.sent) {
+            setChatText('')
+            say('已发送', 'good')
+            // 重新读一遍，让新消息和记忆都刷新
+            const again = await jpost('/chat/read', { to: chat.who.nick, to_id: chat.who.sec_uid || '' })
+            if (again && again.ok) setChat({ ...chat, data: again })
+          } else {
+            say('发送失败：' + ((r && (r.error || r.hint)) || '未知'), 'warn')
+          }
+        } catch (e) { say('发送失败：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      /** 记忆：看统计 / 清空 */      const loadMem = async () => {
         if (mem !== null) { setMem(null); return }
         setBusy('mem')
         try {
@@ -786,6 +853,102 @@ window.__ModuleLoader__.load({
               h('option', { value: 'file' }, '只写文件（不打扰）'),
               h('option', { value: 'webhook' }, '推 webhook'),
               h('option', { value: 'both' }, '通知 + webhook')))),
+
+        /* ── 消息：评论区 @ 我 + 谁私信我 ── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '消息'),
+              h('div', { 'data-dy-sub': '' },
+                '谁在评论区 @ 了你、谁最近给你发了私信。点一条就能回。')),
+            h('button', { 'data-dy-btn': '', disabled: busy === 'inbox' || !st.loggedIn, onClick: loadInbox },
+              busy === 'inbox' ? '读取中…' : (inbox === null ? '看看谁找我' : '收起'))),
+          !st.loggedIn ? h('div', { 'data-dy-sub': '' }, '（要先扫码登录）') : null,
+
+          inbox !== null && inbox.ok
+            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '10px' } },
+              /* 评论区 @ */
+              h('div', { 'data-dy-sub': '' }, `评论区 @ 我：${inbox.at_n || 0} 条`),
+              (inbox.at || []).length
+                ? h('div', { 'data-dy-people': '' },
+                  inbox.at.map((a, i) => h('div', { key: 'at' + i, 'data-dy-msgrow': '' },
+                    h('div', { 'data-dy-row': '' },
+                      h('span', { 'data-dy-person-name': '' }, a.nickname || '（不知道是谁）'),
+                      h('span', { 'data-dy-tag': '', ...(a.before === '回过' ? { 'data-ok': '' } : {}) }, a.before),
+                      h('div', { 'data-dy-grow': '' }),
+                      a.video_url
+                        ? h('a', { href: a.video_url, target: '_blank', rel: 'noreferrer', 'data-dy-mini': '', style: { textDecoration: 'none' } }, '看视频')
+                        : null),
+                    h('div', { 'data-dy-person-sub': '', style: { whiteSpace: 'normal', marginTop: '2px' } }, a.content || ''),
+                    a.my_comments_here && a.my_comments_here.length
+                      ? h('div', { 'data-dy-sub': '', style: { marginTop: '2px' } },
+                        '我在这条视频下说过：' + a.my_comments_here[a.my_comments_here.length - 1].text.slice(0, 40))
+                      : null)))
+                : h('div', { 'data-dy-sub': '' }, (inbox.at_n ? '都回过了' : '最近没有人在评论区 @ 你')),
+
+              /* 私信 */
+              h('div', { 'data-dy-sub': '', style: { marginTop: '6px' } }, `最近私信：${inbox.dm_n || 0} 个可能要回`),
+              (inbox.dm || []).length
+                ? h('div', { 'data-dy-people': '' },
+                  inbox.dm.map((p, i) => h('button', {
+                    key: 'dm' + i, 'data-dy-person': '', 'data-dy-inbox-dm': '', disabled: Boolean(busy),
+                    onClick: () => openChat(p),
+                  },
+                    h('span', { 'data-dy-person-name': '' }, p.nick),
+                    p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
+                    p.needs_reply ? h('span', { 'data-dy-tag': '' }, '该回了') : null,
+                    h('span', { 'data-dy-person-sub': '' },
+                      (p.their_last ? '他：' + String(p.their_last.text).slice(0, 26) : (p.preview || ''))),
+                    h('span', { 'data-dy-tag': '' }, `记 ${p.remembered || 0}`))))
+                : h('div', { 'data-dy-sub': '' }, '最近没有私信'),
+              (inbox.errors && inbox.errors.length)
+                ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, '有些读不到：' + inbox.errors.join('；'))
+                : null)
+            : null,
+          inbox !== null && !inbox.ok
+            ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, (inbox.errors || []).join('；') || '读不到消息')
+            : null),
+
+        /* ── 聊天（带记忆） ── */
+        chat !== null
+          ? h('div', { 'data-dy-card': '' },
+            h('div', { 'data-dy-row': '' },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, '跟 ' + chat.who.nick + ' 聊'),
+                h('div', { 'data-dy-sub': '' },
+                  chat.data.context && chat.data.context.facts && chat.data.context.facts.length
+                    ? '记得关于他的：' + chat.data.context.facts.join('、')
+                    : (chat.data.context && chat.data.context.note) ? chat.data.context.note : '记忆里还没有这个人')),
+              h('button', { 'data-dy-mini': '', onClick: () => { setChat(null); setChatText('') } }, '关掉')),
+
+            /* 消息气泡 */
+            h('div', { 'data-dy-chat': '' },
+              (chat.data.messages || []).map((m, i) => h('div', {
+                key: 'm' + i,
+                'data-dy-bubble': '',
+                'data-mine': m.from === 'me' ? '' : undefined,
+                'data-them': m.from === 'them' ? '' : undefined,
+              },
+                h('div', { 'data-dy-bubble-text': '' }, String(m.text || '').slice(0, 300)),
+                m.awe === 800 ? h('div', { 'data-dy-tag': '' }, '分享卡片') : null))),
+
+            /* 输入 */
+            h('div', { 'data-dy-row': '' },
+              h('input', {
+                'data-dy-input': '', style: { flex: '1' },
+                placeholder: '说点什么…（发出去会进记忆）',
+                value: chatText,
+                onChange: (e) => setChatText(e.target.value),
+                onKeyDown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() } },
+              }),
+              h('button', {
+                'data-dy-btn': '', 'data-primary': '',
+                disabled: busy === 'send' || !String(chatText || '').trim(),
+                onClick: sendChat,
+              }, busy === 'send' ? '发送中…' : '发送')),
+            h('div', { 'data-dy-sub': '' },
+              '发出去的话会记进记忆，下次打开就知道聊到哪了。'))
+          : null,
 
         /* ── 对话记忆 ── */
         h('div', { 'data-dy-card': '' },

@@ -982,15 +982,6 @@ export function apply(ctx, config) {
        */
       const wantMention = Boolean(mentionName && mentionUid && mentionSecUid)
       if (wantMention) {
-        // ⚠️ UI 点选只能发**顶层评论**：它用的是 #comment-input-container 那个输入框，
-        //    没有"回复某条"的入口。要真 @ 又要回复某条，目前做不到 —— 如实说，别假装发了。
-        if (replyTo) {
-          return {
-            ok: false,
-            error: '真 @ 目前只能发顶层评论，不能"回复某条评论并 @ 人"',
-            hint: '两个选择：① 去掉 mention_* 参数，用普通回复（@ 只是文字，对方收不到通知）；② 去掉 comment_id，发顶层评论并真 @（会变蓝、对方收到通知）',
-          }
-        }
         // 宿主自己的登录 uid 懒加载一次，用来拦「@ 自己」
         if (!selfUidCache) {
           const g = runPy('session-guard.py', ['check'], { timeout: 90_000 })
@@ -1003,14 +994,24 @@ export function apply(ctx, config) {
         if (!text.includes('@' + mentionName)) {
           return { ok: false, error: `正文里没有「@${mentionName}」原样出现 —— 真 @ 需要正文带这个 token，或去掉 mention_* 参数发普通评论` }
         }
-        const mr = runNodeTool('comment-mention-ui.mjs', ['--aweme', aweme, '--name', mentionName, '--text', text], { timeout: 300_000 })
+        /**
+         * ⭐ 有 replyTo 就走「回复某条 + @」：脚本会先点那条评论的「回复」再 @ 点选。
+         *    这是 2026-10-22 新加的能力 —— 之前只能发顶层评论。
+         */
+        const mArgs = ['--aweme', aweme, '--name', mentionName, '--text', text]
+        if (replyTo) mArgs.push('--reply-cid', replyTo)
+        const mr = runNodeTool('comment-mention-ui.mjs', mArgs, { timeout: 300_000 })
         const mres = pickJson(mr.stdout)
         if (!mres) {
           return { ok: false, error: '真 @ 执行器没返回可解析结果', stdout: String(mr.stdout || '').slice(0, 400), stderr: String(mr.stderr || '').slice(0, 300) }
         }
         if (mres.ok) {
-          log(`comment-mention-ui -> ${aweme}: 真 @${mentionName} 已发布（UI 点选）`)
-          try { noteMyComment(stateDir, aweme, { text, mention: mentionName }) } catch { /* 记不上不影响发 */ }
+          log(`comment-mention-ui -> ${aweme}/${replyTo || 'top'}: 真 @${mentionName} 已发布（UI 点选）`)
+          // ⭐ 发成功 = 这条 @ 处理过了，标 seen（避免面板里永远显示"没回过"）
+          try {
+            noteMyComment(stateDir, aweme, { text, mention: mentionName })
+            if (replyTo) markSeen(stateDir, aweme, [replyTo])
+          } catch { /* 记不上不影响发 */ }
           // UI 路径拿不到 cid（没走接口）⇒ 回读用「正文片段」找，别装作有 cid
           let readback = null
           try {
@@ -1049,6 +1050,76 @@ export function apply(ctx, config) {
     },
   })
 
+  /**
+   * ⭐ 读"谁在评论区 @ 了我" —— 抽成函数，工具（douyin_at_me）和面板（/inbox）共用。
+   *
+   * 🔴 2026-10-22 改：以前这个逻辑**每次读都顺手 markSeen**，
+   *    于是面板一打开就把所有 @ 标成"看过了"，后面的工具再也看不到 ——
+   *    等于"看一眼就消失"，非常坑。
+   *    ⇒ 现在默认**不标记**；只有明确回复了才标记（在 douyin_comment_reply 里做）。
+   *
+   * @param {{limit?:number, include_seen?:boolean, mark_seen?:boolean}} args
+   */
+  const readAtMe = (args = {}) => {
+    if (!hasCredential(stateDir)) return { ok: false, error: '还没登录', hint: '先在设置页扫码登录' }
+    const r = runPy('notice-read.py', ['--raw'], { timeout: 150_000 })
+    const j = pickJson(r.stdout)
+    if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
+    const items = Array.isArray(j.items) ? j.items : []
+    // type 45/46 = 评论区 @ 我（notice-read.py 里定义的）
+    const ats = items.filter((x) => x && (x.type === 45 || x.type === 46))
+    const limit = Math.max(1, Math.min(Number(args.limit) || 10, 30))
+    const includeSeen = args.include_seen === true
+
+    const out = []
+    for (const a of ats) {
+      const aweme = String(a.aweme_id || '')
+      const cid = String(a.comment_id || '')
+      let mem = null
+      try { mem = aweme ? loadCommentMemory(stateDir, aweme) : null } catch { mem = null }
+      const alreadyReplied = Boolean(mem && cid && mem.seen.includes(cid))
+      const myCommentsHere = mem ? (mem.mine || []).slice(-3) : []
+      if (alreadyReplied && !includeSeen) continue
+      out.push({
+        nickname: a.nickname || '',
+        uid: a.uid || '',
+        content: String(a.content || '').slice(0, 300),
+        aweme_id: aweme || undefined,
+        comment_id: cid || undefined,
+        video_url: a.video_url || (aweme ? `https://www.douyin.com/video/${aweme}` : undefined),
+        created_at: a.create_time || undefined,
+        before: alreadyReplied ? '回过' : '没回过',
+        /** ⭐ 我在这条视频下说过什么（有记忆才知道该不该重复） */
+        my_comments_here: myCommentsHere.map((m) => ({ at: m.at, text: m.text, mention: m.mention || undefined })),
+      })
+      if (out.length >= limit) break
+    }
+
+    // ⚠️ 只有**明确要求**才标记看过了（默认不标，免得"看一眼就消失"）
+    if (args.mark_seen === true) {
+      try {
+        const byAweme = {}
+        for (const a of ats) {
+          const w = String(a.aweme_id || '')
+          const c = String(a.comment_id || '')
+          if (w && c) (byAweme[w] = byAweme[w] || []).push(c)
+        }
+        for (const [w, cs] of Object.entries(byAweme)) markSeen(stateDir, w, cs)
+      } catch { /* 标记失败不影响读 */ }
+    }
+
+    log(`at-me: ${ats.length} 条 @ 我，未回的 ${out.length} 条`)
+    return {
+      ok: true,
+      at_n: ats.length,
+      shown: out.length,
+      list: out,
+      hint: out.length
+        ? '要回的话：douyin_comment_reply { aweme_id, comment_id, text }，先给用户看草稿'
+        : (ats.length ? '这些 @ 都回过了（加 include_seen:true 可以再看一遍）' : '最近没有新的 @'),
+    }
+  }
+
   tool({
     name: 'douyin_at_me',
     description: '⭐ **别人在评论区 @ 了我** —— 一次把「谁 @ 的 / 在哪个视频 / 说了什么 / 我回过没有」整理好，'
@@ -1059,60 +1130,7 @@ export function apply(ctx, config) {
       include_seen: { type: 'boolean', description: '连已经回过的也列出来（默认 false，只看新的）' },
     },
     async execute(args = {}) {
-      if (!hasCredential(stateDir)) return { ok: false, error: '还没登录', hint: '先在设置页扫码登录' }
-      const r = runPy('notice-read.py', ['--raw'], { timeout: 150_000 })
-      const j = pickJson(r.stdout)
-      if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
-      const items = Array.isArray(j.items) ? j.items : []
-      // type 45/46 = 评论区 @ 我（notice-read.py 里定义的）
-      const ats = items.filter((x) => x && (x.type === 45 || x.type === 46))
-      const limit = Math.max(1, Math.min(Number(args.limit) || 10, 30))
-      const includeSeen = args.include_seen === true
-
-      const out = []
-      for (const a of ats) {
-        const aweme = String(a.aweme_id || '')
-        const cid = String(a.comment_id || '')
-        let mem = null
-        try { mem = aweme ? loadCommentMemory(stateDir, aweme) : null } catch { mem = null }
-        const alreadyReplied = Boolean(mem && cid && mem.seen.includes(cid))
-        const myCommentsHere = mem ? (mem.mine || []).slice(-3) : []
-        if (alreadyReplied && !includeSeen) continue
-        out.push({
-          nickname: a.nickname || '',
-          uid: a.uid || '',
-          content: String(a.content || '').slice(0, 300),
-          aweme_id: aweme || undefined,
-          comment_id: cid || undefined,
-          video_url: a.video_url || (aweme ? `https://www.douyin.com/video/${aweme}` : undefined),
-          before: alreadyReplied ? '回过' : '没回过',
-          /** ⭐ 我在这条视频下说过什么（有记忆才知道该不该重复） */
-          my_comments_here: myCommentsHere.map((m) => ({ at: m.at, text: m.text, mention: m.mention || undefined })),
-        })
-        if (out.length >= limit) break
-      }
-
-      // 顺手把这些 @ 标成"看过了"（避免下次又当成新的）
-      try {
-        const byAweme = {}
-        for (const a of ats) {
-          const w = String(a.aweme_id || '')
-          const c = String(a.comment_id || '')
-          if (w && c) (byAweme[w] = byAweme[w] || []).push(c)
-        }
-        for (const [w, cs] of Object.entries(byAweme)) markSeen(stateDir, w, cs)
-      } catch { /* 标记失败不影响读 */ }
-
-      log(`at-me: ${ats.length} 条 @ 我，未回的 ${out.length} 条`)
-      return {
-        ok: true,
-        at_n: ats.length,
-        shown: out.length,
-        list: out,
-        hint: out.length
-          ? '要回的话：douyin_comment_reply { aweme_id, comment_id, text }，先给用户看草稿'
-          : (ats.length ? '这些 @ 都回过了（加 include_seen:true 可以再看一遍）' : '最近没有新的 @'),
-      }
+      return readAtMe({ ...args, mark_seen: false })
     },
   })
 
@@ -1189,16 +1207,16 @@ export function apply(ctx, config) {
 
       /**
        * ⭐ 记忆：读到的会话**合并进记忆**，然后把"上下文"一起返回。
-       *    先取旧记忆（这一刻之前记得的），再合并 —— 这样 context.recent 才是
-       *    "上次聊过什么"，不会跟这次读到的新消息混成一团。
+       *    ⚠️ 顺序：**先合并、再取上下文** —— 反过来的话第一次读某人会返回
+       *    "这个人以前没聊过"，但其实这一下刚读到一堆消息，等于刚认识就说不认识。
        */
       let context = null
       let memory = null
       try {
         const secUid = String(j.to_sec_uid || toId || '').trim()
         if (secUid) {
-          context = dmContext(stateDir, secUid, { recent: 12 })
           memory = mergeDmMemory(stateDir, secUid, j.to || to, allMsgs)
+          context = dmContext(stateDir, secUid, { recent: 12 })
         }
       } catch (e) { log(`读私信记忆失败（不影响这次读）：${e?.message ?? e}`) }
 
@@ -2185,6 +2203,120 @@ export function apply(ctx, config) {
       } catch (e) {
         return sendJson(res, 200, { ok: false, logged_in: true, account: cached, error: String(e?.message ?? e) })
       }
+    }
+
+    /* ── ⭐ 收件箱：评论区 @ 我 + 谁私信我（面板「消息」用的） ──
+     * 一次把两件事都读了，面板只调一次。
+     */
+    if (req.method === 'GET' && path === '/api/douyin-duty/inbox') {
+      if (!hasCredential(stateDir)) return sendJson(res, 200, { ok: false, error: '还没登录', at: [], dm: [] })
+      const out = { ok: true, at: [], dm: [], at_n: 0, dm_n: 0, errors: [] }
+
+      // ① 评论区 @ 我
+      try {
+        const r = readAtMe({ limit: 20, include_seen: false })
+        if (r && r.ok) { out.at = r.list || []; out.at_n = r.at_n || 0 }
+        else out.errors.push('评论区 @：' + ((r && (r.error || r.hint)) || '读不到'))
+      } catch (e) { out.errors.push('评论区 @：' + String(e?.message ?? e)) }
+
+      /**
+       * ② "谁私信我"：读**会话列表**（不是打开某个会话）。
+       *    抖音的会话列表只有「最近聊过的人 + 最后一句话」，没有"未读"标记可用，
+       *    所以这里如实说：列出最近跟我聊过的人 + 他最后说了什么 + 是不是他说的。
+       */
+      try {
+        const r = runNodeTool('im-send.mjs', ['--list'], { timeout: 180_000 })
+        const j = pickJson(r.stdout)
+        if (j && j.ok) {
+          const list = Array.isArray(j.people) ? j.people : []
+          // 给每个人补上"最后一句是谁说的"（有记忆才知道）
+          out.dm = list.map((p) => {
+            let mem = null
+            try { mem = p.sec_uid ? loadDmMemory(stateDir, p.sec_uid) : null } catch { mem = null }
+            const last = mem && mem.messages.length ? mem.messages[mem.messages.length - 1] : null
+            const lastTheirs = mem ? [...mem.messages].reverse().find((m) => m.from === 'them') : null
+            return {
+              nick: p.nick,
+              sec_uid: p.sec_uid,
+              preview: p.preview,
+              duplicate: p.duplicate,
+              /** 我们以前聊过几条（没聊过 = 0） */
+              remembered: mem ? mem.messages.length : 0,
+              /** 他最后说的一句（记忆里能找到的话） */
+              their_last: lastTheirs ? { text: lastTheirs.text, at: lastTheirs.at } : null,
+              /** 最后一条是谁说的 —— 判断"是不是该我回了" */
+              last_from: last ? last.from : null,
+              /** ⭐ 要不要回：他最后说的，比我说得晚 ⇒ 该回了 */
+              needs_reply: Boolean(lastTheirs && (!last || last.from === 'them')),
+            }
+          })
+          out.dm_n = out.dm.filter((x) => x.needs_reply).length
+        } else out.errors.push('私信列表：' + ((j && (j.error || j.hint)) || '读不到'))
+      } catch (e) { out.errors.push('私信列表：' + String(e?.message ?? e)) }
+
+      return sendJson(res, 200, out)
+    }
+
+    /* ── ⭐ 聊天模式：读某个人的完整上下文（面板「跟他聊」用） ── */
+    if (req.method === 'POST' && path === '/api/douyin-duty/chat/read') {
+      const body = await readBody(req)
+      const toId = String(body?.to_id || cfg.dmToId || '').trim()
+      const to = String(body?.to || cfg.dmTo || '').trim()
+      if (!toId && !to) return sendJson(res, 200, { ok: false, error: '不知道读谁的会话' })
+      const argv = ['--read']
+      if (to) argv.push('--to', to)
+      if (toId) argv.push('--to-id', toId)
+      const r = runNodeTool('im-send.mjs', argv, { timeout: 240_000 })
+      const j = pickJson(r.stdout)
+      if (!j) return sendJson(res, 200, { ok: false, error: '读不到会话', detail: String(r.stderr || r.stdout || '').slice(-400) })
+      if (!j.ok) return sendJson(res, 200, j)
+      // 合并进记忆 + 取上下文
+      let context = null
+      try {
+        const secUid = String(j.to_sec_uid || toId || '').trim()
+        if (secUid) {
+          /**
+           * ⚠️ 顺序很重要：**先合并、再取上下文**。
+           *    以前是先取 context 再 merge ⇒ 第一次读某个人的会话时，
+           *    context 永远是空的（"这个人以前没聊过"），
+           *    但其实这一下刚读到 11 条 —— 等于刚认识就说"我不认识你"。
+           */
+          mergeDmMemory(stateDir, secUid, j.to || to, Array.isArray(j.messages) ? j.messages : [])
+          context = dmContext(stateDir, secUid, { recent: 20 })
+        }
+      } catch { /* 记忆失败不影响读 */ }
+      return sendJson(res, 200, {
+        ok: true, to: j.to, to_sec_uid: j.to_sec_uid,
+        count: j.count, mine: j.mine, them: j.them, unknown: j.unknown,
+        messages: Array.isArray(j.messages) ? j.messages.slice(-40) : [],
+        context: context || { note: '这个人以前没聊过（记忆里没有记录）' },
+      })
+    }
+
+    /* ── ⭐ 聊天模式：发一条（带记忆，确认后才发） ── */
+    if (req.method === 'POST' && path === '/api/douyin-duty/chat/send') {
+      const body = await readBody(req)
+      const toId = String(body?.to_id || cfg.dmToId || '').trim()
+      const to = String(body?.to || cfg.dmTo || '').trim()
+      const text = String(body?.text || '').trim()
+      if (!text) return sendJson(res, 200, { ok: false, error: '正文是空的' })
+      // 🔴 用户闸：面板点「发送」= 当场同意，所以这里直接放行（前端已经二次确认过）
+      if (body?.confirm !== true) return sendJson(res, 200, { ok: false, needsConfirm: true, draft: text })
+      const argv = []
+      if (to) argv.push('--to', to)
+      if (toId) argv.push('--to-id', toId)
+      argv.push('--text', text)
+      const r = runNodeTool('im-send.mjs', argv, { timeout: 240_000 })
+      const j = pickJson(r.stdout)
+      if (!j) return sendJson(res, 200, { ok: false, error: '发送器没返回可解析结果', detail: String(r.stderr || r.stdout || '').slice(-400) })
+      if (j.ok && j.sent) {
+        try {
+          const secUid = String(j.to_sec_uid || toId || '').trim()
+          if (secUid) noteSent(stateDir, secUid, j.to || to, text, 'text')
+        } catch { /* 记忆失败不影响已发出 */ }
+        log(`chat -> ${j.to || to}: 已发送（${text.length} 字）`)
+      }
+      return sendJson(res, 200, j)
     }
 
     /* ── 记忆：看有多少 / 清掉 ── */

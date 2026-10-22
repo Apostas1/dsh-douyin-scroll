@@ -391,9 +391,12 @@ try {
   if (/wantMention/.test(idx) && /const wantMention = Boolean/.test(idx)) ok('index.js 按"有没有 mention"分流（UI / API 两条路）')
   else bad('index.js 没有 mention 分流逻辑')
 
-  // UI 点选做不了"回复某条 + @"，必须明确说不支持（别假装发了）
-  if (/真 @ 目前只能发顶层评论/.test(idx)) ok('"回复某条 + 真 @"会明确说不支持（不假装发送）')
-  else bad('UI 路径没拦"回复某条 + 真 @" —— 会假装发了但实际发成顶层')
+  // UI 路径现在**支持**"回复某条 + 真 @"（2026-10-22 加：先点那条评论的「回复」再 @ 点选）
+  if (/--reply-cid/.test(idx) && /--reply-cid/.test(ui)) ok('支持「回复某条 + 真 @」（UI 点「回复」再 @ 点选）')
+  else bad('不支持"回复某条 + 真 @" —— 用户要回评论区 @ 我的人时只能发顶层')
+  // 但若某版本不支持，必须有明确报错而不是默默发顶层
+  if (/reply_target_not_found|reply_button_not_found/.test(ui)) ok('找不到目标评论/回复按钮时会明确失败（不默默改成发顶层）')
+  else bad('找不到目标评论时没有明确失败 —— 可能默默发成顶层，用户以为回复了')
 
   // @ 自己那道闸还在
   if (/是登录号自己的 uid/.test(idx)) ok('有「@ 自己」拦截')
@@ -445,6 +448,46 @@ try {
   if (/清空全部记忆/.test(cl)) ok('面板能清空记忆')
   else bad('面板不能清空记忆 —— 用户没法反悔')
 } catch (e) { bad(`记忆检查失败：${e.message}`) }
+
+/* ── 4n. 面板里的「消息」和「聊天」（2026-10-22 用户要求） ── */
+console.log('\n4n. 消息收件箱 + 聊天模式')
+try {
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+
+  // ① 收件箱：评论区 @ 我 + 谁私信我
+  if (idx.includes('/api/douyin-duty/inbox')) ok('后端有 /inbox（评论区 @ + 私信列表一次读完）')
+  else bad('后端缺 /inbox —— 面板看不到谁找我')
+  if (/看看谁找我/.test(cl)) ok('面板有「看看谁找我」按钮')
+  else bad('面板没有消息入口')
+  if (/评论区 @ 我/.test(cl) && /最近私信/.test(cl)) ok('消息卡分了两块：评论区 @ 我 / 最近私信')
+  else bad('消息卡没分块')
+  if (/该回了/.test(cl) && /needs_reply/.test(cl)) ok('私信标了「该回了」（他最后说的比我晚）')
+  else bad('私信没说该不该回 —— 用户还得自己翻')
+  if (/记 \$\{p\.remembered/.test(cl) || /记 \$\{p\.remembered \|\| 0\}/.test(cl) || /remembered/.test(cl)) ok('显示跟这个人记得多少条（记忆）')
+  else bad('没显示记忆条数')
+
+  // ② 评论区 @ 我：点进去能看到"我在这条视频下说过什么"
+  if (/my_comments_here/.test(cl) && /我在\s*这条视频下说过/.test(cl)) ok('评论区 @ 带我在这条视频下说过什么（靠记忆去重）')
+  else bad('评论区 @ 没带"我说过什么" —— 可能重复回同一句')
+
+  // ③ 聊天模式
+  if (idx.includes('/api/douyin-duty/chat/read') && idx.includes('/api/douyin-duty/chat/send')) ok('后端有 /chat/read + /chat/send')
+  else bad('后端缺聊天接口')
+  if (/跟 ' \+ chat\.who\.nick \+ ' 聊/.test(cl)) ok('面板有聊天界面')
+  else bad('面板没有聊天界面')
+  if (/data-dy-bubble/.test(cl)) ok('消息用气泡显示')
+  else bad('消息不是气泡')
+  if (/data-dy-inbox-dm/.test(cl)) ok('收件箱的私信按钮可点开聊天')
+  else bad('收件箱的人点不开聊天')
+  if (/记得关于他的/.test(cl)) ok('聊天界面显示了记忆里的长期事实')
+  else bad('聊天界面没显示记忆')
+  if (/发出去会进记忆|发出去的话会记进记忆/.test(cl)) ok('聊天说明了"发出去会进记忆"')
+  else bad('聊天没说记忆行为')
+  // 🔴 聊天发送必须落记忆（不然下次读还是不知道说过什么）
+  if (/chat\/send'[\s\S]{0,1500}?noteSent\(stateDir/.test(idx)) ok('聊天发出去的消息会进记忆')
+  else bad('聊天发送不写记忆')
+} catch (e) { bad(`消息/聊天检查失败：${e.message}`) }
 
 /* ── 4e. 采集门槛 / 跨天记账 ── */
 console.log('\n4e. 采集门槛 / 跨天')

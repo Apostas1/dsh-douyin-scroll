@@ -27,10 +27,17 @@ const DRY = argv.includes('--dry')
 const AWEME = String(argOf('--aweme', '')).trim()
 const NAME = String(argOf('--name', '')).trim()
 const TEXT = String(argOf('--text', '')).trim()
+/**
+ * ⭐ `--reply-cid <cid>`：回复**某一条**评论（而不是发顶层）。
+ *    2026-10-22 加 —— 用户要"回评论区 @ 我的人"，那本质是"回复某条评论 + @ 他"。
+ *    实现：先把那条评论滚进视口 → 点它下面的「回复」→ 再走原来的 @ 点选流程。
+ *    点了「回复」之后，评论输入框的语义就是"回复那条"，前端会自动带上 reply 关系。
+ */
+const REPLY_CID = String(argOf('--reply-cid', '')).trim()
 
 const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode = o.ok === false ? 1 : 0 }
 
-if (!AWEME || !NAME) { out({ ok: false, error: '用法: comment-mention-ui.mjs --aweme <id> --name <昵称> [--text 正文] [--dry]' }); process.exit(1) }
+if (!AWEME || !NAME) { out({ ok: false, error: '用法: comment-mention-ui.mjs --aweme <id> --name <昵称> [--text 正文] [--reply-cid <cid>] [--dry]' }); process.exit(1) }
 
 try {
   const c = await openPage()
@@ -45,6 +52,108 @@ try {
 
   await c.send('Page.navigate', { url: `https://www.douyin.com/video/${AWEME}` })
   await sleep(8000)
+
+  /**
+   * ⭐ 如果要"回复某条评论"：先把那条评论滚进视口，点它下面的「回复」。
+   *    点了之后输入框的语义就变成"回复这条"，前端会自己带 reply 关系。
+   *    ⚠️ 找不到就**中止**，别默默改成发顶层（用户要的是回复）。
+   */
+  let replyInfo = null
+  if (REPLY_CID) {
+    // 先把评论区滚出来
+    try {
+      await c.ev(`(function(){
+        var el = document.querySelector('#comment-input-container');
+        if (el) el.scrollIntoView({block:'center'});
+      })()`)
+      await sleep(1500)
+    } catch { /* 滚不动就继续 */ }
+
+    let found = ''
+    for (let i = 0; i < 10 && !found; i++) {
+      found = String(await c.ev(`(function(){
+        var CID = ${JSON.stringify(REPLY_CID)};
+        // 评论节点通常带 data-e2e="comment-item" 或 cid 在 fiber 里
+        var nodes = Array.prototype.slice.call(document.querySelectorAll('[data-e2e="comment-item"], [class*="commentItem"], [class*="comment-item"]'));
+        for (var i = 0; i < nodes.length; i++) {
+          var n = nodes[i];
+          var fk = Object.keys(n).find(function(k){ return k.indexOf('__reactFiber$') === 0 });
+          var hit = false;
+          if (fk) {
+            var f = n[fk], d = 0;
+            while (f && d < 16) {
+              var p = f.memoizedProps;
+              if (p && typeof p === 'object') {
+                var s = JSON.stringify(p).slice(0, 4000);
+                if (s.indexOf(CID) >= 0) { hit = true; break }
+              }
+              f = f.return; d++;
+            }
+          }
+          // 兜底：节点自身或父级文本里带 cid（少见，但有些版本会渲染到属性）
+          if (!hit && (n.getAttribute && String(n.getAttribute('data-cid') || '') === CID)) hit = true;
+          if (!hit) continue;
+          n.scrollIntoView({ block: 'center' });
+          var r = n.getBoundingClientRect();
+          return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width), h: Math.round(r.height) });
+        }
+        return '';
+      })()`))
+      if (!found) {
+        // 往下滚一屏再找
+        await c.ev(`(function(){ var l=document.querySelector('[class*="commentList"], [class*="comment-list"]'); if(l){ l.scrollTop += 900 } else { window.scrollBy(0,900) } })()`)
+        await sleep(1500)
+      }
+    }
+    if (!found) {
+      c.close()
+      out({ ok: false, error: `评论区里找不到 cid=${REPLY_CID} 这条评论（可能被删了 / 或者滚得不够深）`, code: 'reply_target_not_found' })
+      process.exit(1)
+    }
+
+    // 在那条评论里找「回复」按钮并点它
+    const replyBtn = String(await c.ev(`(function(){
+      var CID = ${JSON.stringify(REPLY_CID)};
+      var nodes = Array.prototype.slice.call(document.querySelectorAll('[data-e2e="comment-item"], [class*="commentItem"], [class*="comment-item"]'));
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        var fk = Object.keys(n).find(function(k){ return k.indexOf('__reactFiber$') === 0 });
+        var hit = false;
+        if (fk) {
+          var f = n[fk], d = 0;
+          while (f && d < 16) {
+            var p = f.memoizedProps;
+            if (p && typeof p === 'object') {
+              var s = JSON.stringify(p).slice(0, 4000);
+              if (s.indexOf(CID) >= 0) { hit = true; break }
+            }
+            f = f.return; d++;
+          }
+        }
+        if (!hit) continue;
+        // 在该节点范围内找文字是「回复」的可点元素
+        var cands = Array.prototype.slice.call(n.querySelectorAll('span,div,button,a'));
+        for (var j = 0; j < cands.length; j++) {
+          var e = cands[j];
+          if (e.children.length) continue;
+          if ((e.innerText || '').trim() !== '回复') continue;
+          var r = e.getBoundingClientRect();
+          if (!(r.width > 4 && r.height > 8)) continue;
+          return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
+        }
+      }
+      return '';
+    })()`))
+    if (!replyBtn) {
+      c.close()
+      out({ ok: false, error: '找到了那条评论，但没找到「回复」按钮', code: 'reply_button_not_found' })
+      process.exit(1)
+    }
+    const rb = JSON.parse(replyBtn)
+    await click(rb.x, rb.y)
+    await sleep(1800)
+    replyInfo = { reply_to_cid: REPLY_CID, reply_button: rb }
+  }
 
   // ① 输入区滚进视口中心（没进视口点击不会展开），真实鼠标点开
   const box = JSON.parse(await c.ev(`(function(){
@@ -170,7 +279,7 @@ try {
   const editorAfter = await c.ev(`(function(){ var e=document.querySelector('.public-DraftEditor-content'); return e ? String(e.innerText||'').slice(0,60) : '(gone)'; })()`)
   c.close()
   await sleep(200)   // 等 WebSocket 真正关掉再退出（别的工具踩过 libuv 断言）
-  out({ ok: true, published: true, aweme_id: AWEME, mention: NAME, popup_row: row, editor_html: editorHtml, editor_after: editorAfter, chrome: chromed })
+  out({ ok: true, published: true, aweme_id: AWEME, mention: NAME, ...(replyInfo || {}), popup_row: row, editor_html: editorHtml, editor_after: editorAfter, chrome: chromed })
 } catch (e) {
   if (!(e && e.__done)) out({ ok: false, error: String(e?.message ?? e) })
 }
