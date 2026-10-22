@@ -1545,7 +1545,15 @@ export function apply(ctx, config) {
         const dlines = readFileSync(deskPatch, 'utf8').split(/\r?\n/)
         let start = -1
         for (let i = 0; i < dlines.length; i++) {
-          if (/^-\s+id:\s*agent-default-model\s*$/.test(dlines[i])) { start = i; break }
+          /**
+           * 🔴 2026-10-22 修的真 bug：这一行结尾**带注释** —— `- id: agent-default-model # magpie`
+           *    旧正则 `/^-\s+id:\s*agent-default-model\s*$/` 要求 id 后面直接行尾，
+           *    遇到 `# 注释` 就永远匹配不到 ⇒ overlay 里从来没写过模型
+           *    ⇒ headless 一直用它自己 profile 里那份**错的** `workbuddy-ai/...`
+           *    ⇒ 每轮一启动就 429（那条通道被限流），而桌面版用的 `workbuddy/...` 是好的。
+           *    修法：允许 id 后面跟 ` # 注释`。
+           */
+          if (/^-\s+id:\s*agent-default-model\s*(?:#.*)?$/.test(dlines[i])) { start = i; break }
         }
         if (start >= 0) {
           let end = dlines.length

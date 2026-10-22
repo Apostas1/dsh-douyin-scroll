@@ -542,6 +542,43 @@ try {
   // ⑥ 面板要有"看日志"
   if (/看日志/.test(cl) && idx.includes('/api/douyin-duty/log')) ok('面板有「看日志」（点了没反应能自己排查）')
   else bad('面板没有看日志入口')
+
+  /* ── ⑦ 模型跟随：注释行必须能匹配 ──
+   * 🔴 2026-10-22 真 bug：桌面版那行是 `- id: agent-default-model # magpie`（带注释），
+   *    旧正则要求 id 后直接行尾 ⇒ 永远匹配不到 ⇒ overlay 不写模型
+   *    ⇒ headless 用它自己那份错的 `workbuddy-ai/...` ⇒ 每轮一启动就 429。
+   */
+  // 判据：源码里那行正则必须带 `(?:#.*)?`（允许行尾注释）
+  if (idx.includes('(?:#.*)?$') && /agent-default-model/.test(idx)) ok('模型跟随的正则允许行尾注释（这是 429 的根因）')
+  else bad('模型跟随的正则不接受 `# 注释` —— overlay 会漏写模型，headless 用错通道')
+  if (/overlay: 模型跟随桌面版/.test(idx)) ok('overlay 会记"模型跟随桌面版"')
+  else bad('overlay 没记录模型跟随')
+
+  /* ── ⑧ 通知正文要能从报告里解析出真内容 ──
+   * 🔴 2026-10-22 真 bug：toastSummary 只认旧格式（`- **文案摘要**：`），
+   *    但 duty.md 现在写成 `**《标题》** · @作者` ⇒ 通知正文变成"（第 1 条）"。
+   */
+  try {
+    const toast = readFileSync(join(here, 'lib', 'toast.mjs'), 'utf8')
+    const sample = [
+      '## 值得看',
+      '### 7676464210544570726',
+      '**《烟火里的江西》家常美食「香辣鸡爪」** · @烟火里的江西 · 39.6 秒',
+      '**一句话**：一个能照着做的鸡爪方子。',
+      '',
+      '### 7691197955269956233',
+      '**星星之火，可以燎原** · @方面面 · 57.6 秒',
+      '**一句话**：一张纸烧完露出底下的画。',
+    ].join('\n')
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e',
+      `import { toastSummary } from ${JSON.stringify(new URL('./lib/toast.mjs', import.meta.url).href)};`
+      + `const s = toastSummary(${JSON.stringify(sample)}, {day:'x'});`
+      + `console.log(JSON.stringify({title:s.title,body:s.body,picked:s.picked}))`], { encoding: 'utf8', timeout: 30_000 })
+    const j = JSON.parse(String(r.stdout || '{}').trim() || '{}')
+    if (j.picked === 2 && /烟火里的江西/.test(j.body) && /星星之火/.test(j.body)) {
+      ok('通知正文能从新格式报告里解析出真标题（不再是"（第 1 条）"）')
+    } else bad(`通知解析失败：${JSON.stringify(j).slice(0, 200)}`)
+  } catch (e) { bad(`通知解析测试失败：${e.message}`) }
 } catch (e) { bad(`自动发送/跑一轮检查失败：${e.message}`) }
 
 /* ── 4e. 采集门槛 / 跨天记账 ── */
