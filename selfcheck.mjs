@@ -209,6 +209,11 @@ try {
     })
     if (missing.length) bad(`这些 MCP 工具没有 confirm 闸：${missing.join(', ')}`)
     else ok(`${sendTools.length} 个会发东西的 MCP 工具都带 confirm 闸`)
+    // ⑤ @ 我 / 记忆 这两个能力也要在 MCP 里有
+    if (/name: 'douyin_at_me'/.test(mcp)) ok('MCP 有 douyin_at_me（谁 @ 了我）')
+    else bad('MCP 缺 douyin_at_me')
+    if (/context|记忆/.test(mcp)) ok('MCP 文档提到记忆上下文')
+    else bad('MCP 没提记忆 —— 别的 AI 不会用上下文')
   }
   // ⑤ 使用说明必须存在，且写清「先卡片后文字」
   const doc = join(here, 'AI-USAGE.md')
@@ -359,6 +364,87 @@ try {
   if (idx.includes('/api/douyin-duty/persona')) ok('后端有 /persona（人设读写）')
   else bad('后端缺 /persona')
 } catch (e) { bad(`新手流程检查失败：${e.message}`) }
+
+/* ── 4l. 真 @ 提及（2026-10-22 修的真 bug） ──
+ * 🔴 事故：index.js 把 --mention-* 传给 comment-api.mjs，但那个脚本**根本不认**这几个参数
+ *    ⇒ 一路静默忽略，发出去的是**普通评论**（名字不变蓝、对方收不到通知），工具却报成功。
+ *    唯一有效的 comment-mention-ui.mjs 在 index.js 里从来没被调用过。
+ */
+console.log('\n4l. 真 @ 提及')
+try {
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const cm = readFileSync(join(here, 'tools', 'comment-api.mjs'), 'utf8')
+  const ui = readFileSync(join(here, 'tools', 'comment-mention-ui.mjs'), 'utf8')
+
+  if (/runNodeTool\('comment-mention-ui\.mjs'/.test(idx)) ok('index.js 真的会调 comment-mention-ui.mjs（UI 点选那条路）')
+  else bad('index.js 不调 comment-mention-ui.mjs —— 真 @ 根本发不出去（历史 bug 回来了）')
+
+  // 不许再把 mention 参数喂给做不了 @ 的那个脚本
+  if (/comment-api\.mjs'[^\n]*mention/.test(idx)) bad('又把 --mention-* 传给 comment-api.mjs —— 它会静默忽略')
+  else ok('没有把 mention 参数喂给 comment-api.mjs')
+
+  // comment-api.mjs 必须**明确拒绝** mention，不许静默降级
+  if (/unsupported: 'mention'/.test(cm)) ok('comment-api.mjs 收到 --mention-* 会明确拒绝（不再静默降级）')
+  else bad('comment-api.mjs 收到 mention 参数不吭声 —— 会发出"看起来成功"的普通评论')
+
+  // 分流：有 mention 走 UI，没 mention 走 API
+  if (/wantMention/.test(idx) && /const wantMention = Boolean/.test(idx)) ok('index.js 按"有没有 mention"分流（UI / API 两条路）')
+  else bad('index.js 没有 mention 分流逻辑')
+
+  // UI 点选做不了"回复某条 + @"，必须明确说不支持（别假装发了）
+  if (/真 @ 目前只能发顶层评论/.test(idx)) ok('"回复某条 + 真 @"会明确说不支持（不假装发送）')
+  else bad('UI 路径没拦"回复某条 + 真 @" —— 会假装发了但实际发成顶层')
+
+  // @ 自己那道闸还在
+  if (/是登录号自己的 uid/.test(idx)) ok('有「@ 自己」拦截')
+  else bad('「@ 自己」的拦截没了 —— 会 @ 到大肥鱼自己身上')
+  if (/--name/.test(ui) && /--aweme/.test(ui)) ok('comment-mention-ui.mjs 参数接口正常')
+  else bad('comment-mention-ui.mjs 参数变了')
+} catch (e) { bad(`真 @ 检查失败：${e.message}`) }
+
+/* ── 4m. 对话记忆（持续聊天要带上下文） ── */
+console.log('\n4m. 对话记忆')
+try {
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+  const memFile = join(here, 'lib', 'memory.mjs')
+  if (!existsSync(memFile)) bad('缺 lib/memory.mjs —— 没有记忆')
+  else {
+    const mem = readFileSync(memFile, 'utf8')
+    ok('lib/memory.mjs 在')
+    // 真跑一遍记忆自测
+    const t = spawnSync(process.execPath, [join(here, 'tools', 'memory-test.mjs')], { encoding: 'utf8', timeout: 60_000 })
+    const m = String(t.stdout || '').match(/结果：(\d+) 通过 \/ (\d+) 失败/)
+    if (t.status === 0 && m) ok(`记忆自测通过（${m[1]} 项：去重/上限/事实/评论/清空）`)
+    else bad(`记忆自测失败：${String(t.stdout || t.stderr || '').split('\n').slice(-3).join(' ')}`)
+    // 记忆必须落本机、且有上限
+    if (/MAX_MESSAGES = 80/.test(mem)) ok('记忆有上限（每人最多 80 条）')
+    else bad('记忆没上限 —— 会无限长')
+    if (/home, 'memory'/.test(mem) || /join\(home, 'memory'\)/.test(mem)) ok('记忆存在插件家目录（本机，不上传）')
+    else bad('记忆存哪儿不清楚')
+  }
+  // douyin_im_read 要带上下文
+  if (/context: context \|\|/.test(idx)) ok('douyin_im_read 返回记忆上下文（回话前能看到之前聊过什么）')
+  else bad('douyin_im_read 不带上下文 —— 每次都是"第一次见"')
+  if (/mergeDmMemory\(stateDir/.test(idx)) ok('读私信会把会话合并进记忆')
+  else bad('读私信不写记忆')
+  if (/noteSent\(stateDir/.test(idx)) ok('发出去的消息也进记忆（不然下次读会以为凭空出现）')
+  else bad('发出去的消息不进记忆')
+  // 新工具
+  for (const [name, label] of [
+    ['douyin_at_me', '评论区 @ 我'],
+    ['douyin_remember', '记住长期事实'],
+    ['douyin_memory', '记忆管理'],
+  ]) {
+    if (idx.includes(`name: '${name}'`)) ok(`有 ${name} 工具（${label}）`)
+    else bad(`缺 ${name} 工具（${label}）`)
+  }
+  // 面板
+  if (/对话记忆/.test(cl) && /\/memory/.test(cl)) ok('面板有「对话记忆」卡片')
+  else bad('面板没有记忆入口 —— 用户不知道它在记什么')
+  if (/清空全部记忆/.test(cl)) ok('面板能清空记忆')
+  else bad('面板不能清空记忆 —— 用户没法反悔')
+} catch (e) { bad(`记忆检查失败：${e.message}`) }
 
 /* ── 4e. 采集门槛 / 跨天记账 ── */
 console.log('\n4e. 采集门槛 / 跨天')

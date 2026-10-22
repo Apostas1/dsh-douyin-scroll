@@ -26,11 +26,37 @@ const REPLY = String(argOf('--reply', '')).trim()
 const FILE = String(argOf('--file', '')).trim()
 const TEXT = FILE ? readFileSync(FILE, 'utf8').trim() : String(argOf('--text', '')).trim()
 
+/**
+ * 🔴 2026-10-22：这里以前**静默忽略** `--mention-*`（根本不读这几个参数）。
+ *    调用方以为传了就能真 @，实际发出去的是普通评论：名字不变蓝、对方收不到通知，
+ *    工具却报成功 —— 最坏的一种错（不是失败，是"看起来成功"）。
+ *
+ * ⭐ 但**这个脚本做不了真 @**（原因见 tools/comment-mention-ui.mjs 顶部：
+ *    API 直发时服务端会把 mention 的 sec_uid 剥掉，只有前端点选才认）。
+ *    ⇒ 现在选择**明确拒绝**，不再静默降级。要真 @ 请用 comment-mention-ui.mjs。
+ */
+const MENTION = {
+  name: String(argOf('--mention-name', '')).trim(),
+  uid: String(argOf('--mention-uid', '')).trim(),
+  secUid: String(argOf('--mention-secuid', '')).trim(),
+}
+const wantsMention = Boolean(MENTION.name || MENTION.uid || MENTION.secUid)
+
 const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode = o.ok ? 0 : 1 }
 
 if (!AWEME) { out({ ok: false, error: '缺 --aweme' }); process.exit(1) }
 if (!TEXT) { out({ ok: false, error: '正文是空的' }); process.exit(1) }
 if (TEXT.length > 500) { out({ ok: false, error: `正文太长（${TEXT.length} 字），抖音评论放不下` }); process.exit(1) }
+if (wantsMention) {
+  out({
+    ok: false,
+    unsupported: 'mention',
+    error: '这个脚本做不了真 @（API 直发会被服务端剥掉 sec_uid：名字变蓝但点开是空页、对方收不到通知）',
+    use_instead: 'tools/comment-mention-ui.mjs --aweme <id> --name <昵称> --text <正文>',
+    hint: '想发"@ 只是文字"的普通评论：去掉 --mention-* 三个参数再调',
+  })
+  process.exit(1)
+}
 
 async function cdpReady() {
   try { return (await fetch(`${CDP}/json/version`)).ok } catch { return false }

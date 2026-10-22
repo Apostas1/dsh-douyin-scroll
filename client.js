@@ -170,6 +170,8 @@ window.__ModuleLoader__.load({
       const [manualDm, setManualDm] = React.useState(null)
       // 每天挑几条（输入框草稿）
       const [perDayDraft, setPerDayDraft] = React.useState(null)
+      // 记忆统计
+      const [mem, setMem] = React.useState(null)
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
@@ -342,8 +344,27 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
-      /** 读人设（使用者自己那份；没写就用插件自带/默认） */
-      const loadPersona = async () => {
+      /** 记忆：看统计 / 清空 */
+      const loadMem = async () => {
+        if (mem !== null) { setMem(null); return }
+        setBusy('mem')
+        try {
+          const r = await jget('/memory')
+          setMem((r && r.stats) || { dm: 0, comment: 0, bytes: 0 })
+        } catch (e) { say('读记忆失败：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+      const clearMem = async () => {
+        setBusy('mem')
+        try {
+          const r = await jpost('/memory/clear', {})
+          setMem((r && r.stats) || { dm: 0, comment: 0, bytes: 0 })
+          say('记忆已清空（私信和评论区的记录都删了）', 'good')
+        } catch (e) { say('清空失败：' + String((e && e.message) || e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      /** 读人设（使用者自己那份；没写就用插件自带/默认） */      const loadPersona = async () => {
         if (persona !== null) { setPersona(null); return }
         setBusy('persona')
         try {
@@ -479,11 +500,9 @@ window.__ModuleLoader__.load({
               'data-on': st.loggedIn ? '' : undefined,
               'data-off': st.loggedIn ? undefined : '',
             }, st.loggedIn ? '已登录' : '未登录'),
-            /* ⭐ 登录的是哪个号 —— 用户要知道自己在给谁刷 */
+            /* ⭐ 登录的是哪个号 —— 只显示昵称就够（ID 太长，对用户没用） */
             st.loggedIn && acc && acc.nick
-              ? h('span', { 'data-dy-account': '' },
-                '👤 ' + acc.nick,
-                acc.uid ? h('span', { 'data-dy-account-id': '' }, '　' + acc.uid) : null)
+              ? h('span', { 'data-dy-account': '' }, '👤 ' + acc.nick)
               : (st.loggedIn ? h('span', { 'data-dy-sub': '' }, '正在查登录的号…') : null),
             h('span', {
               'data-dy-badge': '',
@@ -767,6 +786,31 @@ window.__ModuleLoader__.load({
               h('option', { value: 'file' }, '只写文件（不打扰）'),
               h('option', { value: 'webhook' }, '推 webhook'),
               h('option', { value: 'both' }, '通知 + webhook')))),
+
+        /* ── 对话记忆 ── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '对话记忆'),
+              h('div', { 'data-dy-sub': '' },
+                '回私信、回评论时会记住聊过什么（存在本机，不上传）。这样它才不会把人当陌生人、重复问已经说过的事。')),
+            h('button', {
+              'data-dy-btn': '', disabled: busy === 'mem', onClick: loadMem,
+            }, mem === null ? '看记忆' : '收起')),
+          mem !== null
+            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
+              h('div', { 'data-dy-kv': '' },
+                `私信记忆 ${mem.dm} 个人 · 评论区记忆 ${mem.comment} 条视频 · 共 ${Math.round((mem.bytes || 0) / 1024)} KB`),
+              h('div', { 'data-dy-sub': '' },
+                mem.dm || mem.comment
+                  ? '想忘掉某个人：在对话里说「忘掉他」，或者清空全部。'
+                  : '还没有记忆 —— 用它聊过天之后才会有。'),
+              h('div', { 'data-dy-row': '' },
+                h('button', {
+                  'data-dy-mini': '', 'data-danger': '', disabled: Boolean(busy) || (!mem.dm && !mem.comment),
+                  onClick: clearMem,
+                }, '清空全部记忆')))
+            : null),
 
         /* ── 我的人设 ── */
         h('div', { 'data-dy-card': '' },

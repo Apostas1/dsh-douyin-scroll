@@ -31,6 +31,11 @@ import { saveCookie, readCookie, hasCredential, credentialInfo, clearCredential,
 import { sendWebhook, condense, maskUrl } from './lib/notify.mjs'
 import { sendToast, toastSummary } from './lib/toast.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
+import {
+  loadDmMemory, mergeDmMemory, noteSent, addFacts, dmContext,
+  loadCommentMemory, noteMyComment, markSeen,
+  memoryStats, forgetDm, forgetAll,
+} from './lib/memory.mjs'
 
 export const name = 'douyin-scroll'
 export const inject = ['webServer', 'tools', 'settings']
@@ -743,6 +748,13 @@ export function apply(ctx, config) {
       if (!res) return { ok: false, error: '发送器没返回可解析结果', stdout: r.stdout.slice(0, 400), stderr: r.stderr.slice(0, 400) }
       if (res.ok) log(`dm -> ${res.to || to}${res.to_sec_uid ? ' (' + res.to_sec_uid + ')' : ''}: ${res.sent ? '已发送' : res.dry ? 'dry-run' : '未发送'}（${res.len} 字）`)
       if (res.sent) noteDm('text', res.to_sec_uid || toId)
+      // ⭐ 发出去的话要进记忆 —— 不然下次读私信会以为这句话是凭空出现的
+      if (res.sent) {
+        try {
+          const secUid = String(res.to_sec_uid || toId || '').trim()
+          if (secUid) noteSent(stateDir, secUid, res.to || to, text, 'text')
+        } catch (e) { log(`记发送记忆失败（不影响已发出）：${e?.message ?? e}`) }
+      }
       return res
     },
   })
@@ -867,6 +879,21 @@ export function apply(ctx, config) {
         else log(`share-card reason 发送失败：${reasonResult.error || '未知'}`)
       }
 
+      // ⭐ 分享卡片也要进记忆（同时记"发的是哪个视频"）—— 聊过什么、发过什么都要有据可查
+      if (sentN) {
+        try {
+          const secUid = String(toId || '').trim()
+          if (secUid) {
+            for (const r of results) {
+              if (!r || !r.sent) continue
+              const row = (() => { try { return (JSON.parse(readFileSync(join(stateDir, 'forward-pick.json'), 'utf8')).rows || []).find((x) => String(x.aweme_id) === String(r.aweme_id)) || {} } catch { return {} } })()
+              noteSent(stateDir, secUid, to, `[分享视频] ${String(row.desc || '').slice(0, 60) || r.aweme_id}`, 'card')
+            }
+            if (reasonResult && reasonResult.ok && reasonText) noteSent(stateDir, secUid, to, reasonText, 'text')
+          }
+        } catch (e) { log(`记分享记忆失败（不影响已发出）：${e?.message ?? e}`) }
+      }
+
       const allOk = sentN === ids.length && verified && (!reasonResult || reasonResult.ok)
       if (sentN) log(`share-card -> ${to}: 发出 ${sentN}/${ids.length} 张卡片，回读${verified ? '核实通过' : '未核实'}${reasonResult ? '，理由' + (reasonResult.ok ? '已发' : '失败') : ''}`)
       return {
@@ -943,12 +970,27 @@ export function apply(ctx, config) {
       }
       const argv = ['--aweme', aweme, '--text', text]
       if (replyTo) argv.push('--reply', replyTo)
-      // ⭐ 真 @：三个参数齐了才传 —— 少一个都只会发出「普通文字的 @」（不变蓝、无通知，2026-10-21 主人实测）
-      // 🔴 uid 必须是**被 @ 人**的：session-guard / account.json 里的 uid（4376484329564484）
-      //    是**登录号（大肥鱼）自己** —— 抄错了就会 @ 成自己：名字照样蓝，但点进自己的主页、
-      //    通知也永远不会来（2026-10-21 实测翻车）。要 @ 谁，就从**他的**评论 user 字段或
-      //    他的主页接口拿 uid（形如 11-1289250254）。
-      if (mentionName && mentionUid && mentionSecUid) {
+      /**
+       * 🔴 2026-10-22 修的真 bug：真 @ 必须走**UI 点选**（API 会剥掉 sec_uid）。
+       *    老代码把 `--mention-name/--mention-uid/--mention-secuid` 传给 `comment-api.mjs`，
+       *    可那个脚本**根本不认这三个参数** —— 于是一路静默忽略，发出去的是**普通评论**：
+       *    名字不变蓝、对方收不到通知，而工具还报成功了。主人 2026-10-21 实测过这个坑。
+       *    唯一有效的 `comment-mention-ui.mjs` 在 index.js 里**从来没被调用过**。
+       *    ⇒ 现在按"有没有 mention"分流：
+       *        有 → comment-mention-ui.mjs（真点选，保 sec_uid）
+       *        没有 → comment-api.mjs（一条 fetch，快、不弹验证）
+       */
+      const wantMention = Boolean(mentionName && mentionUid && mentionSecUid)
+      if (wantMention) {
+        // ⚠️ UI 点选只能发**顶层评论**：它用的是 #comment-input-container 那个输入框，
+        //    没有"回复某条"的入口。要真 @ 又要回复某条，目前做不到 —— 如实说，别假装发了。
+        if (replyTo) {
+          return {
+            ok: false,
+            error: '真 @ 目前只能发顶层评论，不能"回复某条评论并 @ 人"',
+            hint: '两个选择：① 去掉 mention_* 参数，用普通回复（@ 只是文字，对方收不到通知）；② 去掉 comment_id，发顶层评论并真 @（会变蓝、对方收到通知）',
+          }
+        }
         // 宿主自己的登录 uid 懒加载一次，用来拦「@ 自己」
         if (!selfUidCache) {
           const g = runPy('session-guard.py', ['check'], { timeout: 90_000 })
@@ -961,11 +1003,33 @@ export function apply(ctx, config) {
         if (!text.includes('@' + mentionName)) {
           return { ok: false, error: `正文里没有「@${mentionName}」原样出现 —— 真 @ 需要正文带这个 token，或去掉 mention_* 参数发普通评论` }
         }
-        argv.push('--mention-name', mentionName, '--mention-uid', mentionUid, '--mention-secuid', mentionSecUid)
+        const mr = runNodeTool('comment-mention-ui.mjs', ['--aweme', aweme, '--name', mentionName, '--text', text], { timeout: 300_000 })
+        const mres = pickJson(mr.stdout)
+        if (!mres) {
+          return { ok: false, error: '真 @ 执行器没返回可解析结果', stdout: String(mr.stdout || '').slice(0, 400), stderr: String(mr.stderr || '').slice(0, 300) }
+        }
+        if (mres.ok) {
+          log(`comment-mention-ui -> ${aweme}: 真 @${mentionName} 已发布（UI 点选）`)
+          try { noteMyComment(stateDir, aweme, { text, mention: mentionName }) } catch { /* 记不上不影响发 */ }
+          // UI 路径拿不到 cid（没走接口）⇒ 回读用「正文片段」找，别装作有 cid
+          let readback = null
+          try {
+            await new Promise((r) => setTimeout(r, 2500))
+            const cr = runNodeTool('comment-read-dom.mjs', ['--aweme', aweme, '--mine', '--scroll', '4'], { timeout: 200_000 })
+            const txt = String(cr.stdout || '')
+            readback = { found: txt.includes(text.slice(0, 12)), by: 'comment-read-dom（按正文片段找）', scanned_chars: txt.length }
+          } catch { readback = { found: false, by: 'comment-read-dom', note: '回读失败（不影响已发出的事实）' } }
+          return { ...mres, mention_verified: true, readback, note: '真 @ 走的是 UI 点选，sec_uid 保住了（对方会收到通知）' }
+        }
+        return { ...mres, mention_verified: false }
       }
       const r = runNodeTool('comment-api.mjs', argv, { timeout: 200_000 })
       const res = pickJson(r.stdout)
       if (!res) return { ok: false, error: '发送器没返回可解析结果', stdout: r.stdout.slice(0, 400), stderr: r.stderr.slice(0, 400) }
+      // ⭐ 记进评论区记忆（谁在什么视频下说了什么）
+      if (res.ok) {
+        try { noteMyComment(stateDir, aweme, { cid: res.cid || '', text, mention: mentionName }) } catch { /* 记不上不影响发 */ }
+      }
       // ⭐ 回读：接口 200 + 给了 cid 只说明**服务端收下了**，不代表它出现在评论区里。
       //    再拉一遍评论，看这个 cid 在不在。
       //    ⚠️ 拉不到**不算失败** —— 新评论有审核/延迟，用"未核实"如实说，别谎报成功也别谎报失败。
@@ -986,9 +1050,123 @@ export function apply(ctx, config) {
   })
 
   tool({
+    name: 'douyin_at_me',
+    description: '⭐ **别人在评论区 @ 了我** —— 一次把「谁 @ 的 / 在哪个视频 / 说了什么 / 我回过没有」整理好，'
+      + '带上记忆上下文，方便决定回不回。只读，不发任何东西。'
+      + '想回的时候用返回里的 aweme_id + comment_id 调 douyin_comment_reply。',
+    parameters: {
+      limit: { type: 'number', description: '最多看几条（默认 10，最多 30）' },
+      include_seen: { type: 'boolean', description: '连已经回过的也列出来（默认 false，只看新的）' },
+    },
+    async execute(args = {}) {
+      if (!hasCredential(stateDir)) return { ok: false, error: '还没登录', hint: '先在设置页扫码登录' }
+      const r = runPy('notice-read.py', ['--raw'], { timeout: 150_000 })
+      const j = pickJson(r.stdout)
+      if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
+      const items = Array.isArray(j.items) ? j.items : []
+      // type 45/46 = 评论区 @ 我（notice-read.py 里定义的）
+      const ats = items.filter((x) => x && (x.type === 45 || x.type === 46))
+      const limit = Math.max(1, Math.min(Number(args.limit) || 10, 30))
+      const includeSeen = args.include_seen === true
+
+      const out = []
+      for (const a of ats) {
+        const aweme = String(a.aweme_id || '')
+        const cid = String(a.comment_id || '')
+        let mem = null
+        try { mem = aweme ? loadCommentMemory(stateDir, aweme) : null } catch { mem = null }
+        const alreadyReplied = Boolean(mem && cid && mem.seen.includes(cid))
+        const myCommentsHere = mem ? (mem.mine || []).slice(-3) : []
+        if (alreadyReplied && !includeSeen) continue
+        out.push({
+          nickname: a.nickname || '',
+          uid: a.uid || '',
+          content: String(a.content || '').slice(0, 300),
+          aweme_id: aweme || undefined,
+          comment_id: cid || undefined,
+          video_url: a.video_url || (aweme ? `https://www.douyin.com/video/${aweme}` : undefined),
+          before: alreadyReplied ? '回过' : '没回过',
+          /** ⭐ 我在这条视频下说过什么（有记忆才知道该不该重复） */
+          my_comments_here: myCommentsHere.map((m) => ({ at: m.at, text: m.text, mention: m.mention || undefined })),
+        })
+        if (out.length >= limit) break
+      }
+
+      // 顺手把这些 @ 标成"看过了"（避免下次又当成新的）
+      try {
+        const byAweme = {}
+        for (const a of ats) {
+          const w = String(a.aweme_id || '')
+          const c = String(a.comment_id || '')
+          if (w && c) (byAweme[w] = byAweme[w] || []).push(c)
+        }
+        for (const [w, cs] of Object.entries(byAweme)) markSeen(stateDir, w, cs)
+      } catch { /* 标记失败不影响读 */ }
+
+      log(`at-me: ${ats.length} 条 @ 我，未回的 ${out.length} 条`)
+      return {
+        ok: true,
+        at_n: ats.length,
+        shown: out.length,
+        list: out,
+        hint: out.length
+          ? '要回的话：douyin_comment_reply { aweme_id, comment_id, text }，先给用户看草稿'
+          : (ats.length ? '这些 @ 都回过了（加 include_seen:true 可以再看一遍）' : '最近没有新的 @'),
+      }
+    },
+  })
+
+  tool({
+    name: 'douyin_remember',
+    description: '⭐ 把关于某个人的**长期事实**记进记忆（住哪、养什么、在意什么、讨厌什么）。'
+      + '下次聊天时 douyin_im_read 会把这些一起返回，回话就能接得上。'
+      + '⚠️ 只记**对方亲口说过 / 明确能看出来**的事，别自己推测。',
+    parameters: {
+      to_id: { type: 'string', description: '⭐ 那个人的 sec_uid（douyin_im_read 返回里 to_sec_uid）' },
+      facts: { type: 'array', items: { type: 'string' }, description: '要记的事实，一条一句（比如 ["在杭州", "养了只橘猫"]）' },
+    },
+    async execute(args = {}) {
+      const secUid = String(args.to_id || cfg.dmToId || '').trim()
+      if (!secUid) return { ok: false, error: '缺 to_id', hint: 'douyin_im_read 返回里有 to_sec_uid' }
+      const facts = Array.isArray(args.facts) ? args.facts : []
+      if (!facts.length) return { ok: false, error: 'facts 是空的' }
+      const before = loadDmMemory(stateDir, secUid)
+      if (!before) return { ok: false, error: '记忆里还没有这个人 —— 先 douyin_im_read 读一次会话，再记' }
+      const after = addFacts(stateDir, secUid, facts)
+      log(`记住 ${after.who.nick || secUid} 的 ${facts.length} 条事实（共 ${after.facts.length} 条）`)
+      return { ok: true, who: after.who, facts: after.facts, added: facts.length }
+    },
+  })
+
+  tool({
+    name: 'douyin_memory',
+    description: '看 / 管记忆：不传参就是看有多少；传 forget_uid 忘掉某个人；传 clear=true 清空全部（慎用）。',
+    parameters: {
+      forget_uid: { type: 'string', description: '要忘掉的那个人的 sec_uid' },
+      clear: { type: 'boolean', description: '清空所有记忆（会删私信和评论区的全部记录）' },
+    },
+    async execute(args = {}) {
+      if (args.clear === true) {
+        const r = forgetAll(stateDir)
+        log(`记忆：已清空（删了 ${r.removed} 个文件）`)
+        return { ...r, stats: memoryStats(stateDir) }
+      }
+      if (args.forget_uid) {
+        const uid = String(args.forget_uid).trim()
+        const r = forgetDm(stateDir, uid)
+        log(`记忆：忘掉了 ${uid}`)
+        return { ...r, stats: memoryStats(stateDir) }
+      }
+      return { ok: true, stats: memoryStats(stateDir) }
+    },
+  })
+
+  tool({
     name: 'douyin_im_read',
     description: '读私信：无头 Chrome（无窗口）打开会话，返回最近的对话 —— 每条都带 `from`（me / them / unknown），'
-      + '所以能分清「他刚回了什么」和「我上次说了什么」。只读，不发任何东西。',
+      + '所以能分清「他刚回了什么」和「我上次说了什么」。只读，不发任何东西。'
+      + '⭐ **会自动带上记忆**：返回里 `context` 是我记得的这个人（长期事实 + 之前聊过的内容），'
+      + '回话之前先看它，别把聊过的事当没说过。',
     parameters: {
       to: { type: 'string', description: '要打开的会话昵称；留空用配置 dmTo' },
       to_id: { type: 'string', description: '⭐ 稳定 id（sec_uid）；重名时给这个' },
@@ -1008,6 +1186,22 @@ export function apply(ctx, config) {
       const limit = Math.max(1, Math.min(Number(args.limit) || 30, 60))
       const allMsgs = Array.isArray(j.messages) ? j.messages : []
       const msgs = allMsgs.slice(-limit)
+
+      /**
+       * ⭐ 记忆：读到的会话**合并进记忆**，然后把"上下文"一起返回。
+       *    先取旧记忆（这一刻之前记得的），再合并 —— 这样 context.recent 才是
+       *    "上次聊过什么"，不会跟这次读到的新消息混成一团。
+       */
+      let context = null
+      let memory = null
+      try {
+        const secUid = String(j.to_sec_uid || toId || '').trim()
+        if (secUid) {
+          context = dmContext(stateDir, secUid, { recent: 12 })
+          memory = mergeDmMemory(stateDir, secUid, j.to || to, allMsgs)
+        }
+      } catch (e) { log(`读私信记忆失败（不影响这次读）：${e?.message ?? e}`) }
+
       if (j.count) log(`im-read <- ${j.to || to}: ${j.count} 条（我 ${j.mine} / 他 ${j.them} / 不明 ${j.unknown}）`)
       return {
         ok: true, to: j.to, to_sec_uid: j.to_sec_uid, matched_by: j.matched_by,
@@ -1017,6 +1211,9 @@ export function apply(ctx, config) {
         // 他最近说的话（从新到旧），方便一眼看出要不要回。
         // ⚠️ 从**全量**算，不是从截断后的 msgs 算 —— 不然 limit 一小，他刚说的话就被切没了。
         their_latest: allMsgs.filter((m) => m.from === 'them').slice(-3).reverse(),
+        /** ⭐ 我记得的这个人（长期事实 + 之前聊过的）—— 回话前先看这个 */
+        context: context || { note: '这个人以前没聊过（记忆里没有记录）' },
+        memory: memory ? { rounds: memory.rounds, total: memory.total, added: memory.added } : null,
       }
     },
   })
@@ -1988,6 +2185,16 @@ export function apply(ctx, config) {
       } catch (e) {
         return sendJson(res, 200, { ok: false, logged_in: true, account: cached, error: String(e?.message ?? e) })
       }
+    }
+
+    /* ── 记忆：看有多少 / 清掉 ── */
+    if (req.method === 'GET' && path === '/api/douyin-duty/memory') {
+      return sendJson(res, 200, { ok: true, stats: memoryStats(stateDir) })
+    }
+    if (req.method === 'POST' && path === '/api/douyin-duty/memory/clear') {
+      const r = forgetAll(stateDir)
+      log(`记忆：用户从面板清空了全部记忆（删了 ${r.removed} 个文件）`)
+      return sendJson(res, 200, { ...r, stats: memoryStats(stateDir) })
     }
 
     /* ── 新手流程说明（面板上「怎么用？」拿这份）── */

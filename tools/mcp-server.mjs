@@ -428,7 +428,8 @@ const TOOLS = [
   {
     name: 'douyin_im_read',
     title: '刷抖音 · 读私信',
-    description: '读最近一个会话的消息，每条带 from（me/them/unknown），能分清谁说的。只读。',
+    description: '读最近一个会话的消息，每条带 from（me/them/unknown），能分清谁说的。只读。'
+      + '⭐ 会自动带上记忆（context）：之前聊过什么、这个人的长期事实。回话前先看它。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -459,6 +460,40 @@ const TOOLS = [
         mine: j.mine, them: j.them, unknown: j.unknown,
         messages: all.slice(-limit),
         their_latest: all.filter((m) => m.from === 'them').slice(-3).reverse(),
+      }
+    },
+  },
+  {
+    name: 'douyin_at_me',
+    title: '刷抖音 · 谁在评论区 @ 了我',
+    description: '把「谁 @ 的 / 在哪个视频 / 说了什么 / 我回过没有」整理好，带记忆上下文。只读。'
+      + '想回就用返回里的 aweme_id + comment_id 调 douyin_comment_reply。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: '最多看几条（默认 10，最多 30）' },
+        include_seen: { type: 'boolean', description: '连已经回过的也列出来' },
+      },
+      additionalProperties: false,
+    },
+    handler: (args) => {
+      const bad = needLogin() || needSetup()
+      if (bad) return bad
+      const argv = [join(ROOT, 'tools', 'notice-read.py'), '--raw']
+      const r = run(venvPython(), argv, 150_000)
+      const j = pickJson(r.stdout)
+      if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
+      const ats = (Array.isArray(j.items) ? j.items : []).filter((x) => x && (x.type === 45 || x.type === 46))
+      const limit = Math.max(1, Math.min(Number(args?.limit) || 10, 30))
+      return {
+        ok: true,
+        at_n: ats.length,
+        list: ats.slice(0, limit).map((a) => ({
+          nickname: a.nickname || '', content: String(a.content || '').slice(0, 300),
+          aweme_id: a.aweme_id || undefined, comment_id: a.comment_id || undefined,
+          video_url: a.video_url || undefined,
+        })),
+        hint: ats.length ? '要回：douyin_comment_reply { aweme_id, comment_id, text }，先给用户看草稿' : '最近没有新的 @',
       }
     },
   },

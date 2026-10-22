@@ -58,7 +58,7 @@ node "<插件目录>/tools/mcp-server.mjs"
 
 ---
 
-## 2. 工具清单（11 个）
+## 2. 工具清单（12 个）
 
 ### 只读（随便调，什么都不改）
 
@@ -71,6 +71,7 @@ node "<插件目录>/tools/mcp-server.mjs"
 | `douyin_forward` | 拉推荐流候选 + 打分 + 官方分享链接 | **主入口**：要推荐视频就调它 |
 | `douyin_comments` | 读一个视频的评论（含楼中楼） | 判断「这视频好不好玩」 |
 | `douyin_notices` | 谁 @ 了你 / 谁评论点赞关注 | 回消息前先看 |
+| `douyin_at_me` | ⭐ **谁在评论区 @ 了我**（带"回过没有"+ 我在这条视频下说过什么） | 回评论前调它 |
 | `douyin_im_read` | 读私信会话（带 from: me/them） | 看对方最近说了什么 |
 
 ### 会发东西（**必须 `confirm: true`**）
@@ -80,6 +81,43 @@ node "<插件目录>/tools/mcp-server.mjs"
 | `douyin_share_card` | 发**分享卡片**（不是文字链接）给好友，可带一句 reason |
 | `douyin_dm` | 发一条私信 |
 | `douyin_comment_reply` | 发评论 / 回复某条评论 |
+
+---
+
+## 2.5 ⭐ 记忆（持续聊天靠它）
+
+`douyin_im_read` 返回里有一块 `context`，是**它记得的这个人**：
+
+```json
+"context": {
+  "who": { "nick": "某帅气用户" },
+  "rounds": 3,
+  "facts": ["在杭州", "养了只橘猫"],
+  "recent": [ { "from": "them", "text": "上次说的那个视频…", "kind": "text" } ],
+  "total_remembered": 11
+}
+```
+
+**回话之前先看 `context.recent` 和 `context.facts`**：
+
+- `facts` 是长期事实（住哪、养什么、在意什么）—— 别再问一遍
+- `recent` 是之前聊过的 —— 别把说过的话当没说过
+- `context.note` = "这个人以前没聊过" ⇒ 那就当第一次见，别装熟
+
+**哪些会自动进记忆**：
+
+- 每次 `douyin_im_read` 读到的会话
+- 每次 `douyin_dm` / `douyin_share_card` 发出去的内容
+- 每次 `douyin_comment_reply` 发的评论（评论区记忆）
+
+**长期事实要主动记**：发现对方说了值得记住的事（"我搬到成都了"/"我家猫叫豆豆"），
+用 `douyin_remember { to_id, facts: ["搬到成都了", "猫叫豆豆"] }` 记下来。
+
+**记忆边界**：
+
+- 只存**本机** `$DOUYIN_HOME/memory/`，不上传
+- 每人最多 80 条、每条 200 字
+- 没有记录就是没有 —— **绝不用"我记得你说过…"编造**
 
 ---
 

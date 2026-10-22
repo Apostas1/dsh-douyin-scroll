@@ -92,6 +92,9 @@ const MOCK = {
   '/api/douyin-duty/persona': () => ({
     ok: true, custom: false, text: '', default_text: '# 默认人设\n\n中性、不扮演任何人。', hint: '还没写自己的 —— 现在用的是默认人设',
   }),
+  '/api/douyin-duty/memory': () => ({
+    ok: true, stats: { dir: 'H:/dy/memory', dm: 2, comment: 1, bytes: 4096 },
+  }),
   // 扫码登录：默认成功给出 qr_url
   '/api/douyin-duty/login/qr': () => ({ ok: true, qr_url: '/api/douyin-duty/login/qr.png?v=1', port: 9374 }),
   // 登录成功会真的把登录态翻过来 —— 面板随后 refresh() 必须看到 true
@@ -410,8 +413,8 @@ if (rGuide) {
 console.log('\n【登录后显示账号】')
 if (/贪吃的可爱大肥鱼/.test(allText)) console.log('  ✅ 显示了登录的账号昵称')
 else { console.log('  ❌ 没显示账号昵称 —— 用户不知道在给谁刷'); fail++ }
-if (/4376484329564484/.test(allText)) console.log('  ✅ 显示了账号 ID')
-else { console.log('  ❌ 没显示账号 ID'); fail++ }
+if (/4376484329564484/.test(allText)) { console.log('  ❌ 还显示了账号 ID —— 用户说只要昵称就行'); fail++ }
+else console.log('  ✅ 只显示昵称，不显示 ID')
 
 /* ── 私信对象：也要能自己写 ── */
 console.log('\n【私信对象：自己写】')
@@ -451,6 +454,17 @@ if (rPersona) {
   else { console.log('  ❌ 人设文本框没出来'); fail++ }
   if (/默认人设|还没写自己的/.test(rPersona.text)) console.log('  ✅ 说明了当前用的是哪份')
   else { console.log('  ❌ 没说当前用哪份'); fail++ }
+}
+
+/* ── 对话记忆 ── */
+console.log('\n【对话记忆】')
+const rMem = await clickAndRender('看记忆')
+if (rMem) {
+  if (/私信记忆 2 个人/.test(rMem.text) && /评论区记忆 1 条视频/.test(rMem.text)) {
+    console.log('  ✅ 显示了记忆统计')
+  } else { console.log('  ❌ 记忆统计没显示'); fail++ }
+  if (/清空全部记忆/.test(rMem.text)) console.log('  ✅ 有「清空全部记忆」按钮')
+  else { console.log('  ❌ 没有清空按钮'); fail++ }
 }
 
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')
