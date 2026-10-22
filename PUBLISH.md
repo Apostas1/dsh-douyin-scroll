@@ -143,6 +143,8 @@ dsh plugin --profile web add link:<本目录绝对路径>
 | CRLF 警告 | Windows 提交时 git 可能提示 `LF will be replaced by CRLF`。无害，想消掉就加一行 `.gitattributes`：`* text=auto eol=lf` |
 | 没重启就说插件不生效 | bundle 层要重启才组装。**每次改完 `index.js` 都要重启**；`tools/*.mjs` 是每次现读的，改完立即生效 |
 | 公开仓库被人考古 | 日报里可能写着你的账号和你看过什么。建议**先私有**，真要开源就把 `out/` 整个排除并且别把它当示例贴进 README |
+| `files` 整目录会带上 `__pycache__` | `package.json` 的 `files` 写 `tools` ⇒ npm 把 `tools/__pycache__/*.pyc` 也打进包（根 `.npmignore` 拦不住被 files 点名的目录）。**解法：`tools/.npmignore` 里写 `__pycache__/`** —— 2026-10-22 实测 59→51 个文件、-81KB |
+| headless overlay 挂 MCP 插件要用 `- insert:` | Loader 方言：带 `id` 的条目是「覆盖已有行」，目标不存在**静默跳过**；新增插件必须写 `- insert: [...]`（见 `index.js` 的 `ensureOverlay` 注释） |
 
 ---
 
@@ -153,14 +155,14 @@ index.js  client.js  cordis.patch.yml  package.json  AI-USAGE.md
 lib/           8 个（state / credential / notify / toast / hostdeps / uvfetch / paths / chrome）
 prompts/       duty.md（值班章程）、persona.default.md（中性默认人设）、sample-candidates.json
 tools/         20 个（采集 / 评论 / 私信 / 发卡片 / 扫码 / 自检 / MCP server / 渲染检查）
-selfcheck.mjs  110 项预检，不用装 dsh 也能跑
+selfcheck.mjs  198 项预检，不用装 dsh 也能跑
 requirements.txt  只有 curl_cffi + httpx
 ```
 
 推之前跑一遍：
 
 ```powershell
-node selfcheck.mjs      # 应该 110 通过 / 0 失败
+node selfcheck.mjs      # 应该 198 通过 / 0 失败
 ```
 
 > ⚠️ 仓库里**没有** `prompts/persona.md`（作者自己的人设，`.gitignore` 拦着）。
@@ -172,6 +174,7 @@ node selfcheck.mjs      # 应该 110 通过 / 0 失败
 
 ```powershell
 cd D:\aiagent\deepseek\dsh-douyin-scroll
+npm pack --dry-run     # ⭐ 先眼看一遍文件清单：没有 pyc、没有 persona.md、没有 cookie/日志
 npm publish --access public
 ```
 
@@ -180,3 +183,15 @@ npm publish --access public
 ⭐ **发 npm 还有个副作用是好的**：设置页的「检查更新」能直接查到新版本
 （它按 `registry.npmjs.org/<包名>/latest` 查）。只发 GitHub 也能查
 （插件会读仓库根目录的 `package.json`，前提是 `package.json` 里填了 `repository`）。
+
+## 10. 发布前最后一遍对账（2026-10-22 状态）
+
+| 项 | 状态 |
+|---|---|
+| `node selfcheck.mjs` | ✅ 198 通过 / 0 失败 |
+| `npm pack --dry-run` | ✅ 51 个文件 / 221.6 kB，无 pyc、无作者人设 |
+| 面板渲染检查 `node tools/panel-render-check.mjs` | ✅ 通过 |
+| MCP 自测 `node tools/mcp-server.mjs --selftest` | ✅ 通过 |
+| 发送链路实测 | ✅ 评论区 @（cid 落库）+ 分享卡片+理由（私信回读确认） |
+| git remote / repository 字段 | ❌ **还没填** —— 建 GitHub 仓库后 `git remote add` + 在 package.json 加 `"repository": {"type":"git","url":"git+https://github.com/<你的用户名>/dsh-douyin-scroll.git"}`（不填的话「检查更新」的 GitHub 来源废） |
+| npm 账号 | ❌ 还没 `npm login`（发 npm 才需要） |
