@@ -108,10 +108,32 @@ try {
   await click(row.x, row.y)
   await sleep(1000)
 
-  // ⑤ 补正文（mention 后面前端已留一个空格，这里再加一个更稳）
+  /**
+   * ⑤ 补正文。
+   * 🔴 2026-10-22 实测 bug：点选 mention 后，编辑器里**已经有** `@昵称` 这个 token 了。
+   *    如果 TEXT 本身又以 `@昵称` 开头（调用方要求"正文里必须原样出现 @昵称"），
+   *    直接插入整段 TEXT 就会变成 `@某帅气用户 @某帅气用户 正文` —— **重复一次**。
+   *    ⇒ 先看编辑器现在是什么，把 TEXT 开头那个 `@昵称` 去掉再插。
+   */
   if (TEXT) {
-    await c.ev(`document.execCommand('insertText', false, ${JSON.stringify(' ' + TEXT)})`)
-    await sleep(600)
+    let body = String(TEXT)
+    // 去掉开头的 @昵称（含可能跟着的空格）
+    const lead = '@' + NAME
+    if (body.startsWith(lead)) body = body.slice(lead.length).replace(/^[\s\u3000]+/, '')
+    // 再看编辑器里到底有没有 @昵称（不同版本可能不自动插入，保险起见按实际判断）
+    const hasToken = await c.ev(`(function(){
+      var e=document.querySelector('.public-DraftEditor-content');
+      return e ? String(e.innerText||'').indexOf(${JSON.stringify(lead)}) >= 0 : false;
+    })()`)
+    if (body) {
+      await c.ev(`document.execCommand('insertText', false, ${JSON.stringify(' ' + body)})`)
+      await sleep(600)
+    }
+    // 如果真的没自动插入 mention，就把 @昵称 补回去（否则名字不会蓝）
+    if (!hasToken) {
+      await c.ev(`document.execCommand('insertText', false, ${JSON.stringify(lead + ' ')})`)
+      await sleep(400)
+    }
   }
 
   const editorHtml = await c.ev(`(function(){
