@@ -15,6 +15,9 @@ import argparse
 import json
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _home import home_str  # noqa: E402
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -29,7 +32,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-HOME = os.environ.get("DOUYIN_HOME", r"D:\DeepSeek\dsh-data\douyin-duty")
+HOME = home_str()
 COOKIE_FILE = os.path.join(HOME, "douyin_cookie.txt")
 OUT_JSON = os.path.join(HOME, "forward-pick.json")
 OUT_MD = os.path.join(HOME, "out", "forward-" + datetime.now().strftime("%Y%m%d-%H%M") + ".md")
@@ -96,10 +99,32 @@ def get(s, path, quiet=True):
         return None
 
 
+def load_collector():
+    """
+    ⭐ 读设置页那两个旋钮（`collector.json`，由 index.js 的 syncCollectorCfg 写）。
+    以前这里完全没读它 ⇒ 设置页「文案太短 / 评论少」两个旋钮是死的（改了不起作用）。
+    """
+    p = os.path.join(HOME, "collector.json")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            j = json.load(f) or {}
+    except Exception:
+        j = {}
+    return {
+        "minDescLen": int(j.get("minDescLen") or 0),
+        "minComments": int(j.get("minComments") or 0),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dump", action="store_true")
+    ap.add_argument("--limit", type=int, default=10, help="最多取前几条（默认 10）")
     args = ap.parse_args()
+
+    limits = load_collector()
+    # ⭐ 硬筛计数：报告里要能说清"因为什么跳过了几条"，不能只给个最终条数
+    dropped = {"no_desc": 0, "too_short_video": 0, "short_and_quiet": 0}
 
     cookie = load_cookie()
     bag = {}
@@ -135,11 +160,17 @@ def main():
     for aid, a in bag.items():
         desc = (a.get("desc") or "").strip()
         if not desc:
+            dropped["no_desc"] += 1
             continue
         dur = a.get("duration") or (a.get("video") or {}).get("duration") or 0
         if dur and dur < 12000:          # <12s 多数是模板/广告
+            dropped["too_short_video"] += 1
             continue
         d, c, col, sh = stat(a, "digg_count"), stat(a, "comment_count"), stat(a, "collect_count"), stat(a, "share_count")
+        # ⭐ 设置页那两个旋钮：文案太短**且**评论少 ⇒ 丢（单条不满足只降权不丢）
+        if limits["minDescLen"] and len(desc) < limits["minDescLen"] and c < limits["minComments"]:
+            dropped["short_and_quiet"] += 1
+            continue
         ct = a.get("create_time") or 0
         age_h = (now - ct) / 3600.0 if ct else 999
         inter = d + c * 2 + col * 3 + sh * 2
@@ -171,9 +202,11 @@ def main():
         })
 
     rows.sort(key=lambda r: -r["score"])
-    top = rows[:10]
+    top = rows[:max(1, args.limit)]
 
     print("采集：%s" % json.dumps(meta, ensure_ascii=False))
+    print("硬筛跳过：%s（阈值 文案≥%d 字 / 评论≥%d）" % (
+        json.dumps(dropped, ensure_ascii=False), limits["minDescLen"], limits["minComments"]))
     print("去重后候选 %d 条，取前 %d" % (len(rows), len(top)))
     for i, r in enumerate(top, 1):
         print("%2d. [%s] %s" % (i, fmts(r["digg"]), r["desc"][:46]))
@@ -186,7 +219,7 @@ def main():
 
     os.makedirs(os.path.dirname(OUT_MD), exist_ok=True)
     with open(OUT_JSON, "w", encoding="utf-8") as f:
-        json.dump({"meta": meta, "rows": top}, f, ensure_ascii=False, indent=1)
+        json.dump({"meta": meta, "rows": top, "dropped": dropped, "thresholds": limits}, f, ensure_ascii=False, indent=1)
     with open(OUT_MD, "w", encoding="utf-8") as f:
         f.write("# 转发清单 %s\n\n" % datetime.now(CST).strftime("%Y-%m-%d %H:%M"))
         for i, r in enumerate(top, 1):

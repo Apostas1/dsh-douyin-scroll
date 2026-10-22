@@ -20,9 +20,8 @@
  *     使用者一眼看出"跟别的插件不一样"）。
  *
  * 与 bili-scroll 的差别（这一页特有的形状）：
- *   · 采集来源三选一：cookie（纯 HTTP，抖音有 a_bogus 验签，可能拿不到数据）
- *     / browser（Playwright 真浏览器，最稳，要单独装）/ manual（手动喂候选）
- *   · 登录方式不是扫码 —— 是**粘贴 Cookie**（凭证只落在本机插件家目录）
+ *   · 没有「采集来源」这个选项 —— 2026-10-21 起只有一条路：只读推荐流接口取候选。
+ *   · 登录方式不是扫码 —— 是**粘贴 Cookie** 或命令行扫码（凭证只落在本机插件家目录）
  *   · **自动评论默认关**，并且必须有一段红色警示：抖音「@自己」未经验证、
  *     评论以你的账号名义发出、可能触发风控/限流。
  *   · CSS 选择器前缀用 `data-dy-*`（bili-scroll 用 `data-bd-*`），避免两个插件互相踩。
@@ -201,6 +200,9 @@ window.__ModuleLoader__.load({
     const [dmToId, setDmToId] = React.useState(null)    // dmToId —— 私信发给谁（稳定 id，真正决定发给谁）
       const [report, setReport] = React.useState(null)    // 非 null = 报告已展开
       const [topNote, setTopNote] = React.useState(null)  // 顶部那行反馈（提示掉到页面最底下就看不见了）
+      const [persona, setPersona] = React.useState(null)  // 我的人设（自定义文本；null = 还没加载）
+      const [personaHint, setPersonaHint] = React.useState('')  // 人设当前状态提示
+      const [defaultPersona, setDefaultPersona] = React.useState('')  // 默认人设全文（当模板用）
 
       const alive = React.useRef(true)
       React.useEffect(() => () => { alive.current = false }, [])
@@ -239,6 +241,7 @@ window.__ModuleLoader__.load({
         } catch { /* 忽略 */ }
       }, [])
       React.useEffect(() => { loadLogin() }, [loadLogin])
+      React.useEffect(() => { loadPersona() }, [])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
 
@@ -306,6 +309,38 @@ window.__ModuleLoader__.load({
           } else say('没存上：' + (r?.error || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
+      }
+
+      /* ── 我的人设：读 / 存 / 清空 ── */
+      const loadPersona = async () => {
+        try {
+          const r = await jget('/persona')
+          if (r?.ok) {
+            setPersona(r.text || '')
+            setDefaultPersona(r.default_text || '')
+            setPersonaHint(r.hint || '')
+          }
+        } catch { /* 读不到就保持空，不影响别的 */ }
+      }
+      const onSavePersona = async () => {
+        setBusy('persona')
+        try {
+          const r = await jpost('/persona', { text: String(persona || '') })
+          if (r?.ok) {
+            await loadPersona()
+            say(r.custom ? '人设已保存 —— 下一轮就按这个说话' : '已清空，下一轮用默认人设', 'good')
+          } else say('没存上：' + (r?.error || '未知原因'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+      const onResetPersona = async () => {
+        setPersona('')
+        await onSavePersona()
+      }
+      const onLoadDefaultPersona = () => {
+        if (!defaultPersona) { say('没读到默认人设内容', 'warn'); return }
+        setPersona(defaultPersona)
+        say('已把默认内容填进来 —— 改完记得点「保存人设」', 'good')
       }
 
       const onNotifyTest = async () => {
@@ -618,6 +653,19 @@ window.__ModuleLoader__.load({
 
         /* ── 9. 环境与账号 ── */
         h('div', { 'data-dy-sec': '' },
+          h('div', { 'data-dy-h': '' }, '我的人设（可选）'),
+          h('div', { 'data-dy-note': '' },
+            personaHint || '留空 = 用默认中性人设。写了就用你这份，整份覆盖默认。'),
+          h('textarea', {
+            'data-dy-input': '', rows: 10, value: persona ?? '',
+            placeholder: '（可选）写下你希望它怎么说话、怎么称呼你。留空就用默认中性人设。',
+            onChange: (e) => setPersona(e.target.value),
+          }),
+          h('div', { 'data-dy-row': '' },
+            h('button', { 'data-dy-btn': '', disabled: busy === 'persona', onClick: onSavePersona }, '保存人设'),
+            h('button', { 'data-dy-btn': '', disabled: busy === 'persona', onClick: onResetPersona }, '清空，用默认'),
+            h('button', { 'data-dy-btn': '', disabled: busy === 'persona', onClick: onLoadDefaultPersona }, '填入默认内容当模板')),
+
           h('div', { 'data-dy-h': '' }, '环境与账号'),
           h('div', { 'data-dy-row': '' },
             h('button', { 'data-dy-btn': '', disabled: busy === 'install', onClick: onInstall },

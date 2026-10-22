@@ -19,11 +19,14 @@ tools/notice-read.py —— 读抖音互动通知（@ 我的 / 评论 / 点赞 /
 import json
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _home import home_str  # noqa: E402
 import time
 
 from curl_cffi import requests as creq
 
-HOME = os.environ.get("DOUYIN_HOME", r"D:\DeepSeek\dsh-data\douyin-duty")
+HOME = home_str()
 COOKIE = open(os.path.join(HOME, "douyin_cookie.txt"), encoding="utf-8").read().strip()
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")

@@ -153,12 +153,12 @@ index.js  client.js  cordis.patch.yml  package.json
 lib/           6 个（state / credential / notify / toast / hostdeps / uvfetch）
 prompts/       duty.md（值班章程）、persona.md（人设）、sample-candidates.json
 tools/         15 个（采集 / 评论 / 私信 / 发卡片 / 扫码 / 自检）
-selfcheck.mjs  53 项预检，不用装 dsh 也能跑
+selfcheck.mjs  59 项预检，不用装 dsh 也能跑
 requirements.txt  只有 curl_cffi + httpx
 ```
 
 推之前跑一遍：
 
 ```powershell
-node selfcheck.mjs      # 应该 53 通过 / 0 失败
+node selfcheck.mjs      # 应该 59 通过 / 0 失败
 ```

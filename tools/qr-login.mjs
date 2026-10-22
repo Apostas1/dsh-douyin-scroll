@@ -19,16 +19,17 @@
 import { spawn, execFileSync } from 'node:child_process'
 import { writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { homeDir } from '../lib/paths.mjs'
+import { findBrowser } from '../lib/chrome.mjs'
 
-const HOME = process.env.DOUYIN_HOME || 'D:\\DeepSeek\\dsh-data\\douyin-duty'
+const HOME = homeDir()
 const PROFILE = join(HOME, 'chrome-profile')
 const PORT = 9333
 const CDP = `http://127.0.0.1:${PORT}`
 
-const CHROME = [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-].find((p) => existsSync(p))
+// 扫码登录用**有头** Chrome，所以不走 lib/chrome.mjs 的 headless 流程，
+// 但"找浏览器"这件事必须共用同一套探测逻辑（换台机器 Chrome 装在别处也能用）。
+const CHROME = findBrowser()
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 

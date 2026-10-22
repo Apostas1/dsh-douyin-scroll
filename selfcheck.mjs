@@ -13,6 +13,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { findBrowser } from './lib/chrome.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 let pass = 0
@@ -28,10 +29,10 @@ console.log('1. 文件清单')
 const required = [
   'package.json', 'cordis.patch.yml', 'index.js', 'client.js', 'requirements.txt',
   'lib/hostdeps.mjs', 'lib/state.mjs', 'lib/credential.mjs', 'lib/notify.mjs', 'lib/toast.mjs', 'lib/uvfetch.mjs',
-  'prompts/duty.md', 'prompts/persona.md', 'prompts/sample-candidates.json',
+  'prompts/duty.md', 'prompts/persona.default.md', 'prompts/sample-candidates.json',
   // 采集 / 发送这一层：全是自带的脚本（2026-10-21 起不再有 vendor/ 里的内置 MCP）
   'tools/forward-pick.py', 'tools/forward-run.mjs', 'tools/notice-read.py', 'tools/api-comments.py',
-  'tools/comment-api.mjs', 'tools/card-share.mjs', 'tools/im-send.mjs',
+  'tools/comment-api.mjs', 'tools/comment-delete.mjs', 'tools/card-share.mjs', 'tools/im-send.mjs',
   'tools/qr-login.mjs', 'tools/session-guard.py', 'tools/dy-signer.mjs',
 ]
 for (const f of required) {
@@ -102,8 +103,13 @@ try {
   if (/persona:/.test(idx) && /personaWarn/.test(idx)) {
     ok('runDuty 会校验人设文件第一行的 persona 标记')
   } else bad('index.js 里没有 persona 标记校验 —— 任何一份 AGENTS.md 都会被当成人设照抄')
-  if (/prompts',\s*'persona\.md'/.test(idx)) ok('人设从插件自带的 prompts/persona.md 读')
-  else bad('index.js 没有从插件自带的 prompts/persona.md 读人设')
+  // ⭐ 三层人设：使用者自己那份 > 插件自带 > 默认中性
+  const layers = ['join(stateDir, \'persona.md\')', 'prompts\', \'persona.md', 'persona.default.md']
+  const missing = layers.filter((k) => !idx.includes(k.replace(/\\/g, '')))
+  if (!missing.length) ok('人设三层齐全（使用者自己 / 插件自带 / 默认中性）')
+  else bad(`人设层缺失：${missing.join('、')}`)
+  if (/personaFrom/.test(idx)) ok('会记录本轮用的是哪一层人设')
+  else warn('没记录人设来源，出问题不好查')
   if (!/cfg\.workspace/.test(idx)) ok('不再从 workspace 读外部 AGENTS.md（口子已封）')
   else bad('index.js 还在用 cfg.workspace —— 那正是"能读到别人插件设定"的口子')
   // 人设规则不许被搬进章程：章程里只应有指向，不该出现「我是主人的小鱼呀」这种人设台词
@@ -120,11 +126,37 @@ try {
   const hits = codeFiles.filter((f) => /bili[-_](duty|persona)/i.test(readFileSync(join(here, f), 'utf8')))
   if (hits.length) bad(`抖音的代码里出现了刷B站的家目录/人设路径：${hits.join(', ')}`)
   else ok(`代码里没有刷B站的家目录/人设路径（查了 ${codeFiles.length} 个文件）`)
-  const pf = join(here, 'prompts', 'persona.md')
-  if (existsSync(pf) && /^<!-- persona: douyin-scroll -->/.test(readFileSync(pf, 'utf8').trimStart())) {
-    ok('prompts/persona.md 带身份牌 persona: douyin-scroll')
-  } else bad('prompts/persona.md 缺身份牌 —— 第一行必须是 <!-- persona: douyin-scroll -->')
+  const pf = join(here, 'prompts', 'persona.default.md')
+  if (existsSync(pf) && /^<!-- persona: default -->/.test(readFileSync(pf, 'utf8').trimStart())) {
+    ok('默认人设 prompts/persona.default.md 带身份牌 persona: default')
+  } else bad('默认人设缺身份牌 —— 发布包必须自带一份中性人设，否则普通用户装了什么都没有')
+  // 🔴 发布边界：作者自己那份人设不许进仓库
+  const gi = readFileSync(join(here, '.gitignore'), 'utf8')
+  if (/^prompts\/persona\.md$/m.test(gi)) ok('.gitignore 排除了作者自己的 prompts/persona.md（不随包发布）')
+  else bad('.gitignore 没排除 prompts/persona.md —— 作者的人设会被推到公开仓库')
 } catch (e) { bad(`人设分家检查失败：${e.message}`) }
+
+/* ── 4e. 采集门槛 / 跨天记账 ── */
+console.log('\n4e. 采集门槛 / 跨天')
+try {
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const fp = readFileSync(join(here, 'tools', 'forward-pick.py'), 'utf8')
+  // ⚠️ 键名是 camelCase（index.js 的 syncCollectorCfg 就写 minDescLen / minComments），
+  //    以前这里检查的是 snake_case，跟真实数据不符 ⇒ 永远红。
+  if (/collector\.json/i.test(fp) && /minDescLen/.test(fp) && /minComments/.test(fp)) {
+    ok('forward-pick.py 真的读 collector.json（设置页的阈值不再空转）')
+  } else bad('forward-pick.py 没读 collector.json —— 设置页的「文案太短 / 评论少」两个旋钮是死的')
+  if (/"dropped"/.test(fp) && /short_and_quiet/.test(fp)) {
+    ok('forward-pick.py 产出 dropped（报告能写清因什么跳过几条）')
+  } else bad('forward-pick.py 没有 dropped —— prompt 让模型数数，证据包里却没有')
+  if (/dropped:\s*picked\.dropped/.test(idx)) ok('round-evidence.json 带上了 dropped')
+  else bad('index.js 的证据包没带 dropped')
+  if (/'--limit'/.test(idx)) ok('「每次最多筛选几个」传给了 forward-pick.py（--limit）')
+  else bad('maxPerRun 没有传给采集脚本 —— 超过 10 条永远不生效')
+  if (/const rollDay/.test(idx) && /rollDay\(\)/.test(idx) && /dayKey\(\)/.test(idx)) {
+    ok('state.json 跨天会自己翻篇（不再停在旧日期）')
+  } else bad('没有跨天翻篇 —— 长时间挂着插件时 state.json 会一直停在旧日期')
+} catch (e) { bad(`采集门槛检查失败：${e.message}`) }
 
 /* ── 5. Python 能否编译 + 判断层能否跑 ── */
 console.log('\n5. Python')
@@ -151,12 +183,11 @@ if (ver.status === 0) {
 
 /* ── 6. 外部工具（可选） ── */
 console.log('\n6. 可选外部工具')
-const chromeCandidates = [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-]
-if (chromeCandidates.some((p) => existsSync(p))) ok('Chrome 已安装（无头发私信 / 卡片 / 评论要用它）')
-else warn('没找到 Chrome —— 发私信 / 卡片 / 评论会失败；它只用于无头操作，不会弹窗')
+// ⭐ 用 lib/chrome.mjs 的探测逻辑，别再各写一份写死的路径（换台机器就误报）
+const found = findBrowser()
+if (found) ok(`浏览器已找到：${found}（无头发私信 / 卡片 / 评论要用它）`)
+else warn('没找到 Chrome / Edge / Chromium —— 发私信 / 卡片 / 评论会失败；'
+  + '装一个，或把完整路径写进环境变量 DOUYIN_BROWSER')
 const dsh = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['dsh'], { encoding: 'utf8' })
 if (dsh.status === 0) ok('dsh 在 PATH 里')
 else warn('dsh 不在 PATH —— 桌面版正常（插件会自动去应用目录找）；npm 装的请确认 PATH')

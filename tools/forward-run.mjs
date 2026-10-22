@@ -16,8 +16,9 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { sendToast } from '../lib/toast.mjs'
+import { homeDir } from '../lib/paths.mjs'
 
-const HOME = process.env.DOUYIN_HOME || 'D:\\DeepSeek\\dsh-data\\douyin-duty'
+const HOME = homeDir()
 const VENV_PY = join(HOME, '.venv', 'Scripts', 'python.exe')
 const SCRIPT = new URL('./forward-pick.py', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 

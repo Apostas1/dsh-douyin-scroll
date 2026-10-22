@@ -16,12 +16,15 @@ import json
 import os
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _home import home_str  # noqa: E402
 import time
 import urllib.parse
 
 import httpx
 
-HOME = os.environ.get("DOUYIN_HOME") or r"D:\DeepSeek\dsh-data\douyin-duty"
+HOME = home_str()
 PLUGIN = r"D:\aiagent\deepseek\dsh-douyin-scroll"
 NODE = r"C:\Program Files\nodejs\node.exe"
 SIGNER = os.path.join(PLUGIN, "tools", "dy-signer.mjs")

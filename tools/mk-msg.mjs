@@ -12,8 +12,9 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { homeDir } from '../lib/paths.mjs'
 
-const HOME = process.env.DOUYIN_HOME || 'D:\\DeepSeek\\dsh-data\\douyin-duty'
+const HOME = homeDir()
 const top = Math.max(1, Math.min(Number(process.argv[2] || 3), 5))
 
 const picked = JSON.parse(readFileSync(join(HOME, 'forward-pick.json'), 'utf8'))

@@ -10,6 +10,11 @@
     "mcp",
     "duty"
   ],
+  "scripts": {
+    "check": "node selfcheck.mjs",
+    "doctor": "python tools/doctor.py",
+    "smoke": "python tools/smoke.py"
+  },
   "license": "MIT",
   "type": "module",
   "main": "index.js",

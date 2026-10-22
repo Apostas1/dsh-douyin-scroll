@@ -26,9 +26,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _home import home_str  # noqa: E402
 import time
 
-HOME = os.environ.get("DOUYIN_HOME") or r"D:\DeepSeek\dsh-data\douyin-duty"
+HOME = home_str()
 COOKIE_FILE = os.path.join(HOME, "douyin_cookie.txt")
 STATE_DIR = os.path.join(HOME, "state")
 BREAKER = os.path.join(STATE_DIR, "breaker.json")

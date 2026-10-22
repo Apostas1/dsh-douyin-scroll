@@ -1,16 +1,18 @@
 /**
  * dsh-douyin-scroll —— host 半端
  * ============================================================================
- * 它是一条**完整的值班链路**（架构照抄 dsh-bili-scroll，判据层换成抖音的）：
- *   1. 插件内部起一份 Python MCP（`vendor/douyin-mcp/mcp_server.py`），把「搜 / 预筛 / 评论 / 状态」
- *      注册成 dsh 工具 —— 用户不用改 profile。
+ * 它是一条**完整的值班链路**（架构参考 dsh-bili-scroll，判据层换成抖音的）：
+ *   1. 采集/预筛直接调 `tools/*.py`（只读接口 tab/feed + hot/search），
+ *      不再有内置 Python MCP / bb-browser / playwright 那一套。
  *   2. 谷时定时器：中午 12:00–14:00、夜间 18:00–09:00（`lib/state.mjs` 的 WINDOWS）。
- *   3. 「跑一轮」= 起一个 `dsh --profile headless --patch <overlay> <prompt>`，把 `duty.md` 交给它，
+ *   3. 「跑一轮」= 先在插件里抓好证据包 `round-evidence.json`，再起一个
+ *      `dsh --profile headless --patch <overlay> <prompt>`，把 `duty.md` 交给它，
  *      报告写进 `<家>/out/<日期>.md`。
  *   4. 设置页（`client.js`）通过 `/api/douyin-duty/*` 读写配置、看状态、存 Cookie、测通知。
  *
  * 家里（`$DSH_HOME/douyin-duty/`）都有什么：
- *   `config.json` / `collector.json` / `mcp_server.py` + `drivers/` / `duty.md` / `out/` / `inbox/` / `duty.log`
+ *   `config.json` / `collector.json` / `forward-pick.json` / `round-evidence.json` /
+ *   `duty.md` / `out/` / `inbox/` / `duty.log` / `health.json`
  * ============================================================================
  */
 import { loadHostDeps } from './lib/hostdeps.mjs'
@@ -140,7 +142,7 @@ export function apply(ctx, config) {
   /* ── 配置：逐字段按默认值类型挑一遍（apply 传进来的值不保证是标量） ── */
   const DEFAULTS = {
     perDay: 5, maxPerRun: 12, peakValley: false, noon: true, night: true,
-    source: 'feed', keywords: [], channels: [], authors: [],
+    keywords: [], channels: [], authors: [],
     minDescLen: 12, minComments: 3,
     autoComment: false, commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
     mentionName: '', httpCommentUrl: '',
@@ -179,7 +181,7 @@ export function apply(ctx, config) {
     const p = {}
     for (const k of Object.keys(patch || {})) if (k in DEFAULTS) p[k] = patch[k]
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 300))
-    if ('maxPerRun' in p) p.maxPerRun = Math.max(1, Math.min(Number(p.maxPerRun) || 1, 100))
+    if ('maxPerRun' in p) p.maxPerRun = Math.max(1, Math.min(Number(p.maxPerRun) || 1, 30))
     if ('minDescLen' in p) p.minDescLen = Math.max(0, Math.min(Number(p.minDescLen) || 0, 200))
     if ('minComments' in p) p.minComments = Math.max(0, Math.min(Number(p.minComments) || 0, 1000))
     if ('commentPerRun' in p) p.commentPerRun = Math.max(0, Math.min(Number(p.commentPerRun) || 0, 20))
@@ -434,14 +436,18 @@ export function apply(ctx, config) {
     async execute(args, exec) { return safe(await spec.execute(args, exec)) },
   }))
 
-  /** 跑插件自带的 node 脚本（tools/*.mjs），返回 {status, stdout, stderr} —— 永不抛 */
+  /**
+   * 跑插件自带的 node 脚本（tools/*.mjs），返回 {status, stdout, stderr} —— 永不抛
+   * ⚠️ 2026-10-22：这里以前写死 `IM_CDP_PORT: '9334'` —— 那等于把 lib/chrome.mjs 的
+   *    端口自动探测**废掉**（强制 9334，撞上就死）。现在只注入家目录，端口交给 lib 自己找。
+   */
   const runNodeTool = (script, args = [], { timeout = 240_000 } = {}) => {
     const f = join(pluginDir, 'tools', script)
     if (!existsSync(f)) return { status: -1, stdout: '', stderr: `缺少 tools/${script}` }
     const r = spawnSync(process.execPath, [f, ...args], {
       encoding: 'utf8',
       timeout,
-      env: { ...pyEnv({ DOUYIN_HOME: stateDir }), IM_CDP_PORT: '9334' },
+      env: pyEnv({ DOUYIN_HOME: stateDir }),
       windowsHide: true,
     })
     return { status: r.status ?? -1, stdout: String(r.stdout || ''), stderr: String(r.stderr || r.error || '') }
@@ -472,6 +478,33 @@ export function apply(ctx, config) {
     if (i < 0 || j <= i) return null
     try { return JSON.parse(t.slice(i, j + 1)) } catch { return null }
   }
+
+  tool({
+    name: 'douyin_doctor',
+    description: '⭐ **环境体检**（换台设备 / 装完插件第一件事就跑它）：家目录、Python、venv、Cookie、'
+      + 'Node、浏览器、CDP 端口、关键脚本 —— 八项逐个查，哪项红了直接给「怎么办」。'
+      + '只读，什么都不改。',
+    parameters: {},
+    async execute() {
+      const r = runPy('doctor.py', ['--json'], { timeout: 120_000 })
+      const j = pickJson(r.stdout)
+      if (!j) {
+        return {
+          ok: false, error: '体检脚本没返回可解析结果',
+          stdout: String(r.stdout || '').slice(0, 400), stderr: String(r.stderr || '').slice(0, 300),
+          hint: '多半是 Python 环境没装好 —— 设置页点「装主依赖」',
+        }
+      }
+      const bad = (j.items || []).filter((x) => x.state === 'bad')
+      if (bad.length) log(`doctor: ${bad.length} 项要修（${bad.map((x) => x.item).join('、')}）`)
+      return {
+        ok: j.ok !== false,
+        items: j.items,
+        must_fix: bad,
+        hint: bad.length ? `先把这些修掉：${bad.map((x) => x.item).join('、')}` : undefined,
+      }
+    },
+  })
 
   tool({
     name: 'douyin_whoami',
@@ -548,7 +581,7 @@ export function apply(ctx, config) {
         }
         list.push(item)
       }
-      return { ok: true, kept: list.length, sources: picked.meta || [], list }
+      return { ok: true, kept: list.length, sources: picked.meta || [], dropped: picked.dropped || {}, thresholds: picked.thresholds || {}, list }
     },
   })
 
@@ -844,12 +877,18 @@ export function apply(ctx, config) {
       aweme_id: { type: 'string', description: '作品/图文 id（douyin_notices 返回的 aweme_id）' },
       text: { type: 'string', description: '评论正文（≤500 字）' },
       comment_id: { type: 'string', description: '要回复的评论 cid；留空 = 发顶层评论' },
+      mention_name: { type: 'string', description: '要真 @ 的昵称（正文里必须原样出现「@昵称」；不传 = 当普通文字）' },
+      mention_uid: { type: 'string', description: '被 @ 人的 uid —— 🔴 必须是**被 @ 人自己的**（从他的评论 user.uid 或主页接口拿，形如 11-1289250254）。⚠️ 别拿 account.json 的 me.uid —— 那是登录号自己，填了 @ 就变成 @ 自己（2026-10-21 踩过：点了名字进的是大肥鱼的主页）' },
+      mention_secuid: { type: 'string', description: '被 @ 人的 sec_uid（真 @ 必须给）' },
       confirm: { type: 'boolean', description: '🔴 必须由用户当场同意后传 true，否则只回草稿不发送' },
     },
     async execute(args = {}) {
       const aweme = String(args.aweme_id || '').trim()
       const text = String(args.text || '').trim()
       const replyTo = String(args.comment_id || '').trim()
+      const mentionName = String(args.mention_name || '').trim()
+      const mentionUid = String(args.mention_uid || '').trim()
+      const mentionSecUid = String(args.mention_secuid || '').trim()
       if (!aweme) return { ok: false, error: '缺 aweme_id', hint: '先 douyin_notices 拿到 aweme_id' }
       if (!text) return { ok: false, error: '正文是空的' }
       if (text.length > 500) return { ok: false, error: `正文太长（${text.length} 字），抖音评论放不下` }
@@ -864,6 +903,26 @@ export function apply(ctx, config) {
       }
       const argv = ['--aweme', aweme, '--text', text]
       if (replyTo) argv.push('--reply', replyTo)
+      // ⭐ 真 @：三个参数齐了才传 —— 少一个都只会发出「普通文字的 @」（不变蓝、无通知，2026-10-21 主人实测）
+      // 🔴 uid 必须是**被 @ 人**的：session-guard / account.json 里的 uid（4376484329564484）
+      //    是**登录号（大肥鱼）自己** —— 抄错了就会 @ 成自己：名字照样蓝，但点进自己的主页、
+      //    通知也永远不会来（2026-10-21 实测翻车）。要 @ 谁，就从**他的**评论 user 字段或
+      //    他的主页接口拿 uid（形如 11-1289250254）。
+      if (mentionName && mentionUid && mentionSecUid) {
+        // 宿主自己的登录 uid 懒加载一次，用来拦「@ 自己」
+        if (!selfUidCache) {
+          const g = runPy('session-guard.py', ['check'], { timeout: 90_000 })
+          const j = pickJson(g.stdout)
+          if (j?.uid) selfUidCache = String(j.uid)
+        }
+        if (selfUidCache && String(mentionUid) === selfUidCache) {
+          return { ok: false, error: `mention_uid=${mentionUid} 是登录号自己的 uid —— 这是 @ 自己。要 @ 谁，就从他的评论 user.uid 或主页接口拿 uid（别人的形如 11-1289250254）` }
+        }
+        if (!text.includes('@' + mentionName)) {
+          return { ok: false, error: `正文里没有「@${mentionName}」原样出现 —— 真 @ 需要正文带这个 token，或去掉 mention_* 参数发普通评论` }
+        }
+        argv.push('--mention-name', mentionName, '--mention-uid', mentionUid, '--mention-secuid', mentionSecUid)
+      }
       const r = runNodeTool('comment-api.mjs', argv, { timeout: 200_000 })
       const res = pickJson(r.stdout)
       if (!res) return { ok: false, error: '发送器没返回可解析结果', stdout: r.stdout.slice(0, 400), stderr: r.stderr.slice(0, 400) }
@@ -1013,7 +1072,7 @@ export function apply(ctx, config) {
 
   tool({
     name: 'douyin_login_save',
-    description: '存抖音 Cookie（cookie 后端才需要；bbbrowser 后端不需要登录任何东西）。'
+    description: '存抖音 Cookie（现在只有一条采集路，所以**所有功能都要它**）。'
       + '把浏览器 F12 → Network → 任意 douyin.com 请求 → Request Headers → 整行 Cookie 粘进来。',
     parameters: { cookie: { type: 'string', description: '整行 Cookie 字符串' } },
     async execute(args) {
@@ -1042,13 +1101,28 @@ export function apply(ctx, config) {
 
   /* ─────────────── 跑一轮 ─────────────── */
   const dutyStateFile = join(stateDir, 'state.json')
-  const bumpState = (patch) => {
+  // 登录号自己的 uid（懒加载缓存）—— 用于拦「@ 自己」
+  let selfUidCache = ''
+  /**
+   * ⭐ 跨天翻篇：插件可能连续挂好几天，`state.json` 的 day 不该停在旧日期。
+   *    只重置**按天算的计数**（轮数 / 挑了几条 / 谷时窗口），
+   *    `dutyRunningAt` / `roundActive` 必须留着 —— 半夜跨点那一轮可能还在跑，不能把防双开的闸拆了。
+   */
+  const rollDay = () => {
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
-    if (st.day !== today) { st.day = today; st.count = 0; st.picked = 0; st.windows = {} }
-    writeJson(dutyStateFile, { ...st, ...patch })
+    if (st.day === today) return st
+    const next = { ...st, day: today, count: 0, picked: 0, windows: {} }
+    writeJson(dutyStateFile, next)
+    return next
+  }
+  const bumpState = (patch) => {
+    const st = { ...rollDay(), ...patch }
+    writeJson(dutyStateFile, st)
     return st
   }
+  // 加载时先翻一次篇：哪怕今天还没跑过任何一轮，state.json 也不该显示昨天
+  rollDay()
 
   /**
    * ⭐ 「每天最多挑几条」承诺的是**全天总量** ⇒ 数**今天报告里那些 `### <视频ID>` 标题行**。
@@ -1245,30 +1319,37 @@ export function apply(ctx, config) {
         return d.slice(0, 10) + ' ' + d.slice(11, 16) + '（Asia/Shanghai，+08:00）'
       } catch { return '' }
     })()
-    // ⭐ 人设：**只读插件自己带的那一份** `prompts/persona.md`（2026-10-21 主人令）。
-    //    以前这里读的是配置项 `workspace` 指向的那个目录下的 AGENTS.md —— 那个口子让插件可能读到**别的插件**的设定，
-    //    结果抖音的口吻被搬到了刷B站那边。现在外面没有任何路径可读：
-    //    人设就在插件包里，谁的插件读谁的，物理上串不过去。
+    // ⭐ 人设：**三层**，从上往下找，找到就用，绝不读插件外面任意路径。
+    //    ① `$DOUYIN_HOME/persona.md` —— 使用者自己那份（设置页「我的人设」写的，或他手放进去的）
+    //    ② `prompts/persona.md`     —— 发布包自带的那份（作者自己的，**不随公开仓库发布**）
+    //    ③ `prompts/persona.default.md` —— 中性默认（谁装了都能用，不带任何具体人）
+    //    身份牌必须对得上，对不上就往下退 —— 这样用户放错文件也不会串人设。
     let ownerDoc = ''
     let personaWarn = ''
+    let personaFrom = ''
     try {
-      const personaFile = join(pluginDir, 'prompts', 'persona.md')
-      if (existsSync(personaFile)) {
-        const raw = readFileSync(personaFile, 'utf8')
+      const cands = [
+        { file: join(stateDir, 'persona.md'), who: 'douyin-scroll', from: '使用者自己那份（$DOUYIN_HOME/persona.md）' },
+        { file: join(pluginDir, 'prompts', 'persona.md'), who: 'douyin-scroll', from: '插件自带' },
+        { file: join(pluginDir, 'prompts', 'persona.default.md'), who: 'default', from: '默认中性人设' },
+      ]
+      const bad = []
+      for (const c of cands) {
+        if (!existsSync(c.file)) continue
+        const raw = readFileSync(c.file, 'utf8')
         const firstLine = raw.split(/\r?\n/, 1)[0] || ''
         const m = /persona:\s*([A-Za-z0-9_-]+)/i.exec(firstLine)
         const who = m ? m[1].toLowerCase() : ''
-        if (who === 'douyin-scroll') {
-          ownerDoc = '\n\n===== 我的人设（插件自带 prompts/persona.md，**按这个来**）=====\n'
-            + raw.slice(0, 6000) + '\n===== 设定结束 =====\n'
-        } else {
-          personaWarn = `\n\n⚠️ **自带人设坏了**：prompts/persona.md 第一行的身份牌是「${who || '（没有）'}」，不是 douyin-scroll`
-            + ' ⇒ 这一轮按中性说话，别扮演任何人。\n'
-          log(`自带人设的身份牌不对：「${firstLine.slice(0, 70)}」`)
-        }
-      } else {
-        log('缺 prompts/persona.md —— 这一轮按中性说话')
+        if (who !== c.who) { bad.push(`${c.file}（牌子是「${who || '没有'}」，应为 ${c.who}）`); continue }
+        ownerDoc = `\n\n===== 我的人设（${c.from}，**按这个来**）=====\n` + raw.slice(0, 6000) + '\n===== 设定结束 =====\n'
+        personaFrom = c.from
+        break
       }
+      if (bad.length) {
+        personaWarn = `\n\n⚠️ 有 ${bad.length} 份人设文件的身份牌不对，已跳过：${bad.join('；')}\n`
+        log(`人设身份牌不对，已跳过：${bad.join(' | ')}`)
+      }
+      if (personaFrom) log(`本轮人设来源：${personaFrom}`)
     } catch (e) { log(`读人设失败：${e?.message ?? e}`) }
 
     const quota = Math.max(0, Number(cfg.perDay) || 0)
@@ -1303,7 +1384,9 @@ export function apply(ctx, config) {
       + `\n🔎 **判断口径**（章程里有更细的）：你**看不到画面**，只能看**文案 + 标签 + 互动比值 + 高赞评论**。`
       + `所以你要回答的是「**值不值得他花 15 秒点开**」，不是「视频讲了什么」。`
       + `⭐ **每条结论都要引用具体证据**（哪条评论、哪个比值）；证据不够就写「判断不了」，**别硬猜**。`
-      + `\n📉 **跳过要计数**：\`dropped\` 里每类原因统计出来写进报告（「因文案太短且评论少跳过 N 条」…）—— 别让使用者以为漏抓了。`
+      + `\n📉 **跳过要计数**：证据包里的 \`dropped\` 就是采集侧硬筛掉的条数——`
+      + `\`no_desc\` 没文案 / \`too_short_video\` 时长<12 秒 / \`short_and_quiet\` 文案太短且评论少。`
+      + `照实写进报告（「因文案太短且评论少跳过 N 条」…），别让使用者以为漏抓了。`
       + `\n`
       + (already > 0
         ? `今天已经挑过 ${already} 条 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
@@ -1448,11 +1531,12 @@ export function apply(ctx, config) {
    */
   const buildEvidence = (limit = 12) => {
     try {
-      const r = runPy('forward-pick.py', [], { timeout: 300_000 })
+      const max = Math.max(1, Math.min(Number(limit) || 12, 30))
+      const r = runPy('forward-pick.py', ['--limit', String(max)], { timeout: 300_000 })
       if (r.status !== 0) return { ok: false, error: String(r.stderr || '').slice(0, 300) }
       let picked = {}
       try { picked = JSON.parse(readFileSync(join(stateDir, 'forward-pick.json'), 'utf8')) } catch { picked = {} }
-      const rows = (Array.isArray(picked.rows) ? picked.rows : []).slice(0, Math.max(1, limit))
+      const rows = (Array.isArray(picked.rows) ? picked.rows : []).slice(0, max)
       const list = []
       for (let i = 0; i < rows.length; i++) {
         const x = rows[i]
@@ -1478,6 +1562,8 @@ export function apply(ctx, config) {
       writeJson(join(stateDir, 'round-evidence.json'), {
         builtAt: new Date().toISOString(),
         sources: picked.meta || [],
+        dropped: picked.dropped || {},
+        thresholds: picked.thresholds || {},
         count: list.length,
         list,
       })
@@ -1505,7 +1591,13 @@ export function apply(ctx, config) {
       // ⭐ 先把闸拉上（防双开），再去异步准备证据包 + 起那一轮 —— 准备证据要十几秒，
       //    同步做会把宿主卡住（HTTP 请求和定时器都在这条线程上）。
       dutyRunning = true
-      bumpState({ dutyRunningAt: Date.now(), roundActive: true })
+      bumpState({
+        dutyRunningAt: Date.now(),
+        roundActive: true,
+        lastRunAt: new Date().toISOString(),
+        lastWhy: why,
+        count: roundsToday() + 1,
+      })
       ;(async () => {
         try {
           const ev = buildEvidence(Math.max(1, Math.min(Number(cfg.maxPerRun) || 12, 30)))
@@ -1595,7 +1687,8 @@ export function apply(ctx, config) {
         if (!inWindow(now, WINDOWS[k])) continue
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
-        bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
+        // 只记「这个谷时窗口用过了」；轮数 / lastRunAt / lastWhy 由 runDuty 统一记
+        bumpState({ windows: { ...(st.windows || {}), [key]: true } })
         runDuty(`window:${k}`)
         return
       }
@@ -1613,7 +1706,7 @@ export function apply(ctx, config) {
   const healthFile = join(stateDir, 'health.json')
   const writeHealth = () => {
     try {
-      const st = readJson(dutyStateFile, {})
+      const st = rollDay()
       const alerts = []
       if (!venvReadyNow()) alerts.push('venv_missing: 没装运行环境（设置页点「装主依赖」）')
       if (!hasCredential(stateDir)) alerts.push('cred_missing: 还没登录（设置页扫码，或粘一条 Cookie）')
@@ -1658,7 +1751,7 @@ export function apply(ctx, config) {
 
   const status = () => {
     refreshCfg()
-    const st = readJson(dutyStateFile, {})
+    const st = rollDay()
     const today = dayKey()
     const tail = (f) => { try { return readFileSync(f, 'utf8').slice(-1400) } catch { return '' } }
     const cred = credentialInfo(stateDir)
@@ -1702,6 +1795,48 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
     if (req.method === 'POST' && path === '/api/douyin-duty/run') return sendJson(res, 200, { ok: true, ...runDuty('manual') })
+
+    /* ── 人设：读 / 写使用者自己那份（$DOUYIN_HOME/persona.md）──
+     * 优先级：使用者自己那份 > 插件自带 > 默认中性。
+     * 这里只让写使用者那份 —— 插件包里那两份是随包发布的，不该被页面改。
+     */
+    if (req.method === 'GET' && path === '/api/douyin-duty/persona') {
+      const mine = join(stateDir, 'persona.md')
+      const has = existsSync(mine)
+      let text = ''
+      try { if (has) text = readFileSync(mine, 'utf8') } catch { text = '' }
+      let defText = ''
+      try { defText = readFileSync(join(pluginDir, 'prompts', 'persona.default.md'), 'utf8') } catch { defText = '' }
+      return sendJson(res, 200, {
+        ok: true, custom: has, text, default_text: defText,
+        file: mine,
+        hint: has ? '正在用你这份' : '还没写自己的 —— 现在用的是插件自带 / 默认人设',
+      })
+    }
+    if (req.method === 'POST' && path === '/api/douyin-duty/persona') {
+      const body = await readBody(req)
+      const text = String(body.text ?? '')
+      const mine = join(stateDir, 'persona.md')
+      if (!text.trim()) {
+        // 空 = 删掉自己那份，退回默认
+        try { if (existsSync(mine)) rmSync(mine) } catch { /* 已经没了 */ }
+        log('人设：已清空自定义，退回默认')
+        return sendJson(res, 200, { ok: true, custom: false })
+      }
+      // ⭐ 身份牌必须有，否则下一轮会被跳过 —— 帮用户补上，别让他踩坑
+      let out = text
+      if (!/^<!--\s*persona:/i.test(out.trimStart())) {
+        out = '<!-- persona: douyin-scroll -->\n' + out
+      }
+      try {
+        writeFileSync(mine, out, 'utf8')
+        log(`人设：已保存自定义（${out.length} 字）→ ${mine}`)
+        return sendJson(res, 200, { ok: true, custom: true, file: mine })
+      } catch (e) {
+        return sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
+      }
+    }
+
     if (req.method === 'POST' && path === '/api/douyin-duty/install') return sendJson(res, 200, runInstall())
     if (req.method === 'POST' && path === '/api/douyin-duty/install-browser') {
       return sendJson(res, 200, { ok: false, gone: true, hint: '2026-10-21 起不再需要浏览器依赖 —— bb-browser / playwright 那套已经整个删掉了' })

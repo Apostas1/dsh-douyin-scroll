@@ -12,34 +12,22 @@
  *   node tools/comment-reply.mjs <aweme_id> <片段> <正文txt> --dry
  */
 import { readFileSync } from 'node:fs'
+import { openPage, sleep } from '../lib/chrome.mjs'
 
-const PORT = Number(process.env.IM_CDP_PORT || 9334)
 const argv = process.argv.slice(2)
 const DRY = argv.includes('--dry')
 const pos = argv.filter((a) => !a.startsWith('--'))
 const AID = pos[0]
 const NEEDLE = pos[1]
 const TEXTFILE = pos[2]
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode = o.ok ? 0 : 1 }
 
 if (!AID || !NEEDLE || !TEXTFILE) { out({ ok: false, error: '用法: <aweme_id> <正文片段> <正文txt> [--dry]' }); process.exit(1) }
 const TEXT = readFileSync(TEXTFILE, 'utf8').trim()
 if (!TEXT) { out({ ok: false, error: '正文是空的' }); process.exit(1) }
 
-const ts = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
-const page = ts.find((t) => t.type === 'page' && t.url.includes('douyin')) || ts.find((t) => t.type === 'page')
-const ws = new WebSocket(page.webSocketDebuggerUrl)
-let id = 0; const pend = new Map()
-await new Promise((res, rej) => { ws.addEventListener('open', res, { once: true }); ws.addEventListener('error', rej, { once: true }) })
-ws.addEventListener('message', (e) => { let m; try { m = JSON.parse(e.data) } catch { return } if (m.id && pend.has(m.id)) { const { res, rej } = pend.get(m.id); pend.delete(m.id); m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result) } })
-const send = (m, p = {}) => new Promise((res, rej) => { const mid = ++id; pend.set(mid, { res, rej }); ws.send(JSON.stringify({ id: mid, method: m, params: p })) })
-await send('Page.enable'); await send('Runtime.enable')
-const ev = async (e) => {
-  const r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true })
-  if (r.exceptionDetails) throw new Error('页面里抛错: ' + JSON.stringify(r.exceptionDetails).slice(0, 220))
-  return r.result?.value
-}
+const c = await openPage()
+const { send, ev } = c
 const click = async (x, y) => {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 })
   await sleep(80)
@@ -98,7 +86,7 @@ try {
   }
   if (!btn) { out({ ok: false, error: '没找到那条评论的「回复」按钮', needle: NEEDLE }); process.exit(1) }
   const b = JSON.parse(btn)
-  if (DRY) { out({ ok: true, dry: true, btn: b, textLen: TEXT.length }); ws.close(); process.exit(0) }
+  if (DRY) { out({ ok: true, dry: true, btn: b, textLen: TEXT.length }); c.close(); process.exit(0) }
 
   // 3) 点回复
   await click(b.x, b.y)
@@ -164,5 +152,5 @@ try {
   out({ ok: a.appeared, sent: a.appeared, aweme_id: AID, to_comment: NEEDLE.slice(0, 20), text: TEXT.slice(0, 120), usedSendBtn: !!sbtn, after: a })
 } catch (e) {
   out({ ok: false, error: String(e?.message ?? e) })
-} finally { ws.close() }
+} finally { c.close() }
 process.exit(process.exitCode || 0)

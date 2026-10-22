@@ -16,48 +16,7 @@
  *   node tools/card-share.mjs <aweme_id> <好友昵称>
  *   node tools/card-share.mjs <aweme_id> <好友昵称> --dry    # 只展开面板打印结构
  */
-import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const HERE = dirname(fileURLToPath(import.meta.url))
-const HOME = process.env.DOUYIN_HOME || 'D:\\DeepSeek\\dsh-data\\douyin-duty'
-const PROFILE = join(HOME, 'chrome-profile')
-const PORT = Number(process.env.IM_CDP_PORT || 9334)
-const CDP = `http://127.0.0.1:${PORT}`
-const CHROME = [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-].find((p) => existsSync(p))
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-/**
- * ⭐ Chrome 没起来就自己拉一个 —— 分享这条路上**不能假设**它一定还活着。
- *    2026-10-21 实测事故：DSH 重启把无头 Chrome 带走了，这里裸 fetch 直接 ECONNREFUSED 崩掉；
- *    紧接着的 `im-send.mjs` 却会自己把 Chrome 拉起来 —— 结果「理由发出去了、卡片没发出去」，
- *    顺序整个反掉。`im-send.mjs` / `comment-api.mjs` 早就有这一步，唯独这里漏了。
- */
-async function ensureChrome() {
-  const up = async () => { try { return (await fetch(`${CDP}/json/version`)).ok } catch { return false } }
-  if (await up()) return 'reused'
-  if (!CHROME) throw new Error('找不到 chrome.exe')
-  mkdirSync(PROFILE, { recursive: true })
-  const p = spawn(CHROME, [
-    '--headless=new',
-    `--remote-debugging-port=${PORT}`,
-    `--user-data-dir=${PROFILE}`,
-    '--no-first-run', '--no-default-browser-check',
-    '--window-size=1440,900', '--lang=zh-CN',
-    'https://www.douyin.com/',
-  ], { detached: true, stdio: 'ignore' })
-  p.unref()
-  for (let i = 0; i < 60; i++) {
-    if (await up()) return 'launched'
-    await sleep(500)
-  }
-  throw new Error('无头 Chrome 没起来')
-}
+import { openPage, sleep } from '../lib/chrome.mjs'
 
 const argv = process.argv.slice(2)
 const argOf = (k, d = '') => { const i = argv.indexOf(k); return i >= 0 ? (argv[i + 1] ?? d) : d }
@@ -72,16 +31,9 @@ const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode =
 
 if (!AID || !WHO) { out({ ok: false, error: '用法: card-share.mjs <aweme_id> <好友昵称>' }); process.exit(1) }
 
-const chromed = await ensureChrome()
-const ts = await (await fetch(`${CDP}/json/list`)).json()
-const page = ts.find((t) => t.type === 'page' && t.url.includes('douyin')) || ts.find((t) => t.type === 'page')
-const ws = new WebSocket(page.webSocketDebuggerUrl)
-let id = 0; const pend = new Map()
-await new Promise((res, rej) => { ws.addEventListener('open', res, { once: true }); ws.addEventListener('error', rej, { once: true }) })
-ws.addEventListener('message', (e) => { let m; try { m = JSON.parse(e.data) } catch { return } if (m.id && pend.has(m.id)) { const { res, rej } = pend.get(m.id); pend.delete(m.id); m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result) } })
-const send = (m, p = {}) => new Promise((res, rej) => { const mid = ++id; pend.set(mid, { res, rej }); ws.send(JSON.stringify({ id: mid, method: m, params: p })) })
-await send('Page.enable'); await send('Runtime.enable')
-const ev = async (e) => { const r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) throw new Error('页面里抛错: ' + JSON.stringify(r.exceptionDetails).slice(0, 240)); return r.result?.value }
+const _c = await openPage()
+const chromed = _c.status
+const { send, ev } = _c
 const mv = (x, y) => send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 })
 const click = async (x, y) => {
   await mv(x, y); await sleep(120)
@@ -148,7 +100,7 @@ try {
       return JSON.stringify(u.slice(0,12));
     })()`)
     out({ ok: true, peek: true, panel, rows: JSON.parse(rows || '[]') })
-    ws.close(); process.exit(0)
+    _c.close(); process.exit(0)
   }
 
   // 找「WHO」那一行：同时拿到 昵称 + **sec_uid** + 「分享」按钮坐标 —— 昵称会重名，sec_uid 不会
@@ -217,7 +169,7 @@ try {
   }
   const b = cands[0].btn
   const target = { nick: WHO, sec_uid: cands[0].sec_uid || TOID || '' }
-  if (DRY) { out({ ok: true, dry: true, panel, btn: b, target, chrome: chromed, matched_by: TOID ? 'sec_uid' : 'nickname(唯一)' }); ws.close(); process.exit(0) }
+  if (DRY) { out({ ok: true, dry: true, panel, btn: b, target, chrome: chromed, matched_by: TOID ? 'sec_uid' : 'nickname(唯一)' }); _c.close(); process.exit(0) }
 
   await click(b.x, b.y)
   await sleep(2500)
@@ -234,6 +186,6 @@ try {
 } catch (e) {
   out({ ok: false, error: String(e?.message ?? e) })
 } finally {
-  ws.close()
+  _c.close()
 }
 process.exit(process.exitCode || 0)

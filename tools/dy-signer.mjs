@@ -20,9 +20,10 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { createRequire } from 'node:module'
+import { homeDir } from '../lib/paths.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const HOME = process.env.DOUYIN_HOME || 'D:\\DeepSeek\\dsh-data\\douyin-duty'
+const HOME = homeDir()
 const SIGNER_DIR = process.env.DY_SIGNER_DIR || join(HOME, 'signer')
 const SDK_DIR = join(SIGNER_DIR, 'sdk')
 const require = createRequire(join(SIGNER_DIR, 'noop.js'))

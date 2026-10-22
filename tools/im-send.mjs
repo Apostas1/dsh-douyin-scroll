@@ -19,22 +19,15 @@
  *    （`isMyMessage` 恒为 true，连对方发的也是 true —— 实测过，别再用）。
  * ============================================================================
  */
-import { spawn, execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
-const HOME = process.env.DOUYIN_HOME || 'D:\\DeepSeek\\dsh-data\\douyin-duty'
-const PROFILE = join(HOME, 'chrome-profile')
-const PORT = Number(process.env.IM_CDP_PORT || 9334)
-const CDP = `http://127.0.0.1:${PORT}`
-const CHROME = [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-].find((p) => existsSync(p))
+import { openPage, sleep } from '../lib/chrome.mjs'
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const HERE = dirname(fileURLToPath(import.meta.url))
+
 const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode = o.ok ? 0 : 1 }
 
 const argv = process.argv.slice(2)
@@ -45,61 +38,6 @@ const FILE = argOf('--file', '')
 const TEXT = argOf('--text', '')
 const DRY = argv.includes('--dry')
 const READ = argv.includes('--read')
-
-async function cdpReady() {
-  try { const r = await fetch(`${CDP}/json/version`); return r.ok } catch { return false }
-}
-
-async function ensureChrome() {
-  if (await cdpReady()) return 'reused'
-  if (!CHROME) throw new Error('找不到 chrome.exe')
-  mkdirSync(PROFILE, { recursive: true })
-  const p = spawn(CHROME, [
-    '--headless=new',
-    `--remote-debugging-port=${PORT}`,
-    `--user-data-dir=${PROFILE}`,
-    '--no-first-run', '--no-default-browser-check',
-    '--window-size=1440,900', '--lang=zh-CN',
-    'https://www.douyin.com/chat',
-  ], { detached: true, stdio: 'ignore' })
-  p.unref()
-  for (let i = 0; i < 60; i++) {
-    if (await cdpReady()) return 'launched'
-    await sleep(500)
-  }
-  throw new Error('无头 Chrome 没起来')
-}
-
-async function pageConn() {
-  const ts = await (await fetch(`${CDP}/json/list`)).json()
-  const page = ts.find((t) => t.type === 'page' && t.url.includes('douyin')) || ts.find((t) => t.type === 'page')
-  if (!page) throw new Error('没有 page target')
-  const ws = new WebSocket(page.webSocketDebuggerUrl)
-  let id = 0
-  const pend = new Map()
-  await new Promise((res, rej) => {
-    ws.addEventListener('open', res, { once: true })
-    ws.addEventListener('error', rej, { once: true })
-  })
-  ws.addEventListener('message', (ev) => {
-    let m; try { m = JSON.parse(ev.data) } catch { return }
-    if (m.id && pend.has(m.id)) {
-      const { res, rej } = pend.get(m.id); pend.delete(m.id)
-      m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result)
-    }
-  })
-  const send = (method, params = {}) => new Promise((res, rej) => {
-    const mid = ++id; pend.set(mid, { res, rej })
-    ws.send(JSON.stringify({ id: mid, method, params }))
-  })
-  await send('Page.enable'); await send('Runtime.enable')
-  const ev = async (expr) => {
-    const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })
-    if (r.exceptionDetails) throw new Error('页面里抛错: ' + JSON.stringify(r.exceptionDetails).slice(0, 240))
-    return r.result?.value
-  }
-  return { send, ev, close: () => ws.close() }
-}
 
 const bodyText = async (ev) => (await ev(`(document.body?document.body.innerText:'')||''`)) || ''
 
@@ -302,8 +240,8 @@ async function main() {
     if (text.length > 1800) return out({ ok: false, error: `正文太长（${text.length} 字），抖音私信放不下，拆开发` })
   }
 
-  const chromed = await ensureChrome()
-  const c = await pageConn()
+  const c = await openPage({ url: 'https://www.douyin.com/chat' })
+  const chromed = c.status
   try {
     // 确保停在 /chat
     const url = await c.ev('location.href')
