@@ -47,9 +47,26 @@ export const Config = !z ? undefined : z.object({
   maxPerRun: z.natural().default(12).extra('volatile', true),
   /** 峰谷自动刷（总开关） */
   peakValley: z.boolean().default(false).extra('volatile', true),
-  /** 峰谷子开关：中午 / 晚上 */
+  /** 峰谷子开关：中午 / 晚上（内置窗口，保留兼容） */
   noon: z.boolean().default(true).extra('volatile', true),
   night: z.boolean().default(true).extra('volatile', true),
+  /**
+   * ⭐ 自定义时段：`[{ start: '12:00', end: '14:00', label: '中午' }]`
+   *    - 支持跨零点（`23:00`–`02:00`）
+   *    - 和内置的中午/晚上**叠加**：只要有任意一个窗口命中就跑
+   *    - 空数组 = 只用内置那两个开关
+   *    - 每个时段每天只用一次（跟内置窗口同一套去重）
+   */
+  windows: z.array(z.object({
+    start: z.string(),
+    end: z.string(),
+    // ⚠️ 2026-10-22：这里原来写 `z.string().optional()` —— 但这个 schemastery 版本
+    //    的字符串**没有 .optional() 方法**，整个 index.js 在 import 阶段就抛
+    //    `TypeError: z.string(...).optional is not a function` ⇒ 插件 fiber 建不起来
+    //    ⇒ fiberPhase 永远是 null ⇒ 设置页没有面板、工具也不注册。
+    //    改用 .default('') 代替（效果一样：可以不给，给了就用）。
+    label: z.string().default(''),
+  })).default([]).extra('volatile', true),
   /** 关注关键词（空了用 duty.md 里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
   /** 推荐流分类（游戏 / 美食 / 搞笑 …） */
@@ -142,6 +159,7 @@ export function apply(ctx, config) {
   /* ── 配置：逐字段按默认值类型挑一遍（apply 传进来的值不保证是标量） ── */
   const DEFAULTS = {
     perDay: 5, maxPerRun: 12, peakValley: false, noon: true, night: true,
+    windows: [],
     keywords: [], channels: [], authors: [],
     minDescLen: 12, minComments: 3,
     autoComment: false, commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
@@ -151,12 +169,22 @@ export function apply(ctx, config) {
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
+  // ⭐ 哪些数组字段装的是**对象**（不能按字符串过滤）
+  //    之前判断 `base[k].length && typeof base[k][0] === 'object'` —— 但 DEFAULTS 里
+  //    `windows: []` 是空的，length=0，于是走了字符串分支，用户存的自定义时段全被吃掉。
+  //    改成显式声明，别靠"数组里恰好有元素"来判断。
+  const OBJECT_ARRAYS = new Set(['windows'])
   const normalize = (src, base) => {
     const out = { ...base }
     for (const k of Object.keys(base)) {
       const v = src?.[k]
       if (v === undefined || v === null) continue
-      if (Array.isArray(base[k])) { if (Array.isArray(v)) out[k] = v.filter((x) => typeof x === 'string') }
+      if (Array.isArray(base[k])) {
+        if (!Array.isArray(v)) continue
+        out[k] = OBJECT_ARRAYS.has(k)
+          ? v.filter((x) => x && typeof x === 'object' && !Array.isArray(x))
+          : v.filter((x) => typeof x === 'string')
+      }
       else if (typeof base[k] === 'number') { const n = Number(v); if (Number.isFinite(n)) out[k] = n }
       else if (typeof base[k] === 'boolean') { if (typeof v === 'boolean') out[k] = v }
       else if (typeof base[k] === 'string') { if (typeof v === 'string') out[k] = v }
@@ -486,22 +514,26 @@ export function apply(ctx, config) {
       + '只读，什么都不改。',
     parameters: {},
     async execute() {
-      const r = runPy('doctor.py', ['--json'], { timeout: 120_000 })
+      // ⭐ 用纯 Node 版：第一次装的时候还没有 Python，不能让它依赖 Python
+      const r = runNodeTool('doctor.mjs', ['--json'], { timeout: 90_000 })
       const j = pickJson(r.stdout)
       if (!j) {
         return {
           ok: false, error: '体检脚本没返回可解析结果',
           stdout: String(r.stdout || '').slice(0, 400), stderr: String(r.stderr || '').slice(0, 300),
-          hint: '多半是 Python 环境没装好 —— 设置页点「装主依赖」',
         }
       }
-      const bad = (j.items || []).filter((x) => x.state === 'bad')
+      const bad = j.must_fix || []
+      const warn = j.warns || []
       if (bad.length) log(`doctor: ${bad.length} 项要修（${bad.map((x) => x.item).join('、')}）`)
       return {
         ok: j.ok !== false,
         items: j.items,
         must_fix: bad,
-        hint: bad.length ? `先把这些修掉：${bad.map((x) => x.item).join('、')}` : undefined,
+        todo: warn,
+        hint: bad.length
+          ? `先把这些修掉：${bad.map((x) => x.item).join('、')}`
+          : (warn.length ? `没有硬伤，这些装完依赖/登录后会自己变绿：${warn.map((x) => x.item).join('、')}` : '全绿，可以跑值班了'),
       }
     },
   })
@@ -1676,20 +1708,35 @@ export function apply(ctx, config) {
   const tick = () => {
     try {
       refreshCfg()
-      if (!cfg.peakValley) return
+      // ⚠️ 2026-10-22：去掉了 `if (!cfg.peakValley) return`。
+      //    那个总开关在设置页重构后**已经没有 UI 了**，而它的默认值是 false ⇒
+      //    用户怎么配时段都不会跑，属于"配了没反应"的死锁。
+      //    现在「有没有任何一个时段开着」本身就是开关：全关 = 只手动跑。
       const now = new Date()
       const st = readJson(dutyStateFile, {})
       const today = dayKey(now)
       if (countPickedToday(now) >= Number(cfg.perDay || 0)) return
       if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
-      for (const k of ['noon', 'night']) {
-        if (!cfg[k]) continue
-        if (!inWindow(now, WINDOWS[k])) continue
-        const key = `${today}:${k}`
+      // ⭐ 把所有生效的时段拼成一个列表：内置中午/晚上 + 用户自定义
+      //    自定义的也按「每天一次」去重，key 用 `custom:<下标>`，改时段后旧 key 自然失效。
+      const range = []
+      if (cfg.noon) range.push({ key: 'noon', label: '中午', ...WINDOWS.noon })
+      if (cfg.night) range.push({ key: 'night', label: '晚上', ...WINDOWS.night })
+      const customs = Array.isArray(cfg.windows) ? cfg.windows : []
+      customs.forEach((w, i) => {
+        const s = String(w?.start || '').trim()
+        const e = String(w?.end || '').trim()
+        if (!/^\d{1,2}:\d{2}$/.test(s) || !/^\d{1,2}:\d{2}$/.test(e)) return
+        range.push({ key: `custom:${i}`, label: String(w?.label || '').trim() || `${s}–${e}`, start: s, end: e })
+      })
+
+      for (const w of range) {
+        if (!inWindow(now, w)) continue
+        const key = `${today}:${w.key}`
         if (st.windows?.[key]) continue
-        // 只记「这个谷时窗口用过了」；轮数 / lastRunAt / lastWhy 由 runDuty 统一记
+        // 只记「这个时段用过了」；轮数 / lastRunAt / lastWhy 由 runDuty 统一记
         bumpState({ windows: { ...(st.windows || {}), [key]: true } })
-        runDuty(`window:${k}`)
+        runDuty(`window:${w.key}`)
         return
       }
     } catch (e) {
@@ -1795,6 +1842,21 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
     if (req.method === 'POST' && path === '/api/douyin-duty/run') return sendJson(res, 200, { ok: true, ...runDuty('manual') })
+
+    /* ── 环境体检（纯 Node，不需要 Python —— 用户第一次点它时还没有 venv） ── */
+    if (req.method === 'POST' && path === '/api/douyin-duty/doctor') {
+      const r = runNodeTool('doctor.mjs', ['--json'], { timeout: 90_000 })
+      const j = pickJson(r.stdout)
+      if (!j) {
+        return sendJson(res, 200, {
+          ok: false, items: [], must_fix: [],
+          error: '体检脚本没返回可解析结果',
+          stderr: String(r.stderr || '').slice(0, 300),
+        })
+      }
+      log(`doctor: ${(j.must_fix || []).length} 项必须修 / ${(j.warns || []).length} 项待办`)
+      return sendJson(res, 200, j)
+    }
 
     /* ── 人设：读 / 写使用者自己那份（$DOUYIN_HOME/persona.md）──
      * 优先级：使用者自己那份 > 插件自带 > 默认中性。

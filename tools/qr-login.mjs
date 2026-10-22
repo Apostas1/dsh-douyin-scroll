@@ -41,7 +41,13 @@ async function cdpTargets() {
     } catch { /* 还没起来 */ }
     await sleep(500)
   }
-  throw new Error('CDP 端口没起来（' + CDP + '）')
+  // ⭐ 这里不是「出错了」，是「你还没开始登录」—— 别甩一个端口号给用户看
+  throw new Error(
+    '登录用的浏览器还没开。\n'
+    + '  → 先跑：node tools/qr-login.mjs start\n'
+    + '  → 扫完码如果抖音还要验证（短信 / 滑块），在**那个弹出的浏览器窗口里**做完\n'
+    + '  → 然后再跑：node tools/qr-login.mjs check',
+  )
 }
 
 function connect(wsUrl) {
@@ -174,21 +180,83 @@ if (cmd === 'start') {
   console.log('QR ->', f)
 }
 
+/** 登录用的浏览器开着吗？（没开就给一句人话，别抛栈） */
+async function loginBrowserUp() {
+  try { return (await fetch(`${CDP}/json/list`)).ok } catch { return false }
+}
+const NOT_UP_MSG = [
+  '登录用的浏览器还没开。',
+  '  → 先跑：node tools/qr-login.mjs start',
+  '  → 扫完码如果抖音还要验证（短信 / 滑块），在**那个弹出的浏览器窗口里**做完',
+  '  → 然后再跑：node tools/qr-login.mjs check',
+].join('\n')
+
 if (cmd === 'shot') {
+  if (!(await loginBrowserUp())) { console.log(NOT_UP_MSG); process.exit(2) }
   const f = await shoot('login-qr')
   console.log('QR ->', f)
 }
 
 if (cmd === 'check') {
+  if (!(await loginBrowserUp())) { console.log(NOT_UP_MSG); process.exit(2) }
   const c = await pageConn()
   const { cookies } = await c.send('Network.getAllCookies')
   const names = cookies.map((x) => x.name)
   const key = ['sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard', 'uid_tt', 'passport_csrf_token', 'ttwid', 'msToken', 's_v_web_id']
-  console.log('cookie 条数 =', cookies.length)
-  console.log('关键项 =', key.filter((k) => names.includes(k)).join(', ') || '(无)')
   const hasSession = names.includes('sessionid') || names.includes('sessionid_ss')
+
+  /**
+   * ⭐ 扫完码之后抖音**可能还要过一道验证**（短信验证码 / 滑块 / 「换设备登录」确认）。
+   *    以前这里只看 cookie：没过验证就永远读不到 sessionid，用户只看到「还没扫」，
+   *    其实他已经扫了、卡在验证页 —— 白白重扫好几次。
+   *    现在先看页面上有没有验证类元素，有就明确告诉他「你卡在这一步」。
+   */
+  let verifyHint = ''
+  let pageUrl = ''
+  try {
+    pageUrl = String(await c.ev('location.href'))
+    const probe = await c.ev(`(function(){
+      var t = (document.body && document.body.innerText || '').replace(/\\s+/g,' ');
+      var has = function(k){ return t.indexOf(k) >= 0 };
+      // 短信验证码：出现「验证码 / 获取验证码 / 短信验证 / 输入手机号后四位」
+      var sms = has('验证码') || has('短信验证') || has('获取验证码') || has('后四位');
+      // 滑块 / 拼图：常见文案 + 常见容器
+      var slide = has('拖动') || has('滑块') || has('请完成下方验证') || has('安全验证')
+        || !!document.querySelector('[class*="captcha"],[id*="captcha"],[class*="slide-verify"]');
+      // 换设备确认
+      var device = has('新设备') || has('换设备') || has('设备验证') || has('身份验证');
+      var needPhone = has('绑定手机') || has('手机号');
+      var kinds = [];
+      if (sms) kinds.push('短信验证码');
+      if (slide) kinds.push('滑块/拼图');
+      if (device) kinds.push('新设备确认');
+      if (needPhone) kinds.push('绑定手机号');
+      return JSON.stringify({ kinds: kinds, head: t.slice(0, 220) });
+    })()`)
+    const p = JSON.parse(probe || '{}')
+    if (p.kinds && p.kinds.length) {
+      verifyHint = `页面正卡在验证：${p.kinds.join(' / ')}`
+      c._verify = p
+    }
+  } catch { /* 读不到页面就跳过，不影响 cookie 判定 */ }
+
   if (!hasSession) {
-    console.log('❌ 还没有 sessionid —— 二维码还没扫，或扫了但没在手机上点「确认登录」')
+    console.log('cookie 条数 =', cookies.length)
+    console.log('关键项 =', key.filter((k) => names.includes(k)).join(', ') || '(无)')
+    if (verifyHint) {
+      console.log('⚠️ ' + verifyHint)
+      console.log('   → 二维码已经扫过了，但抖音还要你在**那个浏览器窗口里**完成这一步：')
+      if (String(c._verify?.kinds || '').includes('短信')) {
+        console.log('     · 短信验证码：填手机收到的 6 位数字')
+      }
+      if (String(c._verify?.kinds || '').includes('滑块')) {
+        console.log('     · 滑块/拼图：按住滑块拖到缺口')
+      }
+      console.log('     · 完成后**不用重新扫码**，再跑一次 `node tools/qr-login.mjs check` 就行')
+      console.log('     · 看不到那个窗口？跑 `node tools/qr-login.mjs shot` 重新截图/置顶')
+    } else {
+      console.log('❌ 还没有 sessionid —— 二维码还没扫，或扫了但没在手机上点「确认登录」')
+    }
     c.close()
     process.exitCode = 2
   } else {
@@ -197,6 +265,7 @@ if (cmd === 'check') {
     const f = join(HOME, 'douyin_cookie.txt')
     writeFileSync(f, str, 'utf8')
     console.log('✅ 已写入', f, `(${str.length} 字符, ${dom.length} 条)`)
+    if (verifyHint) console.log('（顺带一提：' + verifyHint + '，但登录态已经拿到了，不用管）')
     c.close()
   }
 }

@@ -136,6 +136,38 @@ try {
   else bad('.gitignore 没排除 prompts/persona.md —— 作者的人设会被推到公开仓库')
 } catch (e) { bad(`人设分家检查失败：${e.message}`) }
 
+/* ── 4f. 自定义时段 ──
+ * ⚠️ 2026-10-22：自定义时段的**界面**在"面板重写"时被砍掉了（那一版为了救回面板，
+ *    只保留 4 个卡片）。后端（schema / normalize / tick）还在，随时能加回。
+ *    所以这里只检查**后端**不会退化；UI 部分改成 warn，不判失败。
+ */
+console.log('\n4f. 自定义时段（后端）')
+try {
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+  // schema 里要有 windows 字段
+  if (/windows:\s*z\.array\(z\.object/.test(idx)) ok('Config 有 windows 字段（对象数组）')
+  else bad('Config 缺 windows —— 自定义时段存不进去')
+  // 🔴 schemastery 兼容性：这个版本的字符串没有 .optional()，写了会让整个 index.js import 失败
+  //    （2026-10-22 事故：一个 .optional() 让 fiberPhase 恒为 null，面板和工具全消失）
+  const codeOnly = idx.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+  if (!/\.optional\(\)/.test(codeOnly)) ok('没有用 .optional()（这个 schemastery 版本不支持）')
+  else bad('代码里用了 .optional() —— 这个 schemastery 版本没有这个方法，index.js 会 import 失败、插件整个不加载')
+  // normalize 必须按字段名判断，不能靠"数组里有元素"
+  if (/OBJECT_ARRAYS/.test(idx) && /windows/.test(idx)) ok('normalize 用白名单保住对象数组（空数组也不会吃）')
+  else bad('normalize 还在靠 base[k].length 判断 —— 空 DEFAULT 会把对象数组吃光')
+  // tick 必须把自定义时段并进去
+  if (/custom:\$\{i\}/.test(idx) && /cfg\.windows/.test(idx)) ok('定时器会把自定义时段拼进候选窗口')
+  else bad('定时器没读 cfg.windows —— 配了也不跑')
+  // ⚠️ 总开关 peakValley 不许再拦截（UI 已经没有它了）
+  const hasPeakGate = /^\s*if \(!cfg\.peakValley\) return\s*$/m.test(idx)
+  if (!hasPeakGate) ok('没有 peakValley 总闸拦截（UI 已无此开关，拦了就是死锁）')
+  else bad('tick 里还有 `if (!cfg.peakValley) return` —— 设置页没有这个开关，用户配了也不会跑')
+  // UI 还没做回来 —— 只提示，不算失败
+  if (/\+ 加一个时段/.test(cl)) ok('设置页有自定义时段入口')
+  else warn('设置页暂时没有自定义时段入口（后端已就绪，加回来只是一个卡片的事）')
+} catch (e) { bad(`自定义时段检查失败：${e.message}`) }
+
 /* ── 4e. 采集门槛 / 跨天记账 ── */
 console.log('\n4e. 采集门槛 / 跨天')
 try {
@@ -180,6 +212,31 @@ if (ver.status === 0) {
 } else {
   warn(`没有可用的 python（试过 "${py}"）—— 装完依赖后采集脚本才需要它，预检这一步可以跳过`)
 }
+
+/* ── 5b. 装机流程：先检查环境，再装依赖 ── */
+console.log('\n5b. 装机流程（先检查，再装）')
+try {
+  const doc = readFileSync(join(here, 'tools', 'doctor.mjs'), 'utf8')
+  // ① doctor 必须纯 Node —— 第一次装的时候还没有 Python
+  if (/from '\.\.\/lib\/(paths|chrome)\.mjs'/.test(doc) && !/spawnSync\([^)]*doctor\.py/.test(doc)) {
+    ok('doctor.mjs 是纯 Node（不需要 Python 就能跑）')
+  } else bad('doctor.mjs 依赖了 Python —— 第一次装时必然「环境没装好」，用户卡死')
+  // ② 设置页必须有「检查环境」按钮，且在「装依赖」之前（文案可变，位置不能变）
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+  const iDoc = cl.search(/①\s*检查环境/)
+  const iIns = cl.search(/②[^\n']*依赖/)
+  if (iDoc > 0 && iIns > iDoc) ok('设置页顺序正确：① 检查环境 → ② 装依赖')
+  else bad('设置页没有「先检查再装」的顺序 —— 用户不知道该装什么')
+  // ③ 没检查过不许点装（简化版面板里 doctor 只是可选步骤，此项仅提示）
+  if (/disabled: busy === 'install' \|\| !doctorOk/.test(cl)) ok('没检查过环境时「装依赖」是禁用的')
+  else warn('「装依赖」没跟体检结果绑定（简化面板里算可选优化，不算失败）')
+  // ④ 扫码之后可能要过验证 —— 必须告诉用户
+  if (/短信验证码|滑块/.test(cl)) ok('设置页写明了扫码后可能还要过短信/滑块验证')
+  else bad('设置页没提扫码后的验证 —— 用户会以为扫码失败，反复重扫')
+  const qr = readFileSync(join(here, 'tools', 'qr-login.mjs'), 'utf8')
+  if (/verifyHint/.test(qr) && /滑块|短信/.test(qr)) ok('qr-login.mjs check 会识别「卡在验证」并说清卡在哪一步')
+  else bad('qr-login.mjs 只看 cookie —— 用户卡在验证页时只会被告知「还没扫」')
+} catch (e) { bad(`装机流程检查失败：${e.message}`) }
 
 /* ── 6. 外部工具（可选） ── */
 console.log('\n6. 可选外部工具')
