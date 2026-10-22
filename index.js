@@ -1597,6 +1597,65 @@ export function apply(ctx, config) {
         }
       }
     } catch (e) { log(`读桌面版模型配置失败（不影响跑）：${e?.message ?? e}`) }
+
+    /**
+     * ⭐⭐ **给那一轮挂上 douyin 工具**（2026-10-22 修）
+     *
+     * 🔴 事故：之前那一轮的提示词里明写「你手上没有 douyin_* 工具，也不需要」——
+     *    于是 `autoSend` / `在评论区 @ 你` 这些开关**全是空开关**：
+     *    模型判断得再准，也没有发消息的入口，报告里只能写"建议发给他"。
+     *
+     * ✅ 现在：把插件自带的 MCP server（tools/mcp-server.mjs，12 个工具）
+     *    挂进那一轮。它跟 DSH 里的 douyin_* 共用同一批脚本，
+     *    发送类工具仍然带 confirm 闸 —— 自动跑时提示词会明确告诉它传 confirm:true。
+     *
+     * ⚠️ 只在 `autoSend` 开着的时候挂：
+     *    关着的时候连工具都不给，从**能力层**保证"发不出去"，比靠提示词约束更硬。
+     */
+    if (cfg.autoSend) {
+      try {
+        const mcpServer = join(pluginDir, 'tools', 'mcp-server.mjs')
+        if (existsSync(mcpServer)) {
+          /**
+           * 🔴 2026-10-22 实测 bug：`process.execPath` 在 Electron 宿主里是
+           *    `DeepSeek Harness.exe`（桌面主程序），**不是 Node** ——
+           *    MCP server 用它启动会跑飞（Electron 把 .mjs 当 app 入口）。
+           *    必须用**独立 Node**。nodeExe() 是现成的探测（优先真 Node）。
+           */
+          /**
+           * 🔴 2026-10-22 实测 bug ②：Loader 方言两条规矩（dsh-app-boot 的 applyEntryPatches）：
+           *    ① 顶层必须是**数组**，每个元素是一个 patch；
+           *    ② 新增插件要写 `- insert: [...]`（数组项里的 insert 键），且 insert **无 id** 时
+           *       追加到树尾。之前直接写 `- id: mcp-douyin` —— 语义是"覆盖已有行"，
+           *       headless 树里没有这个 id ⇒ 整条被**静默跳过**，模型还是看不见 douyin 工具。
+           *    （2026-10-22 19:34 实测：这个格式 probe 会话列出全部 12 个 mcp__douyin__* 工具）
+           */
+          const nodeCmd = nodeExe() || process.execPath
+          yml.push(
+            '- insert:',
+            '    - id: mcp-douyin',
+            "      name: '@deepseek-ai/dsh-mcp-client'",
+            '      config:',
+            '        serverName: douyin',
+            '        transport: stdio',
+            `        command: '${posix(nodeCmd)}'`,
+            `        args: ['${posix(mcpServer)}']`,
+            '        env:',
+            `          DOUYIN_HOME: '${posix(stateDir)}'`,
+            '        # 发送类工具慢（要起无头浏览器），给足时间',
+            '        toolCallTimeoutMs: 300000',
+            '        failOnStartupError: false',
+            '',
+          )
+          log(`overlay: 已给这一轮挂上 douyin MCP 工具（autoSend 开着，node=${nodeCmd}）`)
+        } else {
+          log(`⚠️ overlay: 找不到 ${mcpServer}，这一轮没有 douyin 工具（发不出去）`)
+        }
+      } catch (e) { log(`overlay 挂 MCP 失败（不影响判断）：${e?.message ?? e}`) }
+    } else {
+      log(`overlay: autoSend 关着 ⇒ 这一轮不挂 douyin 工具（从能力层保证发不出去）`)
+    }
+
     try { writeFileSync(file, yml.join('\n'), 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
   }
 
@@ -1688,7 +1747,21 @@ export function apply(ctx, config) {
       + `。⭐ **就搜这些，别自己加词**（尤其是别自造"翻跳/宅舞"那类词把类型带偏）。`
       + `\n🎯 **先读** \`${join(stateDir, 'round-evidence.json')}\` —— 候选和证据已经帮你抓好放在那儿了。`
       + ` 每条都有：文案 / 作者 / 时长 / 发布时长 / 四个互动数 / 三个比值 / 前几条的高赞评论。`
-      + ` ⚠️ 这一轮**你手上没有 douyin_* 工具，也不需要** —— 采集和算比值是代码干的活，你只负责判断和写报告。`
+      /**
+       * ⭐⭐ 工具说明（2026-10-22 改）
+       * 🔴 事故：这里原来写「你手上没有 douyin_* 工具，也不需要」——
+       *    结果 `autoSend` / `在评论区 @ 你` 全是空开关，模型想发也没入口。
+       *    现在按 autoSend 分流：开着就挂 MCP 工具（见 ensureOverlay），并且明说有哪些。
+       */
+      + (cfg.autoSend
+        ? ` ⭐ **这一轮你手上有 douyin 抖音工具**（通过 MCP 挂载，**以你手上真实的工具清单为准**——名字可能带 \`mcp__douyin__\` 前缀，比如 \`mcp__douyin__douyin_dm\`，用清单里的全名调用）：\n`
+          + `   - 发私信：\`douyin_dm\`（参数 to / to_id / text / confirm:true）\n`
+          + `   - 发分享卡片：\`douyin_share_card\`（参数 aweme_id / to / to_id / reason / confirm:true）—— 文字链接点不开，**必须用它**\n`
+          + `   - 发评论 / 回复评论：\`douyin_comment_reply\`（参数 aweme_id / text / comment_id? / confirm:true）\n`
+          + `   - 查状态：\`douyin_status\` / \`douyin_whoami\`\n`
+          + `   ⚠️ 采集和算比值仍然是代码干的活（证据包已经抓好），你不用重新取候选。\n`
+          + `   ⚠️ 发送类工具**必须传 confirm:true**，否则只回草稿不发送。\n`
+        : ` ⚠️ 这一轮**你手上没有 douyin\\_* 工具**（自动发送关着）—— 采集和算比值是代码干的活，你只负责判断和写报告。\n`)
       + `⚠️ 抖音 web **没有可用的关键词搜索接口**，上面这些关键词/分类**只能当报告里的标注**，别以为它按词搜了。`
       + `\n🔎 **判断口径**（章程里有更细的）：你**看不到画面**，只能看**文案 + 标签 + 互动比值 + 高赞评论**。`
       + `所以你要回答的是「**值不值得他花 15 秒点开**」，不是「视频讲了什么」。`
@@ -1734,10 +1807,8 @@ export function apply(ctx, config) {
                 + `   ① 调 \`douyin_comment_reply\`，参数：\n`
                 + `      - aweme_id = 那条视频的 ID\n`
                 + `      - text = 一句 20-60 字的话，**必须以「@${who} 」开头**\n`
-                + `      - mention_name = "${who}"\n`
-                + `      - mention_uid / mention_secuid：从使用者账号信息里取（@ 自己）——\n`
-                + `        ⚠️ 但工具会拦「@ 自己」，所以**这里改成在正文里写 @${who}，不要传 mention_* 参数**，\n`
-                + `        让评论正常发出去（名字是否变蓝不重要，重要的是评论区里有这句话）\n`
+                + `      - **不要传任何 mention_* 参数**（工具不支持，传了会报错）——\n`
+                + `        就在正文里原样写「@${who}」这五个字开头的名字即可\n`
                 + `      - confirm = true（自动跑，不用再问）\n`
                 + `   ② 评论内容像这样：「@${who} 这条我觉得你会喜欢 —— <一句话理由>」\n`
                 + `   ③ 发完在报告里写一行「已在评论区 @ 你：<视频ID>」\n`
