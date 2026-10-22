@@ -30,18 +30,18 @@ try {
   else bad('没记录却返回了东西')
 
   /* ── 2. 第一次读会话 ── */
-  const m1 = mergeDmMemory(home, SEC, '某帅气用户', [
+  const m1 = mergeDmMemory(home, SEC, '示例好友', [
     { from: 'them', text: '在吗' },
     { from: 'me', text: '在' },
     { from: 'them', text: '帮我看看这个视频' },
   ])
   if (m1 && m1.total === 3 && m1.added === 3) ok('第一次读会话：3 条全进记忆')
   else bad(`第一次读会话条数不对：${JSON.stringify(m1 && { total: m1.total, added: m1.added })}`)
-  if (m1.who.nick === '某帅气用户') ok('记住了昵称')
+  if (m1.who.nick === '示例好友') ok('记住了昵称')
   else bad('昵称没记住')
 
   /* ── 3. 再读一次同样的（去重）── */
-  const m2 = mergeDmMemory(home, SEC, '某帅气用户', [
+  const m2 = mergeDmMemory(home, SEC, '示例好友', [
     { from: 'them', text: '在吗' },
     { from: 'me', text: '在' },
     { from: 'them', text: '帮我看看这个视频' },
@@ -54,17 +54,17 @@ try {
   const ctx = dmContext(home, SEC, { recent: 2 })
   if (ctx && ctx.recent.length === 2 && ctx.total_remembered === 4) ok('上下文只给最近 2 条，不把全部塞进去')
   else bad(`上下文摘要不对：${JSON.stringify(ctx && { recent: ctx.recent.length, total: ctx.total_remembered })}`)
-  if (ctx.who.nick === '某帅气用户') ok('上下文带昵称')
+  if (ctx.who.nick === '示例好友') ok('上下文带昵称')
   else bad('上下文没带昵称')
 
   /* ── 5. 记自己发出去的 ── */
-  noteSent(home, SEC, '某帅气用户', '哈哈哈哈确实', 'text')
+  noteSent(home, SEC, '示例好友', '哈哈哈哈确实', 'text')
   const m3 = loadDmMemory(home, SEC)
   if (m3.messages[m3.messages.length - 1].from === 'me') ok('自己发的也进记忆（from=me）')
   else bad('自己发的没进记忆')
 
   /* ── 6. 卡片标记 ── */
-  noteSent(home, SEC, '某帅气用户', '[分享视频] 猫咪合集', 'card')
+  noteSent(home, SEC, '示例好友', '[分享视频] 猫咪合集', 'card')
   const m4 = loadDmMemory(home, SEC)
   const card = m4.messages[m4.messages.length - 1]
   if (card.kind === 'card') ok('分享卡片记成 kind=card（不是普通文字）')
@@ -73,7 +73,7 @@ try {
   /* ── 6b. 普通文字消息不能被误判成卡片 ──
    * 🔴 2026-10-22 实测 bug：抖音的 aweType 在普通文字消息上也有值（700），
    *    只有分享卡片是 800。老逻辑 `m.awe ? 'card' : 'text'` 会把**所有消息**标成卡片。 */
-  mergeDmMemory(home, SEC, '某帅气用户', [
+  mergeDmMemory(home, SEC, '示例好友', [
     { from: 'them', text: '普通文字消息', awe: 700 },
     { from: 'them', text: '真的卡片', awe: 800 },
   ])
@@ -95,7 +95,7 @@ try {
   /* ── 8. 上限：不能无限长 ── */
   const many = []
   for (let i = 0; i < 120; i++) many.push({ from: 'them', text: '第' + i + '条消息' })
-  mergeDmMemory(home, SEC, '某帅气用户', many)
+  mergeDmMemory(home, SEC, '示例好友', many)
   const m6 = loadDmMemory(home, SEC)
   if (m6.messages.length <= 80) ok(`记忆有上限（120 条塞进去，只留 ${m6.messages.length} 条 ≤ 80）`)
   else bad(`记忆没上限：${m6.messages.length} 条`)
@@ -103,7 +103,7 @@ try {
   else bad('截断方向错了 —— 留下了旧消息')
 
   /* ── 9. 超长文本要截断 ── */
-  mergeDmMemory(home, SEC, '某帅气用户', [{ from: 'them', text: 'x'.repeat(500) }])
+  mergeDmMemory(home, SEC, '示例好友', [{ from: 'them', text: 'x'.repeat(500) }])
   const m7 = loadDmMemory(home, SEC)
   if (m7.messages[m7.messages.length - 1].text.length <= 200) ok('单条文本超长会截断（≤200 字）')
   else bad('超长文本没截断')

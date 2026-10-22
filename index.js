@@ -984,7 +984,7 @@ export function apply(ctx, config) {
       text: { type: 'string', description: '评论正文（≤500 字）' },
       comment_id: { type: 'string', description: '要回复的评论 cid；留空 = 发顶层评论' },
       mention_name: { type: 'string', description: '要真 @ 的昵称（正文里必须原样出现「@昵称」；不传 = 当普通文字）' },
-      mention_uid: { type: 'string', description: '被 @ 人的 uid —— 🔴 必须是**被 @ 人自己的**（从他的评论 user.uid 或主页接口拿，形如 11-1289250254）。⚠️ 别拿 account.json 的 me.uid —— 那是登录号自己，填了 @ 就变成 @ 自己（2026-10-21 踩过：点了名字进的是大肥鱼的主页）' },
+      mention_uid: { type: 'string', description: '被 @ 人的 uid —— 🔴 必须是**被 @ 人自己的**（从他的评论 user.uid 或主页接口拿，形如 11-1234567890）。⚠️ 别拿 account.json 的 me.uid —— 那是登录号自己，填了 @ 就变成 @ 自己（2026-10-21 踩过：点了名字进的是登录号自己的主页）' },
       mention_secuid: { type: 'string', description: '被 @ 人的 sec_uid（真 @ 必须给）' },
       confirm: { type: 'boolean', description: '🔴 必须由用户当场同意后传 true，否则只回草稿不发送' },
     },
@@ -1028,7 +1028,7 @@ export function apply(ctx, config) {
           if (j?.uid) selfUidCache = String(j.uid)
         }
         if (selfUidCache && String(mentionUid) === selfUidCache) {
-          return { ok: false, error: `mention_uid=${mentionUid} 是登录号自己的 uid —— 这是 @ 自己。要 @ 谁，就从他的评论 user.uid 或主页接口拿 uid（别人的形如 11-1289250254）` }
+          return { ok: false, error: `mention_uid=${mentionUid} 是登录号自己的 uid —— 这是 @ 自己。要 @ 谁，就从他的评论 user.uid 或主页接口拿 uid（别人的形如 11-1234567890）` }
         }
         if (!text.includes('@' + mentionName)) {
           return { ok: false, error: `正文里没有「@${mentionName}」原样出现 —— 真 @ 需要正文带这个 token，或去掉 mention_* 参数发普通评论` }
@@ -1389,7 +1389,7 @@ export function apply(ctx, config) {
     description: '读 / 改「刷抖音」的设置。不给 patch 就是读；给了就改。'
       + '**只认 schema 里真有的字段**，别的键一律丢掉（塞一个未知键会让 DSH 那边整批拒绝）。'
       + '私信投递是这两个：`dmTo`（昵称，只显示用）+ `dmToId`（**稳定 id，真正决定发给谁**）。'
-      + '例：`{"perDay":5,"noon":true,"night":true,"keywords":["搞笑","猫"],"dmTo":"某帅气用户","dmToId":"MS4wLjABAAAA…"}`',
+      + '例：`{"perDay":5,"noon":true,"night":true,"keywords":["搞笑","猫"],"dmTo":"示例好友","dmToId":"MS4wLjABAAAA…"}`',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       let host = null

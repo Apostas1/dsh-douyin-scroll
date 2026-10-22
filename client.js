@@ -837,7 +837,7 @@ window.__ModuleLoader__.load({
             ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
               h('div', { 'data-dy-sub': '' }, '昵称（显示用）'),
               h('input', {
-                'data-dy-input': '', value: manualDm.nick, placeholder: '比如：某帅气用户',
+                'data-dy-input': '', value: manualDm.nick, placeholder: '比如：示例好友',
                 onChange: (e) => setManualDm({ ...manualDm, nick: e.target.value }),
               }),
               h('div', { 'data-dy-sub': '' }, '稳定 ID（可选 —— 重名时才有用；从「从我的会话里选」拿最方便）'),

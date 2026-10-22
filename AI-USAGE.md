@@ -90,7 +90,7 @@ node "<插件目录>/tools/mcp-server.mjs"
 
 ```json
 "context": {
-  "who": { "nick": "某帅气用户" },
+  "who": { "nick": "示例好友" },
   "rounds": 3,
   "facts": ["在杭州", "养了只橘猫"],
   "recent": [ { "from": "them", "text": "上次说的那个视频…", "kind": "text" } ],

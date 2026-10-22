@@ -6,10 +6,10 @@
  * 我们只做三件事：点开会话 → 粘正文 → 回车。
  *
  * 用法：
- *   node tools/im-send.mjs --to "某帅气用户" --text "你好"
- *   node tools/im-send.mjs --to "某帅气用户" --file <txt路径>
- *   node tools/im-send.mjs --to "某帅气用户" --file x.txt --dry   # 只验证不发送
- *   node tools/im-send.mjs --to "某帅气用户" --read               # 只读：把会话读出来（带「谁发的」）
+ *   node tools/im-send.mjs --to "示例好友" --text "你好"
+ *   node tools/im-send.mjs --to "示例好友" --file <txt路径>
+ *   node tools/im-send.mjs --to "示例好友" --file x.txt --dry   # 只验证不发送
+ *   node tools/im-send.mjs --to "示例好友" --read               # 只读：把会话读出来（带「谁发的」）
  *
  * 输出：一行 JSON
  *   发送：{ok, sent, to, len, readback, my_msg_before, my_msg_after, newest_from, msgs_sample, …}
@@ -150,7 +150,7 @@ const listConversations = (ev) => ev(`(function(){
   return JSON.stringify(out);
 })()`)
 
-/** 从会话项文本里猜昵称（第一段；"某帅气用户 12:12 最后一句话" → "某帅气用户"） */
+/** 从会话项文本里猜昵称（第一段；"示例好友 12:12 最后一句话" → "示例好友"） */
 const nickOf = (text) => String(text || '').split(/\s+/)[0] || ''
 
 /** 读「当前打开的这个会话」的对端 sec_uid —— 用来校验身份（不同层级包法不一样，多试几种） */

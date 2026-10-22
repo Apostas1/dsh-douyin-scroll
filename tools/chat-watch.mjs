@@ -8,7 +8,7 @@
  *   每 N 秒读一次 DOM，只把新的「对方消息」追加到 chat-inbox.jsonl。
  *
  * 用法：
- *   node tools/chat-watch.mjs --to "某帅气用户" --to-id <sec_uid> [--every 10] [--seconds 300]
+ *   node tools/chat-watch.mjs --to "示例好友" --to-id <sec_uid> [--every 10] [--seconds 300]
  *
  * 输出：
  *   每轮一行 JSON 到 stdout（面板/调用方看进度）

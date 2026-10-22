@@ -462,7 +462,7 @@ else console.log('  ✅ 只显示昵称，不显示 ID')
 console.log('\n【私信对象：自己写】')
 const rManual = await clickAndRender('自己写')
 if (rManual) {
-  const nickInput = rManual.flat.find((n) => n.tag === 'input' && n.props && String(n.props.placeholder || '').includes('某帅气用户'))
+  const nickInput = rManual.flat.find((n) => n.tag === 'input' && n.props && String(n.props.placeholder || '').includes('示例好友'))
   const idInput = rManual.flat.find((n) => n.tag === 'input' && n.props && String(n.props.placeholder || '').includes('MS4wLjABAAAA'))
   if (nickInput) console.log('  ✅ 有昵称输入框')
   else { console.log('  ❌ 没有昵称输入框'); fail++ }

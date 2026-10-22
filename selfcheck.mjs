@@ -411,7 +411,7 @@ try {
 
   // @ 自己那道闸还在
   if (/是登录号自己的 uid/.test(idx)) ok('有「@ 自己」拦截')
-  else bad('「@ 自己」的拦截没了 —— 会 @ 到大肥鱼自己身上')
+  else bad('「@ 自己」的拦截没了 —— 会 @ 到登录号自己头上')
   if (/--name/.test(ui) && /--aweme/.test(ui)) ok('comment-mention-ui.mjs 参数接口正常')
   else bad('comment-mention-ui.mjs 参数变了')
 } catch (e) { bad(`真 @ 检查失败：${e.message}`) }
