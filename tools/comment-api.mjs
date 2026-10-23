@@ -3,17 +3,33 @@
  * tools/comment-api.mjs —— 在抖音评论区发评论/回复某条评论（**一条 fetch，不点 UI**）
  * ============================================================================
  * 为什么是"页面里 fetch"这一条路（三种都实测过）：
- *   ① 点评论区 UI      → 能发，但抖音会弹**短信验证**（要主人给码）
+ *   ① 点评论区 UI      → 能发，但抖音会弹**短信验证**（要使用者给码）
  *   ② Python 自己签名 POST → **HTTP 403**（写接口要强签名 getBdTicketGuardHeader，外部补不齐）
  *   ③ ⭐ 在无头页面的上下文里 fetch → **HTTP 200，不弹验证**（页面自己把签名补齐）
  *
- * 屏幕上是无窗口的（headless），不发任何 UI 操作，只跑一条 fetch。
+ * ── 🔴 2026-10-23 修的 bug：reply_id 和 reply_to_reply_id 不是一回事 ──────────
+ *   旧代码：
+ *       body.reply_id = REPLY; body.reply_to_reply_id = REPLY;   // ← 两个塞同一个值
+ *   后果（实测到的服务端落库）：
+ *       我"回复"主人的顶层评论 → 结果 level=1、root_comment_id=它自己
+ *       **变成了另一条顶层评论，压根没进楼**。看着成功，其实位置全错。
+ *   真实结构（从别人的正常回复里读出来的）：
+ *       回顶层评论 X  ⇒ reply_id = X        ，reply_to_reply_id = 0（不传）
+ *       回楼中楼   Y  ⇒ reply_id = Y.reply_id，reply_to_reply_id = Y
+ *       也就是：**reply_id 永远是"楼根"，reply_to_reply_id 才是"具体回哪条"**。
+ *
+ *   所以现在参数拆成两个：
+ *       --reply <cid>   要回的那条（可以给顶层，也可以给楼中楼）
+ *       --root  <cid>   楼根（level1）。不给就自动判定；判不出来**拒绝发送**，绝不瞎猜
+ *   判不出来还硬发，就会变成一条悄悄冒出来的顶层评论 —— 那是最坏的一种错。
  *
  * 用法:
- *   node tools/comment-api.mjs --aweme <id> --file <txt> [--reply <cid>] [--dry]
- *   node tools/comment-api.mjs --aweme <id> --text "..." [--reply <cid>]
+ *   node tools/comment-api.mjs --aweme <id> --text "..."                      # 顶层评论
+ *   node tools/comment-api.mjs --aweme <id> --text "..." --reply <cid>        # 回某人（自动判楼根）
+ *   node tools/comment-api.mjs --aweme <id> --text "..." --reply <cid2> --root <cid1>
+ *   node tools/comment-api.mjs --aweme <id> --text "..." --reply <cid> --dry  # 只解析不发送
  *
- * 输出一行 JSON：{ ok, http, cid, reply_to, text, raw? , error? }
+ * 输出一行 JSON：{ ok, http, cid, reply_to, root, text, raw?, error? }
  */
 import { readFileSync } from 'node:fs'
 import { openPage, sleep } from '../lib/chrome.mjs'
@@ -23,6 +39,7 @@ const argOf = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? (argv[i + 1
 const DRY = argv.includes('--dry')
 const AWEME = String(argOf('--aweme', '')).trim()
 const REPLY = String(argOf('--reply', '')).trim()
+const ROOT = String(argOf('--root', '')).trim()
 const FILE = String(argOf('--file', '')).trim()
 const TEXT = FILE ? readFileSync(FILE, 'utf8').trim() : String(argOf('--text', '')).trim()
 
@@ -58,10 +75,6 @@ if (wantsMention) {
   process.exit(1)
 }
 
-async function cdpReady() {
-  try { return (await fetch(`${CDP}/json/version`)).ok } catch { return false }
-}
-
 try {
   const c = await openPage()
   const chromed = c.status
@@ -73,18 +86,115 @@ try {
     await sleep(6000)
   }
 
-  if (DRY) {
-    out({ ok: true, dry: true, aweme_id: AWEME, reply_to: REPLY || '(顶层评论)', len: TEXT.length, chrome: chromed })
+  /**
+   * ⭐ 解析「楼根」和「具体回哪条」。
+   *   判据来源只有权威数据：翻 `/comment/list/`（顶层）找这条 cid 到底在哪、`reply_id` 是什么。
+   *   判不出来就返回 need_root，**不猜**。
+   */
+  const resolveJs = `(async function(){
+    var AWEME = ${JSON.stringify(AWEME)};
+    var TARGET = ${JSON.stringify(REPLY)};
+    var ROOTIN = ${JSON.stringify(ROOT)};
+    var COMMON = {
+      device_platform:'webapp', aid:'6383', channel:'channel_pc_web',
+      pc_client_type:'1', version_code:'190500', version_name:'19.5.0',
+      cookie_enabled:'true', screen_width:'1920', screen_height:'1080',
+      browser_language:'zh-CN', browser_platform:'Win32',
+      browser_name:'Chrome', browser_version:'141.0.0.0',
+      engine_name:'Blink', engine_version:'141.0.0.0',
+      os_name:'Windows', os_version:'10', platform:'PC'
+    };
+    function qs(d){ return Object.keys(d).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(d[k]);}).join('&'); }
+    async function get(rel){
+      var r = await fetch(rel, { credentials:'include', headers:{ accept:'application/json' } });
+      var t = await r.text();
+      try { return JSON.parse(t) } catch(e) { return null }
+    }
+    // 不给 --reply = 发顶层评论，不需要判楼
+    if (!TARGET) return JSON.stringify({ ok:true, root:'', reply_to:'', how:'top-level' });
+
+    // ① 调用方明确给了楼根 ⇒ 直接信
+    if (ROOTIN) {
+      var rp = (TARGET === ROOTIN) ? '' : TARGET;
+      return JSON.stringify({ ok:true, root:ROOTIN, reply_to:rp, how:'explicit' });
+    }
+
+    // ② 翻顶层列表找 TARGET：确定它是 level1 还是 level2
+    var cursor = 0, pages = 0;
+    while (pages < 8) {
+      var j = await get('/aweme/v1/web/comment/list/?' + qs(Object.assign({}, COMMON, {
+        aweme_id: AWEME, count: '20', cursor: String(cursor), item_type: '0'
+      })));
+      if (!j) break;
+      var cs = j.comments || [];
+      for (var i = 0; i < cs.length; i++) {
+        var x = cs[i];
+        if (String(x.cid) === TARGET) {
+          // 找到了，它是一条顶层评论 ⇒ root = 它自己
+          return JSON.stringify({ ok:true, root:String(x.cid), reply_to:'', how:'found-level1' });
+        }
+        // 也在它的楼中楼里找（接口会带前几条）
+        var rs = x.reply_comment || [];
+        for (var k = 0; k < rs.length; k++) {
+          if (String(rs[k].cid) === TARGET) {
+            return JSON.stringify({ ok:true, root:String(x.cid), reply_to:TARGET, how:'found-in-thread' });
+          }
+        }
+      }
+      if (!j.has_more) break;
+      var next = Number(j.cursor || 0);
+      if (!next || next === cursor) break;
+      cursor = next; pages++;
+      await new Promise(function(r){ setTimeout(r, 700) });
+    }
+
+    // ③ 顶层翻不到 ⇒ 直接问接口"这条底下有没有楼中楼"：有 ⇒ 它自己就是楼根
+    var rj = await get('/aweme/v1/web/comment/list/reply/?' + qs(Object.assign({}, COMMON, {
+      item_id: AWEME, comment_id: TARGET, cursor: '0', count: '1', item_type: '0'
+    })));
+    if (rj && Number(rj.total || 0) > 0) {
+      return JSON.stringify({ ok:true, root:TARGET, reply_to:'', how:'has-replies' });
+    }
+
+    // ④ 判不出来 ⇒ 拒绝（不许瞎猜，猜错就变成一条悄悄冒出来的顶层评论）
+    return JSON.stringify({ ok:false, need_root:true,
+      hint:'判不出这条 cid 的楼根。请传 --root <顶层评论cid>（= 这条回复所在那栋楼的第一条）' });
+  })()`
+
+  let plan = null
+  try { plan = JSON.parse(await c.ev(resolveJs)) } catch { plan = { ok: false, hint: '楼根解析没返回可解析结果' } }
+
+  if (!plan.ok) {
     c.close()
     await sleep(200)
-    process.exitCode = 0
-    // 走到这里自然结束，别用 process.exit（会触发 libuv 断言）
-    throw { __done: true }
+    out({
+      ok: false,
+      error: plan.hint || '判不出楼根，已中止（不瞎猜）',
+      aweme_id: AWEME,
+      reply_to: REPLY,
+      why: 'reply_id 必须是"楼根"。给错了会变成一条冒出来的顶层评论，位置全错还看起来成功。',
+      how_to: '传 --root <顶层评论 cid>；或先跑 tools/comment-read-dom.mjs 看这条属于哪栋楼',
+    })
+    process.exit(1)
+  }
+
+  if (DRY) {
+    c.close()
+    await sleep(200)
+    out({
+      ok: true, dry: true, aweme_id: AWEME,
+      reply_to: plan.reply_to || '(顶层评论)',
+      root: plan.root || '(无 — 发顶层)',
+      resolved_by: plan.how,
+      len: TEXT.length, chrome: chromed,
+    })
+    process.exit(0)
   }
 
   const js = `(async function(){
     var AWEME = ${JSON.stringify(AWEME)};
-    var REPLY = ${JSON.stringify(REPLY)};
+    var ROOT = ${JSON.stringify(plan.root || '')};
+    var REPLYTO = ${JSON.stringify(plan.reply_to || '')};
     var TEXT = ${JSON.stringify(TEXT)};
     var COMMON = {
       device_platform:'webapp', aid:'6383', channel:'channel_pc_web',
@@ -101,7 +211,13 @@ try {
       aweme_id: AWEME, text: TEXT, text_extra: '[]',
       aweme_type: '0', channel_id: '0', city: '', sticker_id: '', is_fold: '0'
     });
-    if (REPLY) { body.reply_id = REPLY; body.reply_to_reply_id = REPLY; }
+    // ⭐ 只有回复场景才带这两个字段；而且**分工不同**
+    //    reply_id       = 楼根（level1 的 cid）—— 决定落进哪栋楼
+    //    reply_to_reply_id = 具体回哪条（楼中楼才需要）—— 决定"回复 @谁"、通知谁
+    if (ROOT) {
+      body.reply_id = ROOT;
+      if (REPLYTO) body.reply_to_reply_id = REPLYTO;
+    }
     var o = { http: 0, cid: '', status_code: null, head: '' };
     try {
       var r = await fetch(url, {
@@ -117,6 +233,10 @@ try {
         var j = JSON.parse(txt);
         o.status_code = (j.status_code === undefined ? null : j.status_code);
         o.cid = (j.comment && j.comment.cid) ? String(j.comment.cid) : '';
+        // 服务端回给我们的这条，它自己认的楼根 / 目标
+        o.rt = j.comment ? String(j.comment.reply_id || '') : '';
+        o.rtt = j.comment ? String(j.comment.reply_to_reply_id || '') : '';
+        o.lv = j.comment ? j.comment.level : null;
       } catch (e2) { o.parse_error = String(e2 && e2.message || e2); }
     } catch (e) { o.error = String((e && e.message) || e); }
     return JSON.stringify(o);
@@ -136,7 +256,13 @@ try {
     ok,
     http: res.http,
     cid: cid || undefined,
-    reply_to: REPLY || '(顶层评论)',
+    reply_to: plan.reply_to || '(顶层评论)',
+    root: plan.root || undefined,
+    resolved_by: plan.how,
+    /** ⭐ 服务端回的这条自己认的位置 —— 用来核实"是不是真的进了楼" */
+    server_level: res.lv === undefined ? undefined : res.lv,
+    server_reply_id: res.rt || undefined,
+    server_reply_to_reply_id: res.rtt || undefined,
     aweme_id: AWEME,
     len: TEXT.length,
     chrome: chromed,
@@ -145,5 +271,5 @@ try {
     head: ok ? undefined : String(res.head || '').slice(0, 300),
   })
 } catch (e) {
-  if (!(e && e.__done)) out({ ok: false, error: String(e?.message ?? e) })
+  out({ ok: false, error: String(e?.message ?? e) })
 }

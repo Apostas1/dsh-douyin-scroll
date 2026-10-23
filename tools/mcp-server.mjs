@@ -392,15 +392,23 @@ const TOOLS = [
   {
     name: 'douyin_comment_reply',
     title: '刷抖音 · 发评论 / 回复评论',
-    description: '在评论区发一条评论，或回复某条评论（一条 fetch，不点 UI，不弹短信验证）。'
-      + '⚠️ 这条发的是**普通评论**：正文里的「@昵称」只是文字，对方收不到通知。'
+    description: '在评论区发一条评论，或回复某条评论（一条 fetch，不点 UI，不弹短信验证，1 秒）。'
+      + '⚠️ 这条发的是**普通评论/回复**：正文里的「@昵称」只是文字，对方收不到 @ 通知；'
+      + '但**回复**会让对方收到「回复了我的评论」通知。'
+      + '⭐ 对方那条在**楼中楼**里（别人楼下）时，还要传 root_comment_id（楼根）—— '
+      + '不然通知会发给楼主而不是他。楼根从 douyin_notices / douyin_at_me 的返回里直接拿。'
       + '🔴 要真 @ 用 douyin_comment_mention。🔴 先问使用者，confirm:true 才发。',
     inputSchema: {
       type: 'object',
       properties: {
         aweme_id: { type: 'string', description: '作品/图文 id' },
         text: { type: 'string', description: '评论正文（≤500 字）' },
-        comment_id: { type: 'string', description: '要回复的评论 cid；留空 = 发顶层评论' },
+        comment_id: { type: 'string', description: '要回复的评论 cid；留空 = 发顶层评论。可以是顶层评论，也可以是楼中楼里的某条' },
+        root_comment_id: {
+          type: 'string',
+          description: '【可选】楼根 cid（这栋楼第一条顶层评论）。回复**楼中楼**时用；'
+            + '不给会自动判，判不出来会拒绝发送（不会瞎猜）。',
+        },
         confirm: { type: 'boolean', description: '🔴 必须由使用者当场同意后传 true，否则只回草稿' },
       },
       required: ['aweme_id', 'text'],
@@ -412,16 +420,44 @@ const TOOLS = [
       const aweme = String(args?.aweme_id || '').trim()
       const text = String(args?.text || '').trim()
       const replyTo = String(args?.comment_id || '').trim()
+      const rootCid = String(args?.root_comment_id || '').trim()
       if (!aweme) return { ok: false, error: '缺 aweme_id' }
       if (!text) return { ok: false, error: '正文是空的' }
       if (text.length > 500) return { ok: false, error: `正文太长（${text.length} 字）` }
       if (args?.confirm !== true) {
-        return { ok: true, sent: false, needsConfirm: true, aweme_id: aweme, comment_id: replyTo || '(顶层评论)', draft: text, len: text.length, note: '没发送 —— 先把草稿给使用者看' }
+        return {
+          ok: true, sent: false, needsConfirm: true, aweme_id: aweme,
+          comment_id: replyTo || '(顶层评论)',
+          root_comment_id: rootCid || '(自动判)',
+          draft: text, len: text.length,
+          how: replyTo
+            ? (rootCid ? `楼中楼回复：reply_id=${rootCid}、reply_to_reply_id=${replyTo}`
+              : `楼中楼回复：楼根自动判、reply_to_reply_id=${replyTo}`)
+            : '顶层普通评论：**不会通知任何人**',
+          note: '没发送 —— 先把草稿给使用者看',
+        }
       }
       const argv = ['--aweme', aweme, '--text', text]
       if (replyTo) argv.push('--reply', replyTo)
-      const r = runNode('comment-api.mjs', argv, 200_000)
-      return pickJson(r.stdout) || { ok: false, error: '发送器没返回可解析结果', stderr: String(r.stderr || '').slice(0, 300) }
+      if (rootCid) argv.push('--root', rootCid)
+      const r = runNode('comment-api.mjs', argv, 260_000)
+      const j = pickJson(r.stdout)
+      if (!j) return { ok: false, error: '发送器没返回可解析结果', stderr: String(r.stderr || '').slice(0, 300) }
+      if (j.need_root) {
+        return {
+          ok: false, need_root: true, ...j,
+          hint: '这条 cid 在楼中楼里，但判不出楼根 ⇒ **没发出**。'
+            + '先 douyin_notices / douyin_at_me 读一次拿 root_comment_id，再传进来。',
+        }
+      }
+      // 核实"真的进了楼没有"
+      if (j.ok && replyTo && j.server_level !== undefined) {
+        const lv = Number(j.server_level)
+        j.placement = lv === 2
+          ? { ok: true, level: 2, reply_id: j.server_reply_id }
+          : { ok: false, level: lv, warn: '⚠️ 服务端存成了顶层评论，不是楼中楼回复 —— 楼根填错了' }
+      }
+      return j
     },
   },
 

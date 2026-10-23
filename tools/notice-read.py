@@ -39,10 +39,15 @@ COMMON = ("device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type
           "&platform=PC")
 
 # 通知类型（实测 + 推断）
+# ⚠️ 31 / 32 是"回复"类（2026-10-23 实测补上）：以前只认 45/46，
+#    于是「别人在我的评论下面回复我」这类通知**全被漏掉**（type=31 里 comment_type=2）。
 TYPE_NAME = {
+    31: "回复了评论 / 在我的评论下回复",
+    32: "回复了你的评论",
     33: "关注了你",
     34: "点赞了你的作品",
     35: "评论了你的作品",
+    41: "点赞了你的评论",
     45: "@了你（评论区）",
     46: "@了你（作品）",
 }
@@ -60,9 +65,20 @@ def norm(it):
         if not isinstance(blk, dict):
             continue
         ui = blk.get("user_info") or blk.get("from_user") or {}
+        # ⭐ "评论类"通知（31/32/35/41）里，真正说话的人在 blk["comment"]["user"]，
+        #    不在 user_info / from_user。以前只读前者 ⇒ 这类通知读出来 nickname 是空的。
+        inner = blk.get("comment") if isinstance(blk.get("comment"), dict) else None
+        if inner:
+            iu = inner.get("user") or {}
+            if iu.get("nickname"):
+                ui = iu
+            if inner.get("cid"):
+                rec["comment_id"] = str(inner["cid"])
+            if inner.get("text"):
+                rec["content"] = str(inner["text"]).strip()
         rec["nickname"] = ui.get("nickname") or ""
         rec["uid"] = ui.get("uid") or ""
-        rec["content"] = (blk.get("content") or "").strip()
+        rec["content"] = (rec.get("content") or (blk.get("content") or "").strip())
         sch = blk.get("schema_url") or ""
         rec["schema_url"] = sch
         # aweme://aweme/detail/<aweme_id>?cid=<comment_id>
@@ -72,9 +88,38 @@ def norm(it):
             except Exception:
                 pass
             if "cid=" in sch:
-                rec["comment_id"] = sch.split("cid=")[1].split("&")[0]
+                rec.setdefault("comment_id", sch.split("cid=")[1].split("&")[0])
         if blk.get("aweme_id"):
             rec.setdefault("aweme_id", str(blk["aweme_id"]))
+        aw = blk.get("aweme") if isinstance(blk.get("aweme"), dict) else None
+        if aw and aw.get("aweme_id"):
+            rec.setdefault("aweme_id", str(aw["aweme_id"]))
+            rec["aweme_desc"] = (aw.get("desc") or "")[:80]
+
+        # ⭐⭐ 楼根（2026-10-23 加的，这是"我该用什么方式回"的关键）：
+        #    · 通知里的 `parent_id` = 那条回复所在楼的**顶层评论 cid**（实测：
+        #      拿它去 /comment/list/reply/ 能查出整栋楼 7 条，都是 level=2）
+        #    · `level1_comment` = 别人评论的那条（可能就是我的评论）
+        #    · `reply_comment`  = 我/别人被回的那条
+        #    回楼中楼的人时，reply_id 必须填**楼根**，塞对方那条 level2 的 cid
+        #    会变成一条冒出来的顶层评论（实测确认过的 bug）。
+        if blk.get("parent_id"):
+            rec["root_comment_id"] = str(blk["parent_id"])
+        lv1 = blk.get("level1_comment") if isinstance(blk.get("level1_comment"), dict) else None
+        if lv1:
+            if lv1.get("cid"):
+                rec.setdefault("root_comment_id", str(lv1["cid"]))
+            lu = lv1.get("user") or {}
+            rec["root_author"] = lu.get("nickname") or ""
+            rec["root_text"] = (lv1.get("text") or "")[:60]
+        rep = blk.get("reply_comment") if isinstance(blk.get("reply_comment"), dict) else None
+        if rep:
+            ru = rep.get("user") or {}
+            rec["reply_to_nickname"] = ru.get("nickname") or ""
+            rec["reply_to_text"] = (rep.get("text") or "")[:60]
+            if rep.get("cid"):
+                rec["reply_to_comment_id"] = str(rep["cid"])
+
         if rec.get("aweme_id"):
             rec["video_url"] = "https://www.douyin.com/video/%s" % rec["aweme_id"]
             if rec.get("comment_id"):

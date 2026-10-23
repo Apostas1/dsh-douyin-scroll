@@ -1080,9 +1080,13 @@ export function apply(ctx, config) {
 
   tool({
     name: 'douyin_notices',
-    description: '读抖音互动通知：**谁 @ 了你**（含「别人评论区里的 @」）、谁关注/评论/点赞了你。'
+    description: '读抖音互动通知：**谁 @ 了你**（含「别人评论区里的 @」）、'
+      + '**谁回复了你的评论 / 在你评论下面说话**（type=31，2026-10-23 起才认出来 —— 以前这类全漏）、'
+      + '谁关注/评论/点赞了你。'
       + '网页版没有通知中心页面，这个工具直接打通接口（只读，is_mark_read=0 不改变已读状态）。'
-      + '返回里 at_n 就是 @ 你的条数。',
+      + '返回里 at_n 是 @ 的条数，reply_n 是"回复类"的条数。'
+      + '⭐ 每条都带 comment_id（要回就回这条）和 **root_comment_id**（楼根）—— '
+      + '回复楼中楼里的人时，把这两个传给 douyin_comment_reply（mode:"api"）就行。',
     parameters: {
       raw: { type: 'boolean', description: '连原始条目一起返回（默认 false）' },
     },
@@ -1098,7 +1102,28 @@ export function apply(ctx, config) {
       })
       const j = pickJson(r.stdout)
       if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
-      if (j.n) log(`notices: ${j.n} 条，其中 @ 我 ${j.at_n} 条`)
+      /**
+       * ⭐ 把"回复类"单拎出来（type=31/32）—— 这是**回评论的真正入口**：
+       *    别人在我楼里说话，我该"直接回复"他，不是 @ 他。
+       *    以前只统计 type 45/46（@ 我），于是"别人回了我"这件事完全看不见。
+       */
+      const items = Array.isArray(j.items) ? j.items : []
+      const replies = items.filter((x) => x && (x.type === 31 || x.type === 32) && x.comment_id)
+      j.reply_n = replies.length
+      if (replies.length) {
+        j.replies = replies.slice(0, 10).map((x) => ({
+          nickname: x.nickname,
+          content: String(x.content || '').slice(0, 200),
+          aweme_id: x.aweme_id,
+          comment_id: x.comment_id,
+          root_comment_id: x.root_comment_id,
+          reply_to_text: x.reply_to_text || undefined,
+          created_at: x.create_time,
+        }))
+        j.reply_hint = '要回他们：douyin_comment_reply { aweme_id, comment_id, root_comment_id, text, mode:"api" } —— '
+          + '用**直接回复**，不要用 @（对方会收到「回复了我的评论」通知）。'
+      }
+      if (j.n) log(`notices: ${j.n} 条（@ 我 ${j.at_n}，回复类 ${j.reply_n}）`)
       return j
     },
   })
@@ -1148,7 +1173,12 @@ export function apply(ctx, config) {
       + '⭐ **没有 comment_id（我主动推东西给使用者、他没留下可回的评论）⇒ 才用 mode:ui**：'
       + '真 @ 顶层评论，慢 20-40 秒、要 Chrome、拿不到 cid（删不掉）。'
       + '⚠️ 楼中楼满 20 条就跳过，别换通道硬塞。'
-      + '配合 douyin_notices 用：它返回的 comment_id 就是 mode=api 的 comment_id。',
+      + '⭐ **回复楼中楼里的人**（别人回了我的评论 / 回了我楼里的人）：'
+      + '传那条 level-2 的 cid 当 comment_id 就行 —— 工具会自动判出"楼根"，'
+      + '把 reply_id 填成楼根、reply_to_reply_id 填成对方那条（这是抖音的两个不同字段，'
+      + '填错就变成一条冒出来的顶层评论）。也可以用 root_comment_id 显式指定楼根。'
+      + '配合 douyin_notices / douyin_at_me 用：它们返回的 comment_id 就是 mode=api 的 comment_id，'
+      + 'root_comment_id 就是可以直接传的楼根。',
     parameters: {
       aweme_id: { type: 'string', description: '作品/图文 id（douyin_notices 返回的 aweme_id）' },
       text: { type: 'string', description: '评论正文（≤500 字）。mode=ui 时**不要自己写 @昵称**，工具会自动加' },
@@ -1156,7 +1186,13 @@ export function apply(ctx, config) {
         type: 'string',
         description: 'api = 快（回复/普通评论，@ 是文字）｜ui = 真 @（顶层评论，慢）。不传 = api',
       },
-      comment_id: { type: 'string', description: '要回复的评论 cid（**只有 mode=api 支持**）；留空 = 发顶层评论' },
+      comment_id: { type: 'string', description: '要回复的评论 cid（**只有 mode=api 支持**）；留空 = 发顶层评论。可以是顶层评论，也可以是楼中楼里的某条' },
+      root_comment_id: {
+        type: 'string',
+        description: '【可选】楼根 cid（这栋楼的第一条顶层评论）。'
+          + '回复**楼中楼**时用：不给就自动判（翻顶层列表找这条属于哪栋楼）；'
+          + '判不出来工具会拒绝发送，不会瞎猜。回复顶层评论时不用传。',
+      },
       mention_name: { type: 'string', description: '【mode=ui 必填】要真 @ 的昵称（必须和对方昵称完全一致）' },
       mention_uid: { type: 'string', description: '【可选】被 @ 人的 uid，用于拦「@ 自己」；不给就不拦' },
       confirm: { type: 'boolean', description: '🔴 必须由用户当场同意后传 true，否则只回草稿不发送' },
@@ -1165,6 +1201,7 @@ export function apply(ctx, config) {
       const aweme = String(args.aweme_id || '').trim()
       const text = String(args.text || '').trim()
       const replyTo = String(args.comment_id || '').trim()
+      const rootCid = String(args.root_comment_id || '').trim()
       const mentionName = String(args.mention_name || '').trim()
       const mentionUid = String(args.mention_uid || '').trim()
       const mode = String(args.mode || 'api').trim().toLowerCase()
@@ -1211,15 +1248,30 @@ export function apply(ctx, config) {
       if (mode === 'api' && !replyTo) {
         // 顶层普通评论：没人会收到通知。只在草稿/结果里标注，不拦（有时就是要发顶层）。
       }
+      // root_comment_id 只在"回复"时才讲得通
+      if (mode === 'ui' && rootCid) {
+        return { ok: false, error: 'mode=ui 不需要 root_comment_id（真 @ 只发顶层评论）' }
+      }
 
       // 🔴 用户闸
       if (args.confirm !== true) {
         return {
           ok: true, sent: false, needsConfirm: true, mode,
           aweme_id: aweme, comment_id: replyTo || '(顶层评论)',
+          root_comment_id: rootCid || '(自动判)',
           mention: mentionName || undefined,
           draft: mode === 'ui' ? `@${mentionName} ${text}` : text, len: text.length,
           eta: mode === 'ui' ? '约 20-40 秒（要起无头 Chrome 点选）' : '约 1 秒',
+          /**
+           * ⭐ 把"回复方式"讲清楚 —— 这是使用者反复问的那个点：
+           *    回顶层评论的人 vs 回楼中楼里的人，抖音用的是**两个不同字段**。
+           */
+          how: mode !== 'api' ? undefined
+            : (!replyTo
+              ? '顶层普通评论：落在评论区第一层，**不会通知任何人**'
+              : (rootCid
+                ? `楼中楼回复：reply_id=${rootCid}（楼根）、reply_to_reply_id=${replyTo}（对方那条）`
+                : `楼中楼回复：reply_id=<自动判出的楼根>、reply_to_reply_id=${replyTo}（对方那条）`)),
           note: '没发送 —— 先把这段给用户看，他点头后再用 confirm:true 调一次',
         }
       }
@@ -1270,9 +1322,24 @@ export function apply(ctx, config) {
       /* ── ③ mode=api：回复楼层 / 普通评论（快，@ 是文字） ── */
       const argv = ['--aweme', aweme, '--text', text]
       if (replyTo) argv.push('--reply', replyTo)
-      const r = runNodeTool('comment-api.mjs', argv, { timeout: 200_000 })
+      if (rootCid) argv.push('--root', rootCid)
+      const r = runNodeTool('comment-api.mjs', argv, { timeout: 260_000 })
       const res = pickJson(r.stdout)
       if (!res) return { ok: false, mode, error: '发送器没返回可解析结果', stdout: r.stdout.slice(0, 400), stderr: r.stderr.slice(0, 400) }
+
+      /**
+       * ⭐ 判不出楼根 ⇒ 脚本会明确拒绝（need_root），**千万别当成功**。
+       *    以前 reply_id 填的是"对方那条"，服务端就把这条评论存成了**另一条顶层评论**：
+       *    看着发出去了、还拿得到 cid，其实压根没进楼。这种"看起来成功"必须拦住。
+       */
+      if (res.need_root || (!res.ok && /判不出楼根/.test(String(res.error || '')))) {
+        return {
+          ok: false, mode, need_root: true, ...res,
+          hint: '这条 cid 属于楼中楼，但工具判不出"楼根" ⇒ **已中止，没发出**。'
+            + '处理办法：① 先 douyin_at_me / douyin_notices 读一次（它们会给出 root_comment_id）'
+            + '② 把那个值传进 root_comment_id 再发。',
+        }
+      }
 
       /**
        * 🔴 403 = 被限流。这是今天新踩的坑：连发几条之后 API 直接 403。
@@ -1291,9 +1358,28 @@ export function apply(ctx, config) {
       if (res.ok) {
         try { noteMyComment(stateDir, aweme, { cid: res.cid || '', text }) } catch { /* 记不上不影响发 */ }
       }
+      /**
+       * ⭐ 核实"真的进了楼没有" —— 服务端会在返回的 comment 里告诉我们它自己认的位置：
+       *    server_level = 2 且 server_reply_id = 楼根 ⇒ 真的进了楼
+       *    server_level = 1                          ⇒ 它是顶层评论（**说明楼根填错了**）
+       * 这是唯一能当场看出"位置对不对"的证据，别放过。
+       */
+      const placedRight = (() => {
+        if (!replyTo) return undefined                      // 本来就发顶层，无所谓
+        if (res.server_level === undefined) return undefined // 服务端没回，判不了
+        const lv = Number(res.server_level)
+        const wantRoot = rootCid || res.root || ''
+        if (lv === 2) return { ok: true, level: 2, reply_id: res.server_reply_id }
+        return {
+          ok: false, level: lv, reply_id: res.server_reply_id,
+          warn: '⚠️ 服务端把它存成了**顶层评论**（level=' + lv + '），不是楼中楼回复'
+            + (wantRoot ? '。可能楼根填错了：应该是 ' + wantRoot : '')
+            + '。这条虽然发出去了，但位置在评论区第一层，不是回在对方楼下。',
+        }
+      })()
       const readback = res.ok ? await readbackAfter(stateDir, aweme, { text, cid: String(res.cid || '') }) : null
-      if (res.ok) log(`comment-reply(api) -> ${aweme}/${replyTo || 'top'}: cid=${res.cid}，回读=${readback?.state || '?'}`)
-      return { ...res, mode, readback }
+      if (res.ok) log(`comment-reply(api) -> ${aweme}/${replyTo || 'top'}（楼根=${rootCid || res.root || '自动'}）: cid=${res.cid}，level=${res.server_level ?? '?'}，回读=${readback?.state || '?'}`)
+      return { ...res, mode, placement: placedRight, readback }
     },
   })
 
@@ -1313,8 +1399,14 @@ export function apply(ctx, config) {
     const j = pickJson(r.stdout)
     if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
     const items = Array.isArray(j.items) ? j.items : []
-    // type 45/46 = 评论区 @ 我（notice-read.py 里定义的）
-    const ats = items.filter((x) => x && (x.type === 45 || x.type === 46))
+    /**
+     * ⭐ 两类都算"有人在跟我说话"：
+     *   type 45/46 = 评论区 @ 我
+     *   type 31/32 = **回复了评论 / 在我评论下面说话**（2026-10-23 才认出来）
+     * 🔴 以前只看 45/46 ⇒「别人回了我的评论」全漏。这类恰恰是最该"直接回复"的：
+     *    对方已经在我楼里了，回他一句就够，根本不用 @。
+     */
+    const ats = items.filter((x) => x && (x.type === 45 || x.type === 46 || x.type === 31 || x.type === 32))
     const limit = Math.max(1, Math.min(Number(args.limit) || 10, 30))
     const includeSeen = args.include_seen === true
 
@@ -1327,12 +1419,18 @@ export function apply(ctx, config) {
       const alreadyReplied = Boolean(mem && cid && mem.seen.includes(cid))
       const myCommentsHere = mem ? (mem.mine || []).slice(-3) : []
       if (alreadyReplied && !includeSeen) continue
+      const isReply = (a.type === 31 || a.type === 32)
       out.push({
+        kind: isReply ? '回复了我的评论' : '@ 了我',
         nickname: a.nickname || '',
         uid: a.uid || '',
         content: String(a.content || '').slice(0, 300),
         aweme_id: aweme || undefined,
         comment_id: cid || undefined,
+        /** ⭐ 楼根：回复楼中楼时**必须**传给 douyin_comment_reply 当 root_comment_id */
+        root_comment_id: a.root_comment_id || undefined,
+        /** 对方是在回我哪一句（type=31 才有） */
+        replying_to: a.reply_to_text || undefined,
         video_url: a.video_url || (aweme ? `https://www.douyin.com/video/${aweme}` : undefined),
         created_at: a.create_time || undefined,
         before: alreadyReplied ? '回过' : '没回过',
@@ -1355,25 +1453,38 @@ export function apply(ctx, config) {
       } catch { /* 标记失败不影响读 */ }
     }
 
-    log(`at-me: ${ats.length} 条 @ 我，未回的 ${out.length} 条`)
+    log(`at-me: ${ats.length} 条（@ 我 / 回复我），未回的 ${out.length} 条`)
     return {
       ok: true,
-      at_n: ats.length,
+      at_n: ats.filter((x) => x.type === 45 || x.type === 46).length,
+      reply_n: ats.filter((x) => x.type === 31 || x.type === 32).length,
+      total_n: ats.length,
       shown: out.length,
       list: out,
+      /**
+       * ⭐ 回法分两种，**看对方是在"顶层评论"还是在"楼中楼"**：
+       *   · 顶层评论（对方的 cid 就是一条一级评论）⇒ 直接回他，reply_id = 他的 cid
+       *   · 楼中楼（对方回在别人/我的楼下）      ⇒ reply_id = **楼根**、reply_to_reply_id = 他那条
+       * 两种都用 mode:"api"（直接回复），区别只是**楼根要不要传**。
+       * 工具会自动判楼根；判不出来会拒绝发送，让你显式传 root_comment_id。
+       */
       hint: out.length
-        ? '要回的话：douyin_comment_reply { aweme_id, comment_id, text, mode:"api" }，先给用户看草稿。'
-          + '⭐ 回某人一律用 mode:"api"（直接回复）—— 他会收到「回复了我的评论」通知，'
-          + '比 @ 通知更强、1 秒发出、拿得到 cid。**不要用 @ 去"回复"人**。'
-        : (ats.length ? '这些 @ 都回过了（加 include_seen:true 可以再看一遍）' : '最近没有新的 @'),
+        ? '要回的话：douyin_comment_reply { aweme_id, comment_id, root_comment_id, text, mode:"api" }，先给用户看草稿。'
+          + '⭐ 一律 mode:"api"（直接回复）—— 对方收到「回复了我的评论」通知，比 @ 通知更强、1 秒发出、拿得到 cid。'
+          + '**不要用 @ 去"回复"人**。'
+          + '⭐ 如果返回里对了 root_comment_id，**原样传进去**（那是楼根，别自己猜）；'
+          + '没给就不用传，工具会翻列表自动判。'
+        : (ats.length ? '这些都回过了（加 include_seen:true 可以再看一遍）' : '最近没有新的 @ / 回复'),
     }
   }
 
   tool({
     name: 'douyin_at_me',
-    description: '⭐ **别人在评论区 @ 了我** —— 一次把「谁 @ 的 / 在哪个视频 / 说了什么 / 我回过没有」整理好，'
+    description: '⭐ **谁在跟我说话** —— 一次把「谁 / 在哪个视频 / 说了什么 / 我回过没有」整理好，'
       + '带上记忆上下文，方便决定回不回。只读，不发任何东西。'
-      + '⭐ 要回：用返回里的 aweme_id + comment_id 调 douyin_comment_reply（mode:"api"）—— '
+      + '包含两类：① 评论区 @ 我（type 45/46）② **回复了我的评论 / 在我评论下面说话**（type 31/32，2026-10-23 起才认出）。'
+      + '每条都带 kind（"@ 了我" / "回复了我的评论"）、comment_id、root_comment_id（楼根）。'
+      + '⭐ 要回：用返回里的 aweme_id + comment_id + root_comment_id 调 douyin_comment_reply（mode:"api"）—— '
       + '**有 comment_id 就直接回复，不要用 @**：对方收到「回复了我的评论」通知，'
       + '绑定在那条评论上、有上下文、位置永久固定在楼里，1 秒发出还拿得到 cid。',
     parameters: {

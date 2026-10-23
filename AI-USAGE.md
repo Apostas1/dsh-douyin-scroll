@@ -70,8 +70,8 @@ node "<插件目录>/tools/mcp-server.mjs"
 | `douyin_whoami` | 登录还在不在、当前是哪个号 | 任何操作前不确定登录态 |
 | `douyin_forward` | 拉推荐流候选 + 打分 + 官方分享链接 | **主入口**：要推荐视频就调它 |
 | `douyin_comments` | 读一个视频的评论（含楼中楼） | 判断「这视频好不好玩」 |
-| `douyin_notices` | 谁 @ 了你 / 谁评论点赞关注 | 回消息前先看 |
-| `douyin_at_me` | ⭐ **谁在评论区 @ 了我**（带"回过没有"+ 我在这条视频下说过什么） | 回评论前调它 |
+| `douyin_notices` | 谁 @ 了你 / **谁回复了你的评论** / 谁评论点赞关注（每条带 `comment_id` + `root_comment_id`） | 回消息前先看 |
+| `douyin_at_me` | ⭐ **谁在跟我说话** —— @ 我 + **回复了我的评论**（带"回过没有"+ 我在这条视频下说过什么 + 楼根） | 回评论前调它 |
 | `douyin_im_read` | 读私信会话（带 from: me/them） | 看对方最近说了什么 |
 
 ### 会发东西（**必须 `confirm: true`**）
@@ -80,7 +80,7 @@ node "<插件目录>/tools/mcp-server.mjs"
 |---|---|
 | `douyin_share_card` | 发**分享卡片**（不是文字链接）给好友，可带一句 reason |
 | `douyin_dm` | 发一条私信 |
-| `douyin_comment_reply` | 发评论 / 回复某条评论。**`mode:"api"`（默认）直接回复楼层；`mode:"ui"` 真 @ 顶层** |
+| `douyin_comment_reply` | 发评论 / 回复某条评论。**`mode:"api"`（默认）直接回复楼层；`mode:"ui"` 真 @ 顶层**。回楼中楼要额外传 `root_comment_id`（楼根，通知才发给对方而不是楼主） |
 | `douyin_comment_mention` | 同上，等价于 `mode:"ui"` 的便捷入口（真 @、UI 点选）—— 2026-10-23 新增 |
 
 ### ⭐⭐ 该用哪个：**有评论可回就回复，没评论可回才 @**（2026-10-23 定稿）
@@ -95,6 +95,44 @@ node "<插件目录>/tools/mcp-server.mjs"
 
 ⚠️ 曾经以为「顶层评论能让所有人看到，所以某些场景要用 @」——
 **这个场景不存在**：本插件是给一个人用的，「公开」不是目的，只是抖音没有「只通知一个人」的顶层评论这个事实带来的副作用。
+
+### ⭐⭐ 别人**再回一句**的时候，回法不一样（2026-10-23 实测定稿）
+
+抖音的"回复"由**两个不同字段**决定，填错会静默出错：
+
+| 字段 | 管什么 |
+|---|---|
+| `reply_id` | **楼根** —— 这条回复落进哪一栋楼 |
+| `reply_to_reply_id` | **具体回哪条** —— 决定"回复了一个人"显示谁、通知发给谁 |
+
+按"对方那条评论在哪一层"分三种：
+
+| 对方那条是… | 传什么 | 通知给谁 |
+|---|---|---|
+| **顶层评论**（level 1，评论区第一层） | `comment_id` = 他这条；楼根自动 = 他这条 | 他 |
+| **楼中楼**（level 2，别人楼下） | `comment_id` = 他这条 + `root_comment_id` = **楼根** | **他**（不是楼主） |
+| 我**主动推视频**（他没有评论） | `mode:"ui"` 的 `mention_name` | 他（@ 通知） |
+
+**楼中楼这条最容易错**：只给楼根 ⇒ 通知发给楼主；两个字段填同一个值 ⇒
+这条回复会变成**另一条冒出来的顶层评论**（服务端存的 `level=1`、`root_comment_id` 是它自己），
+工具却报成功、还拿得到 cid —— 每一步都"看起来成功"。
+
+> 🔴 这个 bug 真实存在过（2026-10-23 抓到）：`comment-api.mjs` 里
+> `reply_id` 和 `reply_to_reply_id` 塞的是同一个 `REPLY` 变量。
+> 现在拆成 `--reply`（回哪条）和 `--root`（楼根），并且：
+> - 不给 `--root` 时**自动判**（翻顶层列表找它属于哪栋楼 → 在楼中楼里找 → 问接口它有没有人回过）
+> - 三条路都判不出来 ⇒ **拒绝发送**（`need_root`），绝不瞎猜
+> - 发完用服务端返回的 `server_level` **当场核实**：`level=2` 才算真进了楼
+
+回复楼中楼的人，完整调用长这样：
+
+```json
+{ "aweme_id": "769...", "comment_id": "769...3328", "root_comment_id": "769...9251",
+  "text": "三个都答：…", "mode": "api", "confirm": true }
+```
+
+`root_comment_id` 从哪来：`douyin_notices` / `douyin_at_me` 的返回里直接带
+（通知的 `parent_id` 就是楼根）。原样传进去，别自己猜。
 
 ### ⚠️ 为什么 @ 必须走 UI（技术原因）
 
@@ -211,16 +249,20 @@ node "<插件目录>/tools/mcp-server.mjs"
 ### C. 「有人 @ 我，回他」
 
 ```
-1. douyin_notices 或 douyin_at_me     → 拿到 aweme_id / comment_id / 对方说了什么
+1. douyin_notices 或 douyin_at_me     → 拿到 aweme_id / comment_id / root_comment_id / 对方说了什么
 2. 想清楚回什么，写成草稿
-3. douyin_comment_reply { aweme_id, comment_id, text, mode: "api" }        → 拿草稿
+3. douyin_comment_reply { aweme_id, comment_id, root_comment_id, text, mode: "api" }  → 拿草稿
 4. 使用者点头
-5. douyin_comment_reply { ..., mode: "api", confirm: true }                → 真发（1 秒）
+5. douyin_comment_reply { ..., mode: "api", confirm: true }                          → 真发（1 秒）
+6. 看返回里的 placement：level=2 才算真进了楼；level=1 说明变成顶层评论了（楼根填错）
 ```
 
 > ⭐ **回人一律 `mode:"api"` + `comment_id`（直接回复），不要用 @。**
 > 对方会收到「**回复了我的评论**」通知 —— 比 @ 通知更强：绑定在那条评论上、
 > 点进去有完整上下文、楼中楼位置永久固定，而且 1 秒发出、拿得到 cid（可回读可删除）。
+>
+> ⭐ **对方那条在楼中楼里（不是顶层评论）⇒ 还要传 `root_comment_id`（楼根）**，
+> 否则通知会发给楼主而不是他。楼根从 `douyin_notices` / `douyin_at_me` 的返回里直接拿。
 >
 > 只有「我主动推东西、对方在这视频下没有评论可回」时才用 `mode:"ui"`（真 @ 顶层）。
 > 楼中楼满 20 条就跳过，别换通道硬塞。
@@ -230,6 +272,9 @@ node "<插件目录>/tools/mcp-server.mjs"
 ### D. 「这条视频底下有人问我，回一下」（有具体评论）
 
 同 C —— 有 cid 就 `mode:"api"` 直接回复。**除非那楼已经满 20 条回复**，那就跳过。
+
+⚠️ **对方那句话如果是在楼中楼里（别人楼下），必须带 `root_comment_id`**：
+不带就只回给楼主了，问话的人收不到通知。
 
 ---
 
@@ -244,6 +289,8 @@ node "<插件目录>/tools/mcp-server.mjs"
 | `发送太密，被本地闸拦下了` | 同一通道有最小间隔（api 45 秒 / ui 20 秒），等返回里的 `wait_sec` 秒再发 |
 | `rate_limited: true`（403） | 抖音限流。**别重试** —— 进 10 分钟冷却，越重试封越久 |
 | 回读 state=`pending` | **读不到 ≠ 没发出去**。抖音评论按热度排序，刚发的 0 赞评论排最后，这个视频也不给切「最新」排序 ⇒ 我够不着。有 cid 且能按 cid 删掉 = 服务端收下了。⚠️ 别写成"进审核了"（没根据的推测） |
+| 返回 `need_root: true` | 这条 cid 在楼中楼里，但工具判不出楼根 ⇒ **没发出**。先 `douyin_notices` / `douyin_at_me` 读一次拿 `root_comment_id`，再传进来 |
+| `placement.level = 1`（本该是 2） | 这条发出去了但是个**顶层评论**，不是楼中楼回复 —— 楼根填错了。这次别删也别重复发，先看 `root_comment_id` 对不对 |
 | 客户端连不上 | 检查 `DOUYIN_HOME` 是不是指对了；`node tools/mcp-server.mjs --selftest` 先自己跑一遍 |
 
 ---

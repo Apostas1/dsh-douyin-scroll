@@ -447,6 +447,71 @@ try {
   if (/reply_target_not_found|reply_button_not_found/.test(ui)) ok('找不到目标评论/回复按钮时会明确失败（不默默改成发顶层）')
   else bad('找不到目标评论时没有明确失败 —— 可能默默发成顶层，用户以为回复了')
 
+  /**
+   * ⭐⭐ 4l-2. **楼根 bug**（2026-10-23 实测抓到的真 bug，最阴的一种）
+   *
+   * 🔴 事故：comment-api.mjs 里写的是
+   *      body.reply_id = REPLY; body.reply_to_reply_id = REPLY;
+   *    —— 两个字段塞同一个值。服务端落库的结果（我实际读回来核实过）：
+   *      回主人的顶层评论 X，结果那条回复变成 level=1、root_comment_id=它自己
+   *      ⇒ **变成了一条冒出来的顶层评论**，压根没进那栋楼。
+   *    工具报 ok、拿得到 cid、还能删 —— 每一步都"看起来成功"，所以一直没人发现。
+   *
+   * 正确结构（从别人的正常回复里读出来的）：
+   *    level=2  reply_id=<楼根>  reply_to_reply_id=<具体回哪条>
+   *    ⇒ reply_id 永远是楼根；reply_to_reply_id 才是"回这条"。
+   */
+  console.log('\n4l-2. 楼根（reply_id vs reply_to_reply_id）')
+  // ① 不许再把两个字段写成同一个变量
+  //    ⚠️ 只看**代码行**（行首不是 * 或 // 的），否则会把注释里"旧代码是什么样"的说明当成 bug
+  const cmCode = cm.split(/\r?\n/).filter((l) => !/^\s*(\*|\/\/)/.test(l)).join('\n')
+  if (/body\.reply_id = REPLY;\s*\n?\s*body\.reply_to_reply_id = REPLY/.test(cmCode)) {
+    bad('comment-api.mjs 又把 reply_id 和 reply_to_reply_id 填成同一个值 —— 回复会变成一条冒出来的顶层评论')
+  } else ok('comment-api.mjs 没再把 reply_id / reply_to_reply_id 混成一个值')
+  // ② 必须支持 --root
+  if (/--root/.test(cm) && /body\.reply_id = ROOT/.test(cm)) ok('comment-api.mjs 支持 --root（楼根单独传）')
+  else bad('comment-api.mjs 没有 --root —— 回楼中楼时楼根没地方传')
+  // ③ 判不出楼根必须拒绝，不许瞎猜
+  if (/need_root/.test(cm) && /不瞎猜|拒绝/.test(cm)) ok('comment-api.mjs 判不出楼根时明确拒绝（不瞎猜）')
+  else bad('comment-api.mjs 判不出楼根时还在硬发 —— 会又变成顶层评论')
+  // ④ 自动判楼根的三条路都在：顶层列表 / 楼中楼里 / 有没有人回过它
+  for (const [tag, re] of [
+    ['翻顶层列表找这条', /found-level1/],
+    ['在楼中楼里找', /found-in-thread/],
+    ['看它自己有没有人回过', /has-replies/],
+  ]) {
+    if (re.test(cm)) ok(`comment-api.mjs 能${tag}`)
+    else bad(`comment-api.mjs 少了"${tag}"这条判据`)
+  }
+  // ⑤ index.js 要把 root_comment_id 一路传下去
+  if (/root_comment_id/.test(idx) && /'--root'/.test(idx)) ok('index.js 会把 root_comment_id 传给 comment-api.mjs')
+  else bad('index.js 没把 root_comment_id 传下去 —— 工具层说了楼根也用不上')
+  // ⑥ index.js 要核实"服务端把它放在哪一层"
+  if (/server_level/.test(idx) && /placement/.test(idx)) ok('index.js 核实 service 端返回的 level（能当场看出"没进楼"）')
+  else bad('index.js 不看服务端返回的 level —— 又会出现"发出去了但位置错了还报成功"')
+
+  /**
+   * ⭐⭐ 4l-3. **回复类通知**（type 31/32）
+   *
+   * 🔴 事故：notice-read.py 的 TYPE_NAME 只有 45/46/@ + 33/34/35，
+   *    于是「别人回复了我的评论」这类通知（type=31, comment_type=2）**完全漏掉**。
+   *    而这恰恰是最该"直接回复"的场景 —— 连"有人跟我说话"都不知道，回什么。
+   *    另外这类通知里真正说话的人在 blk["comment"]["user"]，
+   *    不在 user_info / from_user ⇒ 只读前者的实现连 nickname 都是空的。
+   */
+  console.log('\n4l-3. 回复类通知（type 31/32）')
+  const nr = readFileSync(join(here, 'tools', 'notice-read.py'), 'utf8')
+  if (/31:\s*"/.test(nr) || /\b31:\s*'/.test(nr)) ok('notice-read.py 认得 type 31（回复了评论）')
+  else bad('notice-read.py 不认识 type 31 —— 「别人回复我的评论」全漏')
+  if (/root_comment_id/.test(nr)) ok('notice-read.py 会解析 root_comment_id（楼根）')
+  else bad('notice-read.py 不解析楼根 —— 回楼中楼时没地方拿它')
+  if (/inner\.get\("user"\)|inner\.get\('user'\)/.test(nr)) ok('notice-read.py 从 comment.user 读昵称（评论类通知的说话人在这）')
+  else bad('notice-read.py 只读 user_info —— 评论类通知的昵称是空的')
+  if (/x\.type === 31 \|\| x\.type === 32/.test(idx)) ok('index.js 的 readAtMe 也认 type 31/32（不只 @）')
+  else bad('index.js 的 readAtMe 只看 @ —— 别人回复我这件事看不见')
+  if (/reply_n/.test(idx)) ok('工具返回里带 reply_n（回复类条数）')
+  else bad('工具返回里没有 reply_n —— 看不出有没有人回我')
+
   // @ 自己那道闸还在
   if (/是登录号自己的 uid/.test(idx)) ok('有「@ 自己」拦截')
   else bad('「@ 自己」的拦截没了 —— 会 @ 到登录号自己头上')
