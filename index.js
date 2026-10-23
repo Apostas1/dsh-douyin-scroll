@@ -173,11 +173,26 @@ const pyEnv = (extra = {}) => ({
 
 export function apply(ctx, config) {
   const pluginDir = dirname(fileURLToPath(import.meta.url))
+  /**
+   * ⭐ 版本号：**按 mtime 缓存**，文件一变就重读。
+   * 🔴 2026-10-23 使用者指出「本地插件版本你是不是写错了」——
+   *    原来 `if (myVer) return myVer` 读一次就永久记住：宿主启动后改了
+   *    package.json 的版本号，面板/douyin_status 还一直报旧版本，
+   *    看起来就像"版本写错了"。现在 statSync 的 mtimeMs 变了就重读。
+   */
   let myVer = ''
+  let myVerMtime = -1
   const myVersion = () => {
-    if (myVer) return myVer
-    try { myVer = String(JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8')).version || '') } catch { myVer = '' }
-    return myVer
+    const pkgFile = join(pluginDir, 'package.json')
+    try {
+      const mtime = statSync(pkgFile).mtimeMs
+      if (myVer && mtime === myVerMtime) return myVer
+      myVer = String(JSON.parse(readFileSync(pkgFile, 'utf8')).version || '')
+      myVerMtime = mtime
+      return myVer
+    } catch {
+      return myVer || ''
+    }
   }
   const stateDir = stateDirOf(ctx)
   const cfgFile = join(stateDir, 'config.json')
@@ -1484,40 +1499,116 @@ export function apply(ctx, config) {
     const jsRunner = () => nodeExe() || process.execPath
     const explicit = String(cfg.dshBin || '').trim()
     if (explicit && existsSync(explicit)) return { command: jsRunner(), args: [explicit], shell: false }
-    const guesses = [
-      join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
-      '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
-      '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
-    ].filter(Boolean)
-    // ⭐ 桌面版是 Electron 安装包，不是 npm -g 装的 ⇒ 按 process.resourcesPath 猜
-    // 🔴 2026-10-20 实测修正：这台机器上真实的 dsh 在
-    //    `D:\DeepSeek\dsh-data\extracted-asar\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js`
-    //    （asar 被解开到 DSH_HOME/extracted-asar，而不是 resources 下面）⇒ 必须加上这个候选，
-    //    否则只在 PATH 上找 'dsh'，而桌面版 PATH 里没有 ⇒ 那一轮必然起不来。
-    if (process.resourcesPath) {
+
+    /**
+     * ⭐⭐ 2026-10-23 重写（起因：使用者反馈「总是显示找不到 dsh：桌面版多半不是 NPM 全局安装的」）
+     *
+     * 🔴 原来只猜了两种形态：npm 全局装（APPDATA/npm/…）和「asar 被解开到 DSH_HOME/extracted-asar」。
+     *    后者是**我这台机器的特例**（我手动解开过 asar），别人的桌面版**根本没解** ⇒
+     *    四条候选路径全落空 ⇒ 每一轮都报"找不到 dsh"，后台轮次完全起不来。
+     *
+     * ✅ 现在按「**桌面版真正怎么跑起来**」的顺序找，而且把入口类型分成两种：
+     *    ① `dsh/lib/bin.js`      —— 纯 CLI（npm 全局装、或解开的 asar）
+     *    ② `dsh-desktop-host/lib/cli.js` —— ⭐ **桌面版自带的 CLI 入口**（Electron 里那个），
+     *       任何桌面安装都必有：`<安装目录>/windows/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js`
+     *       它就是 `DeepSeek Harness.exe … cli.js --profile headless …` 里的那个脚本。
+     *
+     * ⚠️ 顺带一条更硬的线索：**宿主自己的进程参数里就写着入口**（process.argv / execPath），
+     *    优先从那里反推 —— 比猜路径靠谱得多。
+     */
+    const candidates = []
+
+    // ① 宿主进程自己的入口（最靠谱）：Electron 跑的是 .../dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js
+    //    同一目录下的 cli.js 就是 headless 入口；同级再往上还有 @deepseek-ai/dsh/lib/bin.js
+    try {
+      for (const a of [...process.argv, process.execPath]) {
+        const s = String(a || '')
+        const m = /[\\/](dsh-desktop-host|dsh)[\\/](?:lib[\\/])?([\w.-]+\.(?:js|mjs))$/i.exec(s)
+        if (!m) continue
+        const dir = dirname(s)                       // .../@deepseek-ai/dsh-desktop-host/lib
+        const pkgRoot = dirname(dir)                 // .../@deepseek-ai/dsh-desktop-host
+        const scopeDir = dirname(pkgRoot)            // .../@deepseek-ai
+        candidates.push(join(pkgRoot, 'lib', 'cli.js'))
+        candidates.push(join(scopeDir, 'dsh', 'lib', 'bin.js'))
+        candidates.push(join(scopeDir, 'dsh-desktop-host', 'lib', 'cli.js'))
+      }
+    } catch { /* 反推不到就继续猜 */ }
+
+    // ② 桌面版标准安装位置：resources/app.asar/dsh/node_modules/@deepseek-ai/…
+    //    （asar 里的文件 Node 也能直接读，不需要解开 —— 这是别人机器上唯一必然存在的路径）
+    const resPaths = [process.resourcesPath, process.env.DSH_RESOURCES].filter(Boolean)
+    for (const rp of resPaths) {
       for (const rel of [
+        ['app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js'],
+        ['app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
         ['app.asar.unpacked', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
-        ['app.asar.unpacked', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
         ['app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
         ['node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
-      ]) {
-        const p = join(process.resourcesPath, ...rel)
-        if (existsSync(p)) return { command: jsRunner(), args: [p], shell: false }
-      }
+      ]) candidates.push(join(rp, ...rel))
     }
-    // ⭐ 桌面版另一条真实路径：DSH_HOME/extracted-asar/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js
+
+    // ③ asar 被解开到 DSH_HOME/extracted-asar 的形态（我这台机器就是这样）
     try {
       const dshHome = process.env.DSH_HOME || dirname(stateDir)
       for (const rel of [
+        ['extracted-asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js'],
         ['extracted-asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
         ['extracted-asar', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
-      ]) {
-        const p = join(dshHome, ...rel)
-        if (existsSync(p)) return { command: jsRunner(), args: [p], shell: false }
+      ]) candidates.push(join(dshHome, ...rel))
+    } catch { /* 继续 */ }
+
+    // ④ npm 全局装（web 版 / 命令行装的用户）
+    for (const g of [
+      join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+      '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    ].filter(Boolean)) candidates.push(g)
+
+    /**
+     * 🔴 关键：**不能只靠 existsSync** —— 桌面版的 `app.asar` 是虚拟文件系统，
+     *    纯 node 的 existsSync 对它返回 false，但 Electron 宿主里（我们就在里面）
+     *    通过 fs 补丁是**能读能跑**的。所以这里分两轮：
+     *    ① 先挑 existsSync 为真的（最快、最稳）
+     *    ② 再把 asar 内路径挨个**真跑一次 `--version`** 验证（跑通就用）
+     *       —— 这一步是给"没解 asar 的普通桌面安装"准备的。
+     */
+    const isAsar = (p) => /\.asar[\\/]/i.test(String(p))
+    const runnable = (p) => {
+      try {
+        const r = spawnSync(jsRunner(), [p, '--version'], { encoding: 'utf8', windowsHide: true, timeout: 25_000 })
+        const out = `${r.stdout || ''}${r.stderr || ''}`
+        return r.status === 0 || /\d+\.\d+\.\d+/.test(out)
+      } catch { return false }
+    }
+
+    // ① 真实存在（非 asar）的候选，直接返回
+    for (const p of candidates) {
+      if (!p || isAsar(p)) continue
+      try { if (existsSync(p)) return { command: jsRunner(), args: [p], shell: false } } catch { /* 下一个 */ }
+    }
+    // ② asar 内的候选：真跑一次验证（Electron 宿主能跑）
+    for (const p of candidates) {
+      if (!p || !isAsar(p)) continue
+      if (runnable(p)) {
+        log(`dsh 入口（asar 内，已验证可跑）：${p}`)
+        return { command: jsRunner(), args: [p], shell: false }
       }
-    } catch { /* 找不到就走下面的兜底 */ }
-    for (const g of guesses) if (existsSync(g)) return { command: jsRunner(), args: [g], shell: false }
-    log('⚠️ 找不到 dsh：桌面版多半不是 npm 全局安装的 ⇒ 请在设置里把「dsh 路径」指到 <应用目录>/…/@deepseek-ai/dsh/lib/bin.js')
+    }
+    // ③ 最后再兜一遍：非 asar 但 existsSync 没命中的（权限/符号链接怪情况）
+    for (const p of candidates) {
+      if (!p || isAsar(p)) continue
+      if (runnable(p)) return { command: jsRunner(), args: [p], shell: false }
+    }
+
+    /**
+     * ⚠️ 最后兜底：直接 `dsh`（走 PATH，shell:true）。
+     *    桌面版 PATH 里通常没有 ⇒ 大概率还是失败，所以日志里把**试过哪些路径**打出来，
+     *    使用者照着填设置里的「dsh 路径」就行，不用瞎猜。
+     */
+    log('⚠️ 找不到 dsh 入口。桌面版不是 npm 全局安装的，请把设置里「dsh 路径」填成下面之一：')
+    log('   · <安装目录>/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js')
+    log('   · <安装目录>/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js')
+    log(`   （已试过 ${candidates.length} 条路径，都不存在）`)
     return { command: 'dsh', args: [], shell: true }
   }
 

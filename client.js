@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
      *    对一下面板右上角显示的 `v0.2.0·b<N>` 就知道。
      */
-    const PANEL_BUILD = 14
+    const PANEL_BUILD = 15
 
     const asJson = async (res) => {
       if (res.ok) return res.json()
@@ -197,6 +197,8 @@ window.__ModuleLoader__.load({
       const [runLog, setRunLog] = React.useState(null)
       // 「在评论区 @ 你」要 @ 的昵称（输入框草稿）
       const [atMeDraft, setAtMeDraft] = React.useState(null)
+      // dsh 入口路径（输入框草稿）—— 2026-10-23 加，见「出问题了？」卡片
+      const [dshBinDraft, setDshBinDraft] = React.useState(null)
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
@@ -790,7 +792,39 @@ window.__ModuleLoader__.load({
                 + it.item + '：' + it.detail)))
             : null,
           h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-mini': '', disabled: busy === 'report', onClick: onShowReport }, '看今天的报告'))),
+            h('button', { 'data-dy-mini': '', disabled: busy === 'report', onClick: onShowReport }, '看今天的报告')),
+
+          /**
+           * ⭐⭐ 2026-10-23 加：**dsh 入口路径**（起因：使用者反馈「总是显示找不到 dsh」）
+           * 🔴 桌面版不是 npm 全局装的，插件以前只能猜路径；猜不到就报"找不到 dsh"，
+           *    而面板上**根本没有地方填** —— 使用者彻底卡死。
+           *    现在：自动探测（多半能中）+ 这里可手填兜底 + 「自动找」清空回到探测。
+           */
+          h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, 'dsh 入口（后台跑一轮要用）'),
+              h('div', { 'data-dy-sub': '' },
+                cfg.dshBin
+                  ? '已手填路径。点「自动找」清空，回到自动探测。'
+                  : '留空 = 自动找（桌面版会去 app.asar 里找，一般能中）。只有报「找不到 dsh」时才需要填。'))),
+          h('div', { 'data-dy-row': '' },
+            h('input', {
+              'data-dy-input': '', style: { flex: '1' },
+              placeholder: '…\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js',
+              value: dshBinDraft !== null ? dshBinDraft : String(cfg.dshBin || ''),
+              onChange: (e) => setDshBinDraft(e.target.value),
+            }),
+            h('button', {
+              'data-dy-mini': '', disabled: Boolean(busy) || dshBinDraft === null,
+              onClick: async () => { await patch({ dshBin: String(dshBinDraft || '').trim() }, '已保存 dsh 入口路径'); setDshBinDraft(null) },
+            }, '保存'),
+            h('button', {
+              'data-dy-mini': '', disabled: Boolean(busy),
+              onClick: async () => { await patch({ dshBin: '' }, '已清空 ⇒ 回到自动探测'); setDshBinDraft(null) },
+            }, '自动找')),
+          h('div', { 'data-dy-sub': '', style: { opacity: '.78' } },
+            '填这两个之一：<安装目录>\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\'
+            + 'dsh-desktop-host\\lib\\cli.js 或 …\\@deepseek-ai\\dsh\\lib\\bin.js')),
 
         /* ── 私信发给谁（点选，不用手填 sec_uid） ── */
         h('div', { 'data-dy-card': '' },
