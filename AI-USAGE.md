@@ -58,7 +58,7 @@ node "<插件目录>/tools/mcp-server.mjs"
 
 ---
 
-## 2. 工具清单（12 个）
+## 2. 工具清单（13 个）
 
 ### 只读（随便调，什么都不改）
 
@@ -80,7 +80,20 @@ node "<插件目录>/tools/mcp-server.mjs"
 |---|---|
 | `douyin_share_card` | 发**分享卡片**（不是文字链接）给好友，可带一句 reason |
 | `douyin_dm` | 发一条私信 |
-| `douyin_comment_reply` | 发评论 / 回复某条评论 |
+| `douyin_comment_reply` | 发评论 / 回复某条评论（**普通评论，不能真 @**） |
+| `douyin_comment_mention` | **真 @ 一条评论**（UI 点选，名字可点、对方收通知）—— 2026-10-23 新增 |
+
+### ⚠️ 「@ 不出来」是怎么回事（2026-10-23 使用者反馈）
+
+抖音的 @ **只有前端点选才作数**。API 直发时服务端会把 mention 的 `sec_uid` 剥掉：
+名字看着变蓝，但点开是空页、对方**收不到任何通知**。所以：
+
+- `douyin_comment_reply` 里写 `@昵称` = **普通文字**，不是真 @（别指望对方收到通知）
+- 要真 @ ⇒ 用 `douyin_comment_mention { aweme_id, name, text, confirm:true }`
+  - `name` 必须和对方昵称**完全一致**
+  - 慢（要起无头 Chrome 点选弹层），约 20-40 秒
+  - 昵称搜不到会报 `@ 弹层里没找到这个名字`（一般要求对方在你关注/互关列表里）
+  - 想先验证能不能 @ 到而不发布：传 `dry: true`（只点选到编辑框就停）
 
 ---
 
@@ -190,8 +203,9 @@ node "<插件目录>/tools/mcp-server.mjs"
 5. douyin_comment_reply { ..., confirm: true }                              → 真发
 ```
 
-> ⚠️ MCP 版**不支持真 @ 提及**（那需要 UI 点选，只有 DSH 里的 `douyin_comment_reply`
-> 带 `mention_*` 参数时才会走 UI）。MCP 版发的 `@昵称` 只是普通文字，不会变蓝、对方收不到通知。
+> ⚠️ `douyin_comment_reply` 发的 `@昵称` 只是普通文字（不会变蓝、对方收不到通知）。
+> 要**真 @** 用 `douyin_comment_mention { aweme_id, name, text, confirm: true }` ——
+> 它走 UI 点选（慢 20-40 秒），且昵称必须完全一致、能在 @ 弹层里搜到。
 
 ---
 
@@ -211,6 +225,6 @@ node "<插件目录>/tools/mcp-server.mjs"
 
 - **不做**「跑一轮 → 写日报」：那是 DSH 插件的值班链路（要 headless 会话），MCP 版不复制
 - **不做**回读核实：卡片/私信发完，MCP 版只报"发出去了"，真落地没落地请使用者自己看一眼
-- **不做**真 @ 提及（见上）
+- **能做**真 @：`douyin_comment_mention`（UI 点选，2026-10-23 加）；但它要起 Chrome、20-40 秒、昵称必须搜得到
 - **不读**画面/语音（见规矩 ③）
 - **不联网上传**任何东西；Cookie 只在本机

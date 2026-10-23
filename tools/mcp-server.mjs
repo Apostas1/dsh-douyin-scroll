@@ -498,6 +498,60 @@ const TOOLS = [
     },
   },
   {
+    /**
+     * ⭐⭐ 真 @ 评论（2026-10-23 加，因使用者反馈"@ 不出来"）
+     *
+     * 🔴 背景：抖音的 @ 只有**UI 点选**才作数 —— API 直发时服务端会把 mention 的
+     *    sec_uid 剥掉（名字变蓝、点开空页、对方收不到通知）。
+     *    所以 `douyin_comment_reply` 只能发普通评论；**真 @ 必须走这个工具**，
+     *    它内部跑 tools/comment-mention-ui.mjs：滚输入框 → 真实点开 DraftJS →
+     *    CDP 键盘打 @ → 真实鼠标点弹层里那一行 → 补正文 → 点红色箭头发布。
+     *
+     * ⚠️ 前提：必须已登录、必须装了 Chrome（要起无头浏览器）、昵称要能在弹层里搜到。
+     */
+    name: 'douyin_comment_mention',
+    title: '刷抖音 · 评论区真 @（UI 点选）',
+    description: '在别人视频的评论区发一条**真正 @ 到某人**的评论（名字可点、对方收到通知）。'
+      + '⚠️ 比普通评论慢（要起无头 Chrome 点选弹层），且要求昵称能在 @ 弹层里搜到。'
+      + '🔴 先问使用者，confirm:true 才发。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        aweme_id: { type: 'string', description: '作品/图文 id' },
+        name: { type: 'string', description: '要 @ 的人的抖音昵称（必须和对方昵称完全一致）' },
+        text: { type: 'string', description: '评论正文（≤500 字；不用自己写 @昵称，工具会自动加）' },
+        confirm: { type: 'boolean', description: '🔴 必须由使用者当场同意后传 true，否则只回草稿' },
+        dry: { type: 'boolean', description: 'true = 只走到点选完就停（不发布），用于验证昵称搜不搜得到' },
+      },
+      required: ['aweme_id', 'name', 'text'],
+      additionalProperties: false,
+    },
+    handler: (args) => {
+      const bad = needLogin() || needSetup()
+      if (bad) return bad
+      const aweme = String(args?.aweme_id || '').trim()
+      const name = String(args?.name || '').trim()
+      const text = String(args?.text || '').trim()
+      if (!aweme) return { ok: false, error: '缺 aweme_id' }
+      if (!name) return { ok: false, error: '缺 name（要 @ 的昵称）' }
+      if (!text) return { ok: false, error: '正文是空的' }
+      if (text.length > 500) return { ok: false, error: `正文太长（${text.length} 字）` }
+      if (args?.confirm !== true && args?.dry !== true) {
+        return {
+          ok: true, sent: false, needsConfirm: true, aweme_id: aweme, mention: name,
+          draft: `@${name} ${text}`, len: text.length,
+          note: '没发送 —— 先把草稿给使用者看；想先验证昵称能不能 @ 到，可传 dry:true（只点选不发布）',
+        }
+      }
+      const argv = ['--aweme', aweme, '--name', name, '--text', text]
+      if (args?.dry === true) argv.push('--dry')
+      const r = runNode('comment-mention-ui.mjs', argv, 300_000)
+      const j = pickJson(r.stdout)
+      if (!j) return { ok: false, error: '真 @ 执行器没返回可解析结果', stdout: String(r.stdout || '').slice(0, 400), stderr: String(r.stderr || '').slice(0, 300) }
+      return j
+    },
+  },
+  {
     name: 'douyin_guide',
     title: '刷抖音 · 使用说明',
     description: '返回这个插件给别的 agent 看的使用说明（工具清单、安全红线、MCP 配置）。第一次接进来先读它。',

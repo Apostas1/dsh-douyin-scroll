@@ -694,6 +694,13 @@ window.__ModuleLoader__.load({
               '会在**最值得的那一条**下发一次，提醒内容以「@你的昵称」开头。'
               + (cfg.commentSelfName ? `（会 @「${cfg.commentSelfName}」）` : '（会 @ 你登录的这个号）'))
             : null,
+          /* 🔴 2026-10-23：使用者反馈「@ 不出来」—— 这里必须讲清楚真 @ 的前提 */
+          cfg.commentAtMe && cfg.autoSend
+            ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px', opacity: '.78' } },
+              '💡 真 @ 需要起无头 Chrome 走「点选弹层」流程（约 20-40 秒）：'
+              + '① 电脑上要装了 Chrome；② 要 @ 的昵称必须能在弹层里搜到（一般是关注/互关的人）；'
+              + '③ 只写「@昵称」文字、没走点选的评论，对方收不到通知 —— 这是抖音的限制，不是插件偷懒。')
+            : null,
           /* 想 @ 别的号才需要填 */
           cfg.commentAtMe
             ? h('div', { 'data-dy-row': '' },
