@@ -97,5 +97,5 @@ console.log('  1. 浏览器里 **Ctrl+Shift+R** 强制刷新（最简单，先�
 console.log('  2. 关掉设置面板再打开')
 console.log('  3. 重启 dsh')
 console.log('')
-console.log('确认换没换：面板右上角应该显示  v0.2.0·b' + (b ? b[1] : '?'))
+console.log('确认换没换：面板右上角应该显示  v<当前版本>·b' + (b ? b[1] : '?'))
 console.log('（如果还是旧数字 b<?>，说明浏览器还在用旧缓存）')

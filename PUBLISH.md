@@ -163,10 +163,10 @@ requirements.txt  只有 curl_cffi + httpx
 推之前跑一遍：
 
 ```powershell
-node selfcheck.mjs      # 应该 198 通过 / 0 失败
+node selfcheck.mjs      # 应该 264 通过 / 0 失败
 ```
 
-> ⚠️ 仓库里**没有** `prompts/persona.md`（作者自己的人设，`.gitignore` 拦着）。
+> ⚠️ 仓库里**没有** `prompts/persona.md`（本地私有配置，`.gitignore` 拦着）。
 > 别人 clone 下来只有 `persona.default.md`（中性那份）—— 这是有意的，别"补回去"。
 
 ## 9. 发到 npm（可选，但推荐）
@@ -190,7 +190,7 @@ npm publish --access public
 | 项 | 状态 |
 |---|---|
 | `node selfcheck.mjs` | ✅ 198 通过 / 0 失败 |
-| `npm pack --dry-run` | ✅ 51 个文件 / 221.6 kB，无 pyc、无作者人设 |
+| `npm pack --dry-run` | ✅ 51 个文件 / 221.6 kB，无 pyc、无 persona.md |
 | 面板渲染检查 `node tools/panel-render-check.mjs` | ✅ 通过 |
 | MCP 自测 `node tools/mcp-server.mjs --selftest` | ✅ 通过 |
 | 发送链路实测 | ✅ 评论区 @（cid 落库）+ 分享卡片+理由（私信回读确认） |

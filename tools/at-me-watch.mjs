@@ -1,25 +1,24 @@
 #!/usr/bin/env node
 /**
- * tools/at-me-watch.mjs —— 盯「评论区 @ 我」，按规则自动回（2026-10-23 主人令）
+ * tools/at-me-watch.mjs —— 盯「评论区 @ 我」，按规则自动回
  * ============================================================================
- * 主人的原话：
- *   「在我刚说的这楼下面，谁@你都可以回，不要问我能不能发，我要休息去了，
- *     你按照规则发，不要叫别人是主人，每分钟监控一次，回复完20条为止」
+ * 这个脚本按一套**写死的规则**跑（不靠模型临场发挥），规则见下面几条：
  *
- * 所以这个脚本的职责很窄，就一条：**发现新 @ ⇒ 按规则回**。
  *
  * ── 规则（写死，不靠模型临场发挥）────────────────────────────────
  * ① 只回**指定楼/指定视频**下的 @（`--aweme` 限定），别到处乱跑
- * ② **不许叫别人「主人」** —— 只有号主（`--owner-uid`）能叫主人；
- *    回别人一律不带「主人」二字（工具层硬拦，见 sanitize()）
+ * ② **特殊称呼只属于号主** —— 只有 `--owner-uid` 对应的那个人能用；
+ *    回别人一律不带那个称呼（工具层硬拦，见 sanitize()）
  * ③ 每条回复 ≤100 字、**必须带 1 个真 @ 号主以外的对方**（回复谁就 @ 谁）
  * ④ 同一人同一楼**最多回 1 次**（防拉锯）
- * ⑤ 总共回满 `--max` 条就停（主人说 20 条）
- * ⑥ **每分钟查一次**（主人指定频率）
+ * ⑤ 总共回满 `--max` 条就停（默认 20）
+ * ⑥ 每隔 `--every` 秒查一次（默认 60）
  * ⑦ 遇到「使唤式」/引战/要隐私的 —— 不回（记日志）
  *
  * 用法:
- *   node tools/at-me-watch.mjs --aweme <id> --owner-uid 111289250254 --max 20 [--every 60] [--dry]
+ *   node tools/at-me-watch.mjs --aweme <id> --owner-uid <号主的uid> --max 20 [--every 60] [--dry]
+ *   ⚠️ `--owner-uid` 不写死的 —— 那是**你自己**的 uid，从号主账号或设置页抄过来，
+ *      也可以用环境变量 DOUYIN_OWNER_UID。不给的话「特殊称呼只属于号主」这条会退化。
  *
  * 输出：每轮一行 JSON 到 stdout（方便外面 `| Tee-Object` 留档）
  */
@@ -29,11 +28,26 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
+/**
+ * 特殊称呼（默认「主人」）。**只有号主能用** —— 别处一律禁。
+ * 想换称呼就设环境变量 DOUYIN_HONORIFIC，或改这一行。
+ */
+const HONORIFIC = String(process.env.DOUYIN_HONORIFIC || '主人').trim() || '主人'
+/** 回复模板：{HO} 会被换成上面的称呼 */
+const GREETING_TEMPLATE = process.env.DOUYIN_REPLY_GREETING || '{HO}我在呢～ 这楼我盯着，谁说话我都接一句'
+/** 几条按情景选的兜底回复（都可被环境变量覆盖） */
+const REPLY_UNSURE = process.env.DOUYIN_REPLY_UNSURE || '这个问题我也在琢磨，等我想明白了跟你说'
+const REPLY_LAUGH = process.env.DOUYIN_REPLY_LAUGH || '我也笑到了，这条我记下来了'
+const REPLY_ASK = process.env.DOUYIN_REPLY_ASK || '真的呀，我就在这儿盯着呢'
+const REPLY_FALLBACK = process.env.DOUYIN_REPLY_FALLBACK || '收到～ 我记下了'
+
 const argv = process.argv.slice(2)
 const argOf = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? (argv[i + 1] ?? '') : d }
 const DRY = argv.includes('--dry')
 const AWEME = String(argOf('--aweme', '')).trim()
-const OWNER_UID = String(argOf('--owner-uid', '')).trim()
+const OWNER_UID = String(
+  argOf('--owner-uid', '') || process.env.DOUYIN_OWNER_UID || '',
+).trim()
 const MAX = Math.max(1, Math.min(Number(argOf('--max', '20')) || 20, 60))
 const EVERY = Math.max(30, Number(argOf('--every', '60')) || 60) * 1000
 
@@ -78,15 +92,15 @@ const saveState = (s) => { try { mkdirSync(HOME, { recursive: true }); writeFile
 const dayKey = () => new Date().toISOString().slice(0, 10)
 
 /**
- * 🔴 硬拦「叫别人主人」—— 主人 2026-10-23 明确要求。
- * 除了号主本人，任何回复里出现「主人」两个字一律剔掉。
+ * 🔴 硬拦「把特殊称呼用在别人身上」。
+ * 除了号主本人，任何回复里出现那个称呼一律剔掉。
  */
 const sanitize = (text, isOwner) => {
   let t = String(text || '').trim()
   if (!isOwner) {
-    // 去掉「主人，」「主人！」「主人 」这类称呼，以及句中出现的主人
-    t = t.replace(/主人[，,、:：!！?？\s]*/g, '')
-    t = t.replace(/主人/g, '')
+    // 去掉「<称呼>，」「<称呼>！」这类，以及句中出现的那两个字
+    t = t.replace(new RegExp(HONORIFIC + '[，,、:：!！?？\\s]*', 'g'), '')
+    t = t.replace(new RegExp(HONORIFIC, 'g'), '')
     t = t.replace(/^\s*[，,、:：]+/, '').trim()
   }
   return t
@@ -101,17 +115,17 @@ const shouldSkip = (text) => {
   return ''
 }
 
-/** 生成一句回复（短、像鱼、不带"主人"） */
+/** 生成一句回复（短、不带那个特殊称呼） */
 const craft = (content, isOwner) => {
   const t = String(content || '')
   if (isOwner) {
-    return `主人我在呢～ 这楼我盯着，谁说话我都接一句 🐟`
+    return GREETING_TEMPLATE.replace('{HO}', HONORIFIC)
   }
   // 按对方说的内容挑一句
-  if (/[?？]/.test(t)) return `这个问题我也在琢磨，等我想明白了跟你说 🐟`
-  if (/(哈哈|笑|绷|绷不住|笑死)/.test(t)) return `我也笑到了，这条我记下来了 🐟`
-  if (/(真的|假的|是不是|有没有)/.test(t)) return `真的呀，我就在这儿游着呢 🐟`
-  return `收到～ 我记下了 🐟`
+  if (/[?？]/.test(t)) return REPLY_UNSURE
+  if (/(哈哈|笑|绷|绷不住|笑死)/.test(t)) return REPLY_LAUGH
+  if (/(真的|假的|是不是|有没有)/.test(t)) return REPLY_ASK
+  return REPLY_FALLBACK
 }
 
 let OWNER_NICK = ''
@@ -126,21 +140,31 @@ const main = async () => {
 
   log({ ok: true, msg: '开始盯 @', aweme: AWEME, max: MAX, every: `${EVERY / 1000}s`, dry: DRY })
 
-  // 号主昵称（用来 @ 他；也是唯一能叫「主人」的人）
+  // 号主昵称（用来 @ 他；也是唯一能用特殊称呼的人）
+  // 🔴 2026-10-23：以前这里写死了一个固定的 uid（拿某台机器上的号当默认值）——
+  //    跟着代码一起公开出去了。现在只认 --owner-uid（或环境变量 DOUYIN_OWNER_UID），
+  //    不给就按配置里的 dmTo 兜。
   try {
     const r = runPy('notice-read.py', ['--raw'], 120_000)
     const j = pickJson(r.stdout)
-    const own = (j?.items || []).find((x) => String(x.uid || '').includes('111289250254'))
+    const items = Array.isArray(j?.items) ? j.items : []
+    // 有 uid 就精确匹配；没给 uid 就跳过这一步（别瞎猜谁是号主）
+    const own = OWNER_UID
+      ? items.find((x) => String(x.uid || '') === OWNER_UID)
+      : null
     if (own?.nickname) OWNER_NICK = own.nickname
-  } catch { /* 拿不到就用 uid 兜 */ }
+  } catch { /* 拿不到就用配置兜 */ }
   if (!OWNER_NICK) {
-    // 从配置里拿
+    // 从配置里拿（dmTo = 使用者自己填的昵称）
     try {
       const c = JSON.parse(readFileSync(join(HOME, 'config.json'), 'utf8'))
       OWNER_NICK = String(c.dmTo || '').trim()
     } catch { /* ignore */ }
   }
-  log({ owner_nick: OWNER_NICK || '(未知)' })
+  if (!OWNER_UID) {
+    log({ warn: '没给 --owner-uid：无法精确判断谁是号主，称呼边界会退化' })
+  }
+  log({ owner_nick: OWNER_NICK || '(未知)', owner_uid: OWNER_UID || '(未指定)' })
 
   let idle = 0
   while (st.count < MAX) {
@@ -201,7 +225,7 @@ const main = async () => {
          *     · 1 秒
          *     · 对方收到「回复了我的评论」通知 —— 比 @ 通知更强（绑在那条评论上、有上下文）
          *     · 拿得到 cid ⇒ 可回读、可删除
-         *   ⚠️ 楼中楼满 20 条 ⇒ **跳过，不换通道**（主人 2026-10-23 明确说的）
+         *   ⚠️ 楼中楼满 20 条 ⇒ **跳过，不换通道**
          */
         const m = runNode('comment-api.mjs', ['--aweme', AWEME, '--text', text, '--reply', cid], 200_000)
         const mj = pickJson(m.stdout)

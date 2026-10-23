@@ -2088,7 +2088,7 @@ export function apply(ctx, config) {
     })()
     // ⭐ 人设：**三层**，从上往下找，找到就用，绝不读插件外面任意路径。
     //    ① `$DOUYIN_HOME/persona.md` —— 使用者自己那份（设置页「我的人设」写的，或他手放进去的）
-    //    ② `prompts/persona.md`     —— 发布包自带的那份（作者自己的，**不随公开仓库发布**）
+    //    ② `prompts/persona.md`     —— 插件包里那份（本地私有配置，**不随公开仓库发布**）
     //    ③ `prompts/persona.default.md` —— 中性默认（谁装了都能用，不带任何具体人）
     //    身份牌必须对得上，对不上就往下退 —— 这样用户放错文件也不会串人设。
     let ownerDoc = ''

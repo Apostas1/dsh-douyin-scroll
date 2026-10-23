@@ -21,7 +21,7 @@ window.__ModuleLoader__.load({
      * ⭐ 面板构建号 —— **每次改完 client.js 就 +1**。
      *    为什么需要它：改 client.js 后如果不重启/刷新，浏览器会一直用缓存的旧 bundle，
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
-     *    对一下面板右上角显示的 `v0.2.0·b<N>` 就知道。
+     *    对一下面板右上角显示的 `v<版本>·b<N>` 就知道。
      */
     const PANEL_BUILD = 15
 
@@ -1149,7 +1149,7 @@ window.__ModuleLoader__.load({
               h('textarea', {
                 'data-dy-input': '', rows: 8,
                 value: persona.text || '',
-                placeholder: '比如：\n- 你叫小鱼，叫他主人\n- 说话软一点、别腻\n- 不要说自己是 AI / 机器人',
+                placeholder: '比如：\n- 说话软一点、别腻\n- 简短，别写成客服\n- 不透露任何私人信息',
                 onChange: (e) => setPersona({ ...persona, text: e.target.value }),
               }),
               h('div', { 'data-dy-row': '' },

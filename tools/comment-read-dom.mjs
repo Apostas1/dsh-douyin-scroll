@@ -23,7 +23,7 @@ import { homedir } from 'node:os'
 import { openPage, sleep } from '../lib/chrome.mjs'
 
 /**
- * ⭐ "我"的抖音昵称 —— **不能写死**（写死的是作者自己的号，别人装了永远匹配不上）。
+  * ⭐ "我"的抖音昵称 —— **不能写死**（写死的话，别人装了永远匹配不上自己的号）。
  *    顺序：环境变量 DOUYIN_ME_NICK → 插件家目录 account.json 里的 nick → 空
  *    account.json 是扫码登录/体检时自动记下来的（见 index.js /account）。
  *    拿不到就返回空串 ⇒ --mine 只按"记忆里我发过的正文"匹配，不瞎猜昵称。
