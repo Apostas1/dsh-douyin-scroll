@@ -115,6 +115,38 @@ try {
   else bad(`人设层缺失：${missing.join('、')}`)
   if (/personaFrom/.test(idx)) ok('会记录本轮用的是哪一层人设')
   else warn('没记录人设来源，出问题不好查')
+  /**
+   * ⭐⭐ 4d-2. **人设的味道**（2026-10-23 主人加码）
+   * 🔴 事故：我回那 5 条评论写成了客服工单 ——「说得对，补充准确点：…」「实测风险：…」，
+   *    主人原话：「你回复消息的时候你记得自己的人设吗，以后要按你人设回啊，
+   *    还有加上颜文字，跟有梗，卖萌卖惨」。人设文件里原来只有"软一点""别腻"这种空话，
+   *    没一条能落地的要求 ⇒ 模型照着写出来就是客服腔。
+   *    现在守着这四条硬要求，谁改人设文件都不许把它们弄丢。
+   */
+  console.log('\n4d-2. 人设的味道（颜文字 / 梗 / 卖萌 / 卖惨）')
+  const personaFile = join(here, 'prompts', 'persona.md')
+  const persona = existsSync(personaFile) ? readFileSync(personaFile, 'utf8') : ''
+  for (const [tag, re, why] of [
+    ['颜文字', /颜文字/, '没有颜文字要求 ⇒ 写出来又变成干巴巴的客服腔'],
+    ['卖萌', /卖萌/, '没有卖萌要求 ⇒ "我是一个专业助手"那种腔调会回来'],
+    ['卖惨', /卖惨/, '没有卖惨要求 ⇒ 做不到的时候只会硬邦邦地说"无法完成"'],
+    ['梗', /有梗|梗要/, '没有"有梗"要求 ⇒ 通篇说明书口吻'],
+  ]) {
+    if (re.test(persona)) ok(`人设里有${tag}要求`)
+    else bad(`人设里缺${tag}要求 —— ${why}`)
+  }
+  // ⭐ 必须有"客服腔 vs 小鱼腔"的对照，光有要求没有例子，模型学不会
+  if (/客服腔/.test(persona) && /小鱼腔/.test(persona)) ok('人设有正反对照（客服腔 ❌ / 小鱼腔 ✅）—— 比抽象形容词管用')
+  else bad('人设缺正反对照 —— 只有"软一点、别腻"这种形容词，模型写出来还是客服腔')
+  // ⚠️ 但也要有"该收的时候收"，否则每条都颜文字+卖惨会很腻
+  if (/该收的时候收|不许卖萌稀释|别腻/.test(persona)) ok('人设写明了什么时候该收着（风险/等结果时不许卖萌稀释）')
+  else bad('人设只有卖萌没有收敛 —— 讲到红线、风险时也在撒娇就废了')
+  // 🔴 公开评论里「主人」只能叫号主一个人（路人一个字都不许带）
+  if (/「主人」只能叫主人一个人|主人.*只能叫.*一个/.test(persona)) ok('人设写明「主人」只能叫号主一个人（回路人不许带）')
+  else bad('人设没说清「主人」只能叫一个人 —— 会叫到路人头上')
+  // 章节里的硬规则不许被搬进章程（人设住 persona.md，章程只写干活）
+  if (/persona: douyin-scroll/.test(persona.split('\n')[0] || '')) ok('prompts/persona.md 第一行有身份牌 persona: douyin-scroll')
+  else bad('prompts/persona.md 第一行缺身份牌 —— 插件会拒绝用它')
   if (!/cfg\.workspace/.test(idx)) ok('不再从 workspace 读外部 AGENTS.md（口子已封）')
   else bad('index.js 还在用 cfg.workspace —— 那正是"能读到别人插件设定"的口子')
   // 人设规则不许被搬进章程：章程里只应有指向，不该出现「我是主人的小鱼呀」这种人设台词
@@ -486,9 +518,25 @@ try {
   // ⑤ index.js 要把 root_comment_id 一路传下去
   if (/root_comment_id/.test(idx) && /'--root'/.test(idx)) ok('index.js 会把 root_comment_id 传给 comment-api.mjs')
   else bad('index.js 没把 root_comment_id 传下去 —— 工具层说了楼根也用不上')
-  // ⑥ index.js 要核实"服务端把它放在哪一层"
-  if (/server_level/.test(idx) && /placement/.test(idx)) ok('index.js 核实 service 端返回的 level（能当场看出"没进楼"）')
-  else bad('index.js 不看服务端返回的 level —— 又会出现"发出去了但位置错了还报成功"')
+  /**
+   * ⑥ 核实"到底进没进楼" —— **不能只信 publish 的响应**。
+   * 🔴 2026-10-23 实测：同一台机器、同一个视频、同一个参数，
+   *    前 5 条 publish 响应里带 comment.level、后 7 条 level 全是 undefined。
+   *    ⇒ 靠 server_level 判断落位会"有时候判得出来、有时候判不出来"，
+   *      判不出来时又会静默当成成功。现在必须**发完重读那一楼**。
+   */
+  if (/verified_level/.test(cm) && /comment\/list\/reply/.test(cm)) {
+    ok('comment-api.mjs 发完会重读那一楼核实落位（不只信 publish 响应）')
+  } else bad('comment-api.mjs 只信 publish 响应判落位 —— 服务端有时不返回 level（实测 7/7 都没有）')
+  if (/found_at_top/.test(cm)) ok('comment-api.mjs 楼里读不到时会去顶层列表查（能识别"跑成顶层评论"）')
+  else bad('comment-api.mjs 楼里读不到就当失败/成功 —— 分不清"跑顶层了"和"热度排够不着"')
+  if (/placement/.test(cm) && /不是楼中楼回复|没进楼/.test(cm)) ok('comment-api.mjs 会明确报"落位错了"（不是只说 ok）')
+  else bad('comment-api.mjs 不报落位错误 —— 又会出现"发出去了但位置错了还报成功"')
+  if (/placement/.test(idx)) ok('index.js 把 placement 透传给调用方')
+  else bad('index.js 把落位信息吞了 —— 模型看不到"到底进没进楼"')
+  // 三态：读不到 ≠ 失败
+  if (/不等于没进楼|不正于没进楼|verified: false/.test(cm)) ok('comment-api.mjs 重读不到时是三态（不谎报失败也不谎报成功）')
+  else bad('comment-api.mjs 重读不到时只有两态 —— 会谎报失败')
 
   /**
    * ⭐⭐ 4l-3. **回复类通知**（type 31/32）

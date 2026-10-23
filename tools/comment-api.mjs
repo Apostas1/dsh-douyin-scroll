@@ -233,12 +233,55 @@ try {
         var j = JSON.parse(txt);
         o.status_code = (j.status_code === undefined ? null : j.status_code);
         o.cid = (j.comment && j.comment.cid) ? String(j.comment.cid) : '';
-        // 服务端回给我们的这条，它自己认的楼根 / 目标
+        // 服务端有时会给这条自己认的位置……**有时不给**（2026-10-23 实测：
+        // 同一台机器、同一个视频，前 5 条返回了 level，后 7 条 level 全是 undefined）
+        // ⇒ 不能只靠这里，下面还会重读一次楼来核实。
         o.rt = j.comment ? String(j.comment.reply_id || '') : '';
         o.rtt = j.comment ? String(j.comment.reply_to_reply_id || '') : '';
-        o.lv = j.comment ? j.comment.level : null;
+        o.lv = (j.comment && j.comment.level !== undefined && j.comment.level !== null) ? j.comment.level : null;
+        o.has_lv = Boolean(j.comment && j.comment.level !== undefined && j.comment.level !== null);
       } catch (e2) { o.parse_error = String(e2 && e2.message || e2); }
     } catch (e) { o.error = String((e && e.message) || e); }
+
+    /**
+     * ⭐⭐ 发完**重读那一楼**核实落位（2026-10-23 加的，这是唯一可靠的判据）。
+     *   · 顶楼（ROOT）下能读到这条 ⇒ level=2、真的进了楼
+     *   · 顶楼里读不到、但顶层列表里有它 ⇒ 它变成了一条独立顶层评论（**楼根填错了**）
+     * 重读要等页面刷新一会儿，所以带 3 次重试。
+     */
+    if (o.cid && ROOT) {
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        await new Promise(function(z){ setTimeout(z, attempt === 1 ? 1200 : 1800) });
+        var rj = await fetch('/aweme/v1/web/comment/list/reply/?' + qs(Object.assign({}, COMMON, {
+          item_id: AWEME, comment_id: ROOT, cursor: '0', count: '20', item_type: '0'
+        })), { credentials: 'include', headers: { accept: 'application/json' } }).then(function(x){ return x.text() }).catch(function(){ return '' });
+        var rjj = null; try { rjj = JSON.parse(rj) } catch(e) {}
+        if (rjj && rjj.comments) {
+          for (var i2 = 0; i2 < rjj.comments.length; i2++) {
+            if (String(rjj.comments[i2].cid) === o.cid) {
+              o.verified = true;
+              o.verified_level = rjj.comments[i2].level;
+              o.verified_reply_id = String(rjj.comments[i2].reply_id || '');
+              o.verified_reply_to = String(rjj.comments[i2].reply_to_reply_id || '');
+              break;
+            }
+          }
+        }
+        if (o.verified) break;
+      }
+      if (!o.verified) {
+        // 楼里没有 ⇒ 去看看它是不是跑到顶层列表去了
+        var tl = await fetch('/aweme/v1/web/comment/list/?' + qs(Object.assign({}, COMMON, {
+          aweme_id: AWEME, count: '20', cursor: '0', item_type: '0'
+        })), { credentials: 'include', headers: { accept: 'application/json' } }).then(function(x){ return x.text() }).catch(function(){ return '' });
+        var tjj = null; try { tjj = JSON.parse(tl) } catch(e) {}
+        if (tjj && tjj.comments) {
+          for (var k2 = 0; k2 < tjj.comments.length; k2++) {
+            if (String(tjj.comments[k2].cid) === o.cid) { o.found_at_top = true; break; }
+          }
+        }
+      }
+    }
     return JSON.stringify(o);
   })()`
 
@@ -252,6 +295,39 @@ try {
   const cid = String(res.cid || '')
   const ok = res.http === 200 && !!cid
 
+  /**
+   * ⭐⭐ 落位判据（2026-10-23 定稿）：
+   *   ① 优先用**重读楼**拿到的 verified_*（唯一可靠 —— publish 的响应有时不带 level）
+   *   ② 重读没读到、但顶层列表里出现了 ⇒ 它变成独立顶层评论了（楼根填错）
+   *   ③ 两边都读不到 ⇒ unknown（评论列表按热度排，0 赞的可能够不着）**不许当成失败**
+   */
+  let placement = null
+  if (plan.root) {
+    if (res.verified) {
+      const lv = Number(res.verified_level)
+      placement = {
+        verified: true, level: lv,
+        reply_id: res.verified_reply_id || undefined,
+        reply_to_reply_id: res.verified_reply_to || undefined,
+        ok: lv === 2,
+        warn: lv === 2 ? undefined
+          : `⚠️ 已核实：它是 **level=${lv}** 的独立顶层评论，不是楼中楼回复 —— 楼根填错了`,
+      }
+    } else if (res.found_at_top) {
+      placement = {
+        verified: true, level: 1, ok: false, found_at_top: true,
+        warn: '⚠️ 已核实：这条跑到了**顶层评论列表**里 —— 楼根填错，它没进楼。'
+          + '虽然发出去了，但位置在评论区第一层，不是回在对方楼下。',
+      }
+    } else {
+      placement = {
+        verified: false, ok: null,
+        note: '重读那栋楼没读到它（评论列表按热度排，0 赞的够不着）—— '
+          + '**不等于没进楼**，也不等于进错了。想确认就过几分钟用 comment-read-dom.mjs 再读一次。',
+      }
+    }
+  }
+
   out({
     ok,
     http: res.http,
@@ -259,10 +335,12 @@ try {
     reply_to: plan.reply_to || '(顶层评论)',
     root: plan.root || undefined,
     resolved_by: plan.how,
-    /** ⭐ 服务端回的这条自己认的位置 —— 用来核实"是不是真的进了楼" */
-    server_level: res.lv === undefined ? undefined : res.lv,
+    /** ⭐ publish 响应里的位置（有时是 null —— 别只靠它） */
+    server_level: res.has_lv ? res.lv : undefined,
     server_reply_id: res.rt || undefined,
     server_reply_to_reply_id: res.rtt || undefined,
+    /** ⭐⭐ 真正的核实结果（重读楼拿到的） */
+    placement,
     aweme_id: AWEME,
     len: TEXT.length,
     chrome: chromed,

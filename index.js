@@ -1359,26 +1359,21 @@ export function apply(ctx, config) {
         try { noteMyComment(stateDir, aweme, { cid: res.cid || '', text }) } catch { /* 记不上不影响发 */ }
       }
       /**
-       * ⭐ 核实"真的进了楼没有" —— 服务端会在返回的 comment 里告诉我们它自己认的位置：
-       *    server_level = 2 且 server_reply_id = 楼根 ⇒ 真的进了楼
-       *    server_level = 1                          ⇒ 它是顶层评论（**说明楼根填错了**）
-       * 这是唯一能当场看出"位置对不对"的证据，别放过。
+       * ⭐ 核实"真的进了楼没有"（2026-10-23 定稿）
+       *    comment-api.mjs 发完会**重读那一楼**核实（不再只信 publish 的响应 ——
+       *    实测：同一台机器同一个视频，前 5 条响应带 level、后 7 条全不带）。
+       *    三种结果都要如实说：
+       *      placement.ok === true   ⇒ 真进了楼
+       *      placement.ok === false  ⇒ 变成顶层评论了（楼根填错），别谎报成功
+       *      placement.verified === false ⇒ 读不到（热度排序够不着）—— **不等于失败**
        */
-      const placedRight = (() => {
-        if (!replyTo) return undefined                      // 本来就发顶层，无所谓
-        if (res.server_level === undefined) return undefined // 服务端没回，判不了
-        const lv = Number(res.server_level)
-        const wantRoot = rootCid || res.root || ''
-        if (lv === 2) return { ok: true, level: 2, reply_id: res.server_reply_id }
-        return {
-          ok: false, level: lv, reply_id: res.server_reply_id,
-          warn: '⚠️ 服务端把它存成了**顶层评论**（level=' + lv + '），不是楼中楼回复'
-            + (wantRoot ? '。可能楼根填错了：应该是 ' + wantRoot : '')
-            + '。这条虽然发出去了，但位置在评论区第一层，不是回在对方楼下。',
-        }
-      })()
+      const placedRight = res.placement || undefined
       const readback = res.ok ? await readbackAfter(stateDir, aweme, { text, cid: String(res.cid || '') }) : null
-      if (res.ok) log(`comment-reply(api) -> ${aweme}/${replyTo || 'top'}（楼根=${rootCid || res.root || '自动'}）: cid=${res.cid}，level=${res.server_level ?? '?'}，回读=${readback?.state || '?'}`)
+      if (res.ok) {
+        const pl = placedRight
+        const plTag = !pl ? '?' : (pl.ok === true ? 'level=2 进楼' : (pl.ok === false ? '⚠️ 变成顶层了' : '未核实'))
+        log(`comment-reply(api) -> ${aweme}/${replyTo || 'top'}（楼根=${rootCid || res.root || '自动'}）: cid=${res.cid}，落位=${plTag}，回读=${readback?.state || '?'}`)
+      }
       return { ...res, mode, placement: placedRight, readback }
     },
   })

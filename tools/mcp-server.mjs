@@ -450,12 +450,9 @@ const TOOLS = [
             + '先 douyin_notices / douyin_at_me 读一次拿 root_comment_id，再传进来。',
         }
       }
-      // 核实"真的进了楼没有"
-      if (j.ok && replyTo && j.server_level !== undefined) {
-        const lv = Number(j.server_level)
-        j.placement = lv === 2
-          ? { ok: true, level: 2, reply_id: j.server_reply_id }
-          : { ok: false, level: lv, warn: '⚠️ 服务端存成了顶层评论，不是楼中楼回复 —— 楼根填错了' }
+      // 核实"真的进了楼没有"（脚本发完会重读那一楼）
+      if (j.ok && j.placement && j.placement.ok === false) {
+        j.warning = j.placement.warn
       }
       return j
     },
