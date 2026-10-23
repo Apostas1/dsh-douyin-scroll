@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
      *    对一下面板右上角显示的 `v0.2.0·b<N>` 就知道。
      */
-    const PANEL_BUILD = 13
+    const PANEL_BUILD = 14
 
     const asJson = async (res) => {
       if (res.ok) return res.json()

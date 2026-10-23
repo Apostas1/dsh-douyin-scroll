@@ -393,7 +393,8 @@ const TOOLS = [
     name: 'douyin_comment_reply',
     title: '刷抖音 · 发评论 / 回复评论',
     description: '在评论区发一条评论，或回复某条评论（一条 fetch，不点 UI，不弹短信验证）。'
-      + '🔴 先问使用者，confirm:true 才发。真 @ 请用 DSH 里的工具（MCP 版不做 UI 点选 @）。',
+      + '⚠️ 这条发的是**普通评论**：正文里的「@昵称」只是文字，对方收不到通知。'
+      + '🔴 要真 @ 用 douyin_comment_mention。🔴 先问使用者，confirm:true 才发。',
     inputSchema: {
       type: 'object',
       properties: {
