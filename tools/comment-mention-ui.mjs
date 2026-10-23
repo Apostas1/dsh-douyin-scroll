@@ -34,10 +34,17 @@ const TEXT = String(argOf('--text', '')).trim()
  *    点了「回复」之后，评论输入框的语义就是"回复那条"，前端会自动带上 reply 关系。
  */
 const REPLY_CID = String(argOf('--reply-cid', '')).trim()
+/**
+ * ⭐ `--reply-text <片段>`：按**评论正文片段**定位要回复的那条（比 cid 稳）。
+ *    🔴 2026-10-23 实测：cid 只活在 React fiber 的深层 props 里，抖音改版后
+ *    遍历 fiber 找不到（还会撞循环引用）⇒ 干脆用**页面上看得见的文字**定位，
+ *    这才是人找评论的方式。取第一条包含该片段的评论节点。
+ */
+const REPLY_TEXT = String(argOf('--reply-text', '')).trim()
 
 const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode = o.ok === false ? 1 : 0 }
 
-if (!AWEME || !NAME) { out({ ok: false, error: '用法: comment-mention-ui.mjs --aweme <id> --name <昵称> [--text 正文] [--reply-cid <cid>] [--dry]' }); process.exit(1) }
+if (!AWEME || !NAME) { out({ ok: false, error: '用法: comment-mention-ui.mjs --aweme <id> --name <昵称> [--text 正文] [--reply-cid <cid> | --reply-text <片段>] [--dry]' }); process.exit(1) }
 
 try {
   const c = await openPage()
@@ -59,7 +66,7 @@ try {
    *    ⚠️ 找不到就**中止**，别默默改成发顶层（用户要的是回复）。
    */
   let replyInfo = null
-  if (REPLY_CID) {
+  if (REPLY_CID || REPLY_TEXT) {
     // 先把评论区滚出来
     try {
       await c.ev(`(function(){
@@ -68,6 +75,68 @@ try {
       })()`)
       await sleep(1500)
     } catch { /* 滚不动就继续 */ }
+
+    /**
+     * ⭐⭐ 按**正文片段**找目标评论（2026-10-23 加，首选路径）。
+     *    人找评论就是这么找的：页面上有那行字 → 滚到它 → 点它下面的「回复」。
+     *    不碰 React fiber，所以不会撞循环引用、也不怕抖音改 fiber 结构。
+     */
+    if (REPLY_TEXT) {
+      let hit = ''
+      for (let i = 0; i < 12 && !hit; i++) {
+        hit = String(await c.ev(`(function(){
+          var NEEDLE = ${JSON.stringify(REPLY_TEXT)};
+          var nodes = Array.prototype.slice.call(document.querySelectorAll('[data-e2e="comment-item"], [class*="commentItem"], [class*="comment-item"]'));
+          for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i];
+            var t = (n.innerText || '');
+            if (t.indexOf(NEEDLE) < 0) continue;
+            n.scrollIntoView({ block: 'center' });
+            var r = n.getBoundingClientRect();
+            return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
+          }
+          return '';
+        })()`))
+        if (!hit) {
+          await c.ev(`(function(){ var l=document.querySelector('[class*="commentList"], [class*="comment-list"]'); if(l){ l.scrollTop += 900 } else { window.scrollBy(0,900) } })()`)
+          await sleep(1400)
+        }
+      }
+      if (!hit) {
+        c.close()
+        out({ ok: false, error: `评论区里找不到含「${REPLY_TEXT}」的那条评论（滚了 12 屏）`, code: 'reply_target_not_found' })
+        process.exit(1)
+      }
+      // 找到节点后，在它里面点「回复」
+      const rb0 = String(await c.ev(`(function(){
+        var NEEDLE = ${JSON.stringify(REPLY_TEXT)};
+        var nodes = Array.prototype.slice.call(document.querySelectorAll('[data-e2e="comment-item"], [class*="commentItem"], [class*="comment-item"]'));
+        for (var i = 0; i < nodes.length; i++) {
+          var n = nodes[i];
+          if ((n.innerText || '').indexOf(NEEDLE) < 0) continue;
+          var cands = Array.prototype.slice.call(n.querySelectorAll('span,div,button,a'));
+          for (var j = 0; j < cands.length; j++) {
+            var e = cands[j];
+            if (e.children.length) continue;
+            if ((e.innerText || '').trim() !== '回复') continue;
+            var r = e.getBoundingClientRect();
+            if (!(r.width > 4 && r.height > 8)) continue;
+            return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
+          }
+        }
+        return '';
+      })()`))
+      if (rb0) {
+        const rb = JSON.parse(rb0)
+        await click(rb.x, rb.y)
+        await sleep(1800)
+        replyInfo = { reply_by_text: REPLY_TEXT, reply_button: rb }
+      } else {
+        c.close()
+        out({ ok: false, error: `找到「${REPLY_TEXT}」那条评论了，但没找到它下面的「回复」按钮`, code: 'reply_button_not_found' })
+        process.exit(1)
+      }
+    }
 
     let found = ''
     for (let i = 0; i < 10 && !found; i++) {
@@ -84,8 +153,29 @@ try {
             while (f && d < 16) {
               var p = f.memoizedProps;
               if (p && typeof p === 'object') {
-                var s = JSON.stringify(p).slice(0, 4000);
-                if (s.indexOf(CID) >= 0) { hit = true; break }
+                /**
+                 * 🔴 2026-10-23 实测 bug：直接 JSON.stringify(memoizedProps) 会**抛异常** ——
+                 *    React fiber 的 props 有循环引用（children 指回 fiber），
+                 *    stringify 抛 "Converting circular structure to JSON"，
+                 *    整段 evaluate Uncaught ⇒ 找 reply-cid 永远失败（工具只报"页面里抛错"）。
+                 * ✅ 改成：只扫**浅层字段**的字符串/数字值（cid 就在这一层），整段 try/catch。
+                 */
+                try {
+                  for (var k in p) {
+                    var v = p[k];
+                    if (typeof v === 'string' && v.indexOf(CID) >= 0) { hit = true; break }
+                    if (typeof v === 'number' && String(v).indexOf(CID) >= 0) { hit = true; break }
+                    if (v && typeof v === 'object' && !v.children) {
+                      for (var k2 in v) {
+                        var v2 = v[k2];
+                        if (typeof v2 === 'string' && v2.indexOf(CID) >= 0) { hit = true; break }
+                        if (typeof v2 === 'number' && String(v2).indexOf(CID) >= 0) { hit = true; break }
+                      }
+                      if (hit) break;
+                    }
+                  }
+                } catch (e) { /* 这一层读不动就跳过 */ }
+                if (hit) break;
               }
               f = f.return; d++;
             }
@@ -124,8 +214,23 @@ try {
           while (f && d < 16) {
             var p = f.memoizedProps;
             if (p && typeof p === 'object') {
-              var s = JSON.stringify(p).slice(0, 4000);
-              if (s.indexOf(CID) >= 0) { hit = true; break }
+              // 同上面的循环引用问题：只扫浅层，不 stringify 整棵树
+              try {
+                for (var k in p) {
+                  var v = p[k];
+                  if (typeof v === 'string' && v.indexOf(CID) >= 0) { hit = true; break }
+                  if (typeof v === 'number' && String(v).indexOf(CID) >= 0) { hit = true; break }
+                  if (v && typeof v === 'object' && !v.children) {
+                    for (var k2 in v) {
+                      var v2 = v[k2];
+                      if (typeof v2 === 'string' && v2.indexOf(CID) >= 0) { hit = true; break }
+                      if (typeof v2 === 'number' && String(v2).indexOf(CID) >= 0) { hit = true; break }
+                    }
+                    if (hit) break;
+                  }
+                }
+              } catch (e) { /* 跳过 */ }
+              if (hit) break;
             }
             f = f.return; d++;
           }

@@ -398,13 +398,51 @@ try {
   if (/unsupported: 'mention'/.test(cm)) ok('comment-api.mjs 收到 --mention-* 会明确拒绝（不再静默降级）')
   else bad('comment-api.mjs 收到 mention 参数不吭声 —— 会发出"看起来成功"的普通评论')
 
-  // 分流：有 mention 走 UI，没 mention 走 API
-  if (/wantMention/.test(idx) && /const wantMention = Boolean/.test(idx)) ok('index.js 按"有没有 mention"分流（UI / API 两条路）')
-  else bad('index.js 没有 mention 分流逻辑')
+  // ⭐⭐ 2026-10-23 重新设计后：不再靠"有没有 mention"偷偷分流，
+  //    改成**调用方必须显式选 mode**（api / ui）。检查这条设计在不在。
+  if (/const mode = String\(args\.mode/.test(idx)) ok('index.js 用显式 mode 参数分流（api / ui 两条通道）')
+  else bad('index.js 没有显式 mode 分流 —— 又会变成"传了 mention 就偷偷换路"，调用方不知道自己在走哪条')
+
+  // api 模式不许带 mention（要真 @ 必须显式选 ui）
+  if (/mode === 'api' && mentionName/.test(idx) && /mention-in-api-mode/.test(idx)) {
+    ok('mode=api 传了 mention_name 会明确拒绝（并告诉他改用 mode:ui）')
+  } else bad('mode=api 传 mention 时不报错 —— 会静默发成"看着像 @"的普通评论')
+
+  // ui 模式不许带 comment_id（真 @ 只能顶层 —— 避免又回到"先找评论"的死锁）
+  if (/mode === 'ui' && replyTo/.test(idx) && /reply-in-ui-mode/.test(idx)) {
+    ok('mode=ui 传了 comment_id 会明确拒绝（真 @ 只能顶层，不依赖找评论）')
+  } else bad('mode=ui 允许指定 comment_id —— 又回到"必须先找到目标评论"的死锁')
+
+  // 发送闸 / 限流退避 / 三态回读（2026-10-23 实测：连发 3 条后 403）
+  if (/const sendGate = async/.test(idx) && /blockedUntil/.test(idx)) ok('有本地发送闸 + 限流退避（防连发 403）')
+  else bad('没有发送闸 —— 连发会被抖音 403，而且越重试封越久')
+  if (/const readbackAfter = async/.test(idx) && /state: 'pending'/.test(idx)) ok('回读是三态（visible / pending），不谎报成功也不谎报失败')
+  else bad('回读只会 found/not found —— 分不清"还在审核"和"真没发出去"')
+
+  /**
+   * ⭐⭐ 2026-10-23 **判断规则**（主人连着问了两次，前两版都想错了）
+   *    唯一判据 = 有没有对话对象（有 comment_id）。
+   *    这里守三条，防止以后又被改回"回人就 @":
+   */
+  // ① 有 comment_id + mode=api 时，工具描述必须引导"不需要 @"
+  if (/有 comment_id（要回某条评论）⇒ 用 mode:api/.test(idx)) ok('工具描述写明了：有 comment_id ⇒ 用 api，不要用 @')
+  else bad('工具描述没写明「有 comment_id 就用 api」—— 提示词会把调用方又推去发 @ 顶层')
+  // ② 拒绝文案里必须引导"直接回复"，而不是教他发顶层
+  if (/你已经有 comment_id 了 ⇒ \*\*不需要 @\*\*/.test(idx)) ok('拒绝文案引导"直接回复就行，不用 @"（不把人往顶层推）')
+  else bad('拒绝文案没引导直接回复 —— 调用方会以为"要通知人只能用 @"')
+  // ③ 值班轮的 commentAtMe 必须用 mode=ui（推视频、没有评论可回），且写明"这是 @ 唯一该用的场景"
+  if (/这是 @ 唯一该用的场景/.test(idx)) ok('值班轮提示词写明：推视频（无评论可回）才用 @')
+  else bad('值班轮提示词没说清"什么时候该用 @"—— 模型可能拿 @ 去回复人')
+  // ④ at-me 自动回复脚本必须走 api 直接回复（不是 UI 点选）
+  const atw = (() => { try { return readFileSync(join(here, 'tools', 'at-me-watch.mjs'), 'utf8') } catch { return '' } })()
+  if (atw && /runNode\('comment-api\.mjs'/.test(atw) && /--reply/.test(atw)) ok('at-me-watch 用 api 直接回复（1 秒、拿得到 cid）')
+  else if (atw) bad('at-me-watch 还在走 UI 点选 —— 慢、拿不到 cid（今天 6 条垃圾就删不掉）')
+  if (atw && /rate_limited: true/.test(atw)) ok('at-me-watch 撞 403 会停下，不重试')
+  else if (atw) bad('at-me-watch 撞 403 还在继续发 —— 会封更久')
 
   // UI 路径现在**支持**"回复某条 + 真 @"（2026-10-22 加：先点那条评论的「回复」再 @ 点选）
-  if (/--reply-cid/.test(idx) && /--reply-cid/.test(ui)) ok('支持「回复某条 + 真 @」（UI 点「回复」再 @ 点选）')
-  else bad('不支持"回复某条 + 真 @" —— 用户要回评论区 @ 我的人时只能发顶层')
+  if (/--reply-cid/.test(ui) && /--reply-text/.test(ui)) ok('UI 脚本支持按 cid 或正文片段定位目标评论')
+  else bad('UI 脚本定位目标评论的方式丢了')
   // 但若某版本不支持，必须有明确报错而不是默默发顶层
   if (/reply_target_not_found|reply_button_not_found/.test(ui)) ok('找不到目标评论/回复按钮时会明确失败（不默默改成发顶层）')
   else bad('找不到目标评论时没有明确失败 —— 可能默默发成顶层，用户以为回复了')

@@ -574,6 +574,116 @@ export function apply(ctx, config) {
     try { return JSON.parse(t.slice(i, j + 1)) } catch { return null }
   }
 
+  /**
+   * ⭐⭐ 2026-10-23 新增：**发送闸 / 限流退避 / 三态回读**
+   *    起因：主人问「回评论用什么方案比较快」，一量才发现三个真问题 ——
+   *    ① 连发 3 条评论后 API 直接 **403**（抖音限流），原来代码只会把 403 当普通失败返回，
+   *       调用方一看失败就重试 ⇒ 越重试封得越久。
+   *    ② 发完看不见：带 @ 的评论进审核，DOM 翻 222 条 / API 翻 80 条都读不到，
+   *       原来直接写 `found:false` 就完事，看不出是"还在审核"还是"真没发出去"。
+   *    ③ 两条通道（api 快但假 @、ui 真 @ 但慢）混在一个工具里，调用方不知道自己在走哪条。
+   *    ⇒ 这里给前三样补上：全局最小间隔、403 退避窗口、回读三态。
+   */
+  const sendGateFile = join(stateDir, 'send-gate.json')
+  /** 两条通道的最小间隔（秒）—— api 快但更容易撞限流，给宽一点 */
+  const MIN_GAP = { api: 45, ui: 20 }
+
+  const sendGate = async (dir, mode) => {
+    const st = readJson(sendGateFile, {}) || {}
+    const now = Date.now()
+    const blockedUntil = Number(st.blockedUntil) || 0
+    if (now < blockedUntil) {
+      return {
+        ok: false, reason: 'cooldown',
+        waitSec: Math.ceil((blockedUntil - now) / 1000),
+        note: `上次撞了限流，冷却中（到 ${new Date(blockedUntil).toLocaleTimeString('zh-CN')}）`,
+      }
+    }
+    /**
+     * 🔴 闸按**两条通道各自的间隔**算，但也要算"另一条通道刚发过"——
+     *    抖音的风控看的是**这个号在评论区发言的频率**，不分 api/ui。
+     *    所以取 max(本通道间隔, 跨通道最小间隔 15 秒)。
+     */
+    const lastSame = Number(st[`last_${mode}`]) || 0
+    const lastAny = Math.max(Number(st.last_api) || 0, Number(st.last_ui) || 0)
+    const gapSame = (MIN_GAP[mode] || 30) * 1000
+    const gapAny = 15_000
+    const sinceSame = now - lastSame
+    const sinceAny = now - lastAny
+    if (lastSame && sinceSame < gapSame) {
+      return {
+        ok: false, reason: 'too-fast', mode,
+        waitSec: Math.ceil((gapSame - sinceSame) / 1000),
+        lastSec: Math.round(sinceSame / 1000),
+        note: `mode=${mode} 的最小间隔是 ${MIN_GAP[mode]} 秒，上次才过 ${Math.round(sinceSame / 1000)} 秒`,
+      }
+    }
+    if (lastAny && sinceAny < gapAny) {
+      return {
+        ok: false, reason: 'too-fast-any',
+        waitSec: Math.ceil((gapAny - sinceAny) / 1000),
+        lastSec: Math.round(sinceAny / 1000),
+        note: `刚用另一条通道发过（${Math.round(sinceAny / 1000)} 秒前），跨通道也要隔 ${gapAny / 1000} 秒`,
+      }
+    }
+    return { ok: true }
+  }
+  /** 记一条"刚发过" —— **只更新本通道的时间戳**（以前两个都写，等于把另一条通道的间隔也重置了） */
+  const markSent = (dir, mode = 'api') => {
+    try {
+      const st = readJson(sendGateFile, {}) || {}
+      st[`last_${mode}`] = Date.now()
+      st.lastMode = mode
+      st.lastAt = new Date().toISOString()
+      writeFileSync(sendGateFile, JSON.stringify(st, null, 2), 'utf8')
+    } catch { /* 记不上不影响发 */ }
+  }
+  /** 撞限流：设一个冷却窗口，期间所有发送都直接拒 */
+  const bumpBlock = (dir, minutes = 10) => {
+    try {
+      const st = readJson(sendGateFile, {}) || {}
+      st.blockedUntil = Date.now() + minutes * 60_000
+      st.blockedAt = new Date().toISOString()
+      writeFileSync(sendGateFile, JSON.stringify(st, null, 2), 'utf8')
+    } catch { /* 记不上不影响 */ }
+  }
+
+  /**
+   * 三态回读：**别再只说 found / not found**。
+   *   visible   —— 评论区里真的刷到了（按 cid 或正文片段）
+   *   pending   —— 刷不到，但很可能只是审核/延迟（如实报，不谎报成功也不谎报失败）
+   *   unknown   —— 回读本身失败了（工具挂了），更不能当成"没发出去"
+   */
+  const readbackAfter = async (dir, aweme, { text = '', cid = '' } = {}) => {
+    const tries = 3
+    for (let i = 0; i < tries; i++) {
+      await new Promise((done) => setTimeout(done, 2000))
+      try {
+        // ① 有 cid 就按 cid 查（最准）
+        if (cid) {
+          const cr = runPy('api-comments.py', [aweme], { timeout: 300_000 })
+          const out = String(cr.stdout || '')
+          if (out.includes(cid)) return { state: 'visible', by: 'cid', cid, attempt: i + 1 }
+        }
+        // ② 没 cid（UI 路径）或 cid 没查到 ⇒ 按正文片段查 DOM（页面默认按最新渲染）
+        if (text) {
+          const dr = runNodeTool('comment-read-dom.mjs', ['--aweme', aweme, '--mine', '--scroll', '6'], { timeout: 200_000 })
+          const j = pickJson(dr.stdout)
+          const needle = String(text).slice(0, 12)
+          const items = Array.isArray(j?.items) ? j.items : []
+          if (items.some((x) => String(x.text || '').includes(needle))) {
+            return { state: 'visible', by: 'dom', attempt: i + 1 }
+          }
+        }
+      } catch { /* 这一轮回读挂了，继续试 */ }
+    }
+    return {
+      state: 'pending', by: cid ? 'cid+dom' : 'dom',
+      note: '评论区里还没刷到这条（带 @ 的评论常进审核）。**这不代表没发出去** —— 报告里写「已提交，未在评论区核实到」',
+    }
+  }
+
+
   tool({
     name: 'douyin_doctor',
     description: '⭐ **环境体检**（换台设备 / 装完插件第一件事就跑它）：家目录、Python、venv、Cookie、'
@@ -990,17 +1100,59 @@ export function apply(ctx, config) {
 
   tool({
     name: 'douyin_comment_reply',
-    description: '⭐ 在抖音评论区发言 / 回复某条评论 —— **一条 fetch 就发出去**：'
-      + '不点开评论面板、不滚视口、**也不会弹短信验证**（点 UI 那条路一定会弹，实测过）。'
-      + '传 comment_id 就是回复那条评论；不传就是发一条顶层评论。'
-      + '配合 douyin_notices 用：它返回的 comment_id 就是这里的 comment_id。',
+    /**
+     * ⭐⭐ 2026-10-23 **重新设计**（主人：「回评论好像还有问题，要不要重新设计一下」）
+     *
+     * 老设计的三个坑（全部实测过）：
+     *   ① 一个工具两副面孔：传了 mention_* 就偷偷走 UI 点选，不传就走 API ——
+     *      调用方根本不知道自己走的是哪条、会不会真 @、要不要等 30 秒。
+     *   ② 「真 @」依赖「先找到目标评论」：`--reply-cid` 遍历 React fiber
+     *      （撞循环引用直接抛异常），改按正文找又要评论已渲染（80+ 条就找不到）。
+     *      两条路一死，真 @ 就发不出去。
+     *   ③ 发完看不见：带 @ 的评论进审核，DOM 翻 200 多条也读不到 ⇒ 无法确认、无法拿 cid 删。
+     *
+     * 新设计：**把 mode 摆到明面上**，两条通道各司其职，谁也不偷偷降级。
+     *   mode=api（默认）：回复楼层 / 发普通评论。**1 秒**，对方收到「回复了我的评论」通知，
+     *                     正文里的 @昵称 只是文字（不是真 @）。
+     *   mode=ui        ：**真 @**（名字可点、对方收到 @ 通知）。只能发**顶层评论**，
+     *                     因为顶层不需要先找到任何评论 —— 这样彻底躲开"找不到评论"的死锁。
+     *                     慢（20-40 秒），要 Chrome。
+     *
+     * ⭐⭐ 2026-10-23 **判断规则定稿**（主人连着问了两次，我前两版都想错了）：
+     *
+     *   唯一判据 = **有没有"对话对象"**（对方留下过一条具体评论、我拿得到它的 cid）
+     *
+     *     有对话对象  ⇒ mode=api + comment_id（**直接回复**）
+     *     没有对话对象 ⇒ mode=ui（@ 顶层，只能用于"我主动推东西给他"）
+     *     楼中楼满 20 条 ⇒ **跳过，不管**（别换通道硬塞，那样既刷屏又把通知降级）
+     *
+     *   为什么"直接回复"更强（这是之前一直搞反的地方）：
+     *     · 通知落「**回复我的**」流，绑定在那条评论上，点进去有上下文
+     *     · @ 落「@我的」流，只是一句孤零零的话，对方不知道你在回他哪句
+     *     · 楼中楼位置永久固定；@ 顶层热度 0，很快沉底（他自己都翻不到）
+     *     · api 1 秒 + 拿得到 cid（可回读、可删除）；ui 20-40 秒 + 拿不到 cid（删不掉）
+     *
+     *   ⚠️ 曾经想过「顶层评论能让所有人看到，所以某些场景要用 ui」——
+     *      **这个场景不存在**：本插件是给一个人用的（推视频/回话），"公开"不是目的，
+     *      是抖音没有"只通知一个人"的顶层评论这一事实带来的副作用。
+     */
+    description: '在抖音评论区发言 / 回复某条评论。'
+      + '⭐ **有 comment_id（要回某条评论）⇒ 用 mode:api，不要用 @**：'
+      + '1 秒发出，对方收到「回复了我的评论」通知（比 @ 通知更强：绑定在那条评论上、有上下文、位置永久固定）。'
+      + '⭐ **没有 comment_id（我主动推东西给使用者、他没留下可回的评论）⇒ 才用 mode:ui**：'
+      + '真 @ 顶层评论，慢 20-40 秒、要 Chrome、拿不到 cid（删不掉）。'
+      + '⚠️ 楼中楼满 20 条就跳过，别换通道硬塞。'
+      + '配合 douyin_notices 用：它返回的 comment_id 就是 mode=api 的 comment_id。',
     parameters: {
       aweme_id: { type: 'string', description: '作品/图文 id（douyin_notices 返回的 aweme_id）' },
-      text: { type: 'string', description: '评论正文（≤500 字）' },
-      comment_id: { type: 'string', description: '要回复的评论 cid；留空 = 发顶层评论' },
-      mention_name: { type: 'string', description: '要真 @ 的昵称（正文里必须原样出现「@昵称」；不传 = 当普通文字）' },
-      mention_uid: { type: 'string', description: '被 @ 人的 uid —— 🔴 必须是**被 @ 人自己的**（从他的评论 user.uid 或主页接口拿，形如 11-1234567890）。⚠️ 别拿 account.json 的 me.uid —— 那是登录号自己，填了 @ 就变成 @ 自己（2026-10-21 踩过：点了名字进的是登录号自己的主页）' },
-      mention_secuid: { type: 'string', description: '被 @ 人的 sec_uid（真 @ 必须给）' },
+      text: { type: 'string', description: '评论正文（≤500 字）。mode=ui 时**不要自己写 @昵称**，工具会自动加' },
+      mode: {
+        type: 'string',
+        description: 'api = 快（回复/普通评论，@ 是文字）｜ui = 真 @（顶层评论，慢）。不传 = api',
+      },
+      comment_id: { type: 'string', description: '要回复的评论 cid（**只有 mode=api 支持**）；留空 = 发顶层评论' },
+      mention_name: { type: 'string', description: '【mode=ui 必填】要真 @ 的昵称（必须和对方昵称完全一致）' },
+      mention_uid: { type: 'string', description: '【可选】被 @ 人的 uid，用于拦「@ 自己」；不给就不拦' },
       confirm: { type: 'boolean', description: '🔴 必须由用户当场同意后传 true，否则只回草稿不发送' },
     },
     async execute(args = {}) {
@@ -1009,98 +1161,133 @@ export function apply(ctx, config) {
       const replyTo = String(args.comment_id || '').trim()
       const mentionName = String(args.mention_name || '').trim()
       const mentionUid = String(args.mention_uid || '').trim()
-      const mentionSecUid = String(args.mention_secuid || '').trim()
+      const mode = String(args.mode || 'api').trim().toLowerCase()
       if (!aweme) return { ok: false, error: '缺 aweme_id', hint: '先 douyin_notices 拿到 aweme_id' }
       if (!text) return { ok: false, error: '正文是空的' }
       if (text.length > 500) return { ok: false, error: `正文太长（${text.length} 字），抖音评论放不下` }
+      if (mode !== 'api' && mode !== 'ui') return { ok: false, error: `mode 只能是 api 或 ui（收到 ${mode}）` }
+
+      /**
+       * 🔴 两条通道的**硬约束**（别让调用方踩空）：
+       *   api 不支持真 @ —— 直接拒，别静默降级成"看着像 @ 的文字"
+       *   ui  不支持回复楼层 —— 真 @ 只能顶层（否则又回到"先找评论"的死锁）
+       */
+      if (mode === 'api' && mentionName) {
+        return {
+          ok: false, unsupported: 'mention-in-api-mode',
+          error: 'mode=api 发不了真 @（API 直发时服务端会剥掉 sec_uid：名字变蓝但对方收不到通知）',
+          /**
+           * ⭐ 2026-10-23 改提示：**先引导"根本不需要 @"**。
+           *    以前这里教人"要真 @ 就用 ui"，等于把调用方往更差的那条路上推 ——
+           *    如果他有 comment_id，直接回复就够了，通知还更强。
+           */
+          fix: replyTo
+            ? '⭐ 你已经有 comment_id 了 ⇒ **不需要 @**：去掉 mention_name、直接用 mode:"api" + comment_id 回复他，'
+              + '对方会收到「回复了我的评论」通知（绑定在那条评论上、有上下文、比 @ 通知更强，而且 1 秒就发出、拿得到 cid）'
+            : '没有 comment_id 才需要 @：用 mode:"ui"（慢 20-40 秒，只能发顶层评论）',
+        }
+      }
+      if (mode === 'ui' && replyTo) {
+        return {
+          ok: false, unsupported: 'reply-in-ui-mode',
+          error: 'mode=ui 不能指定 comment_id（真 @ 只能发顶层评论）',
+          fix: '⭐ 有 comment_id 就直接回复，**不要用 @**：改成 mode:"api" + comment_id，'
+            + '对方收到「回复了我的评论」通知，1 秒发出、位置永久固定在楼里、还拿得到 cid 可以回读和删除。'
+            + '只有"我主动推东西、他没有评论可回"时才用 mode:"ui"。',
+        }
+      }
+      if (mode === 'ui' && !mentionName) return { ok: false, error: 'mode=ui 必须给 mention_name（要 @ 谁）' }
+      /**
+       * ⭐ 主动提醒（不拦）：有 comment_id 却选了 ui —— 上面已经拦了；
+       *    这里反过来：**没有 comment_id 却想"回复"** —— 提醒他 mode=api 会发成顶层普通评论，
+       *    不会通知任何人。别让他以为"发出去就有人收到"。
+       */
+      if (mode === 'api' && !replyTo) {
+        // 顶层普通评论：没人会收到通知。只在草稿/结果里标注，不拦（有时就是要发顶层）。
+      }
+
       // 🔴 用户闸
       if (args.confirm !== true) {
         return {
-          ok: true, sent: false, needsConfirm: true,
+          ok: true, sent: false, needsConfirm: true, mode,
           aweme_id: aweme, comment_id: replyTo || '(顶层评论)',
-          draft: text, len: text.length,
+          mention: mentionName || undefined,
+          draft: mode === 'ui' ? `@${mentionName} ${text}` : text, len: text.length,
+          eta: mode === 'ui' ? '约 20-40 秒（要起无头 Chrome 点选）' : '约 1 秒',
           note: '没发送 —— 先把这段给用户看，他点头后再用 confirm:true 调一次',
         }
       }
-      const argv = ['--aweme', aweme, '--text', text]
-      if (replyTo) argv.push('--reply', replyTo)
-      /**
-       * 🔴 2026-10-22 修的真 bug：真 @ 必须走**UI 点选**（API 会剥掉 sec_uid）。
-       *    老代码把 `--mention-name/--mention-uid/--mention-secuid` 传给 `comment-api.mjs`，
-       *    可那个脚本**根本不认这三个参数** —— 于是一路静默忽略，发出去的是**普通评论**：
-       *    名字不变蓝、对方收不到通知，而工具还报成功了。主人 2026-10-21 实测过这个坑。
-       *    唯一有效的 `comment-mention-ui.mjs` 在 index.js 里**从来没被调用过**。
-       *    ⇒ 现在按"有没有 mention"分流：
-       *        有 → comment-mention-ui.mjs（真点选，保 sec_uid）
-       *        没有 → comment-api.mjs（一条 fetch，快、不弹验证）
-       */
-      const wantMention = Boolean(mentionName && mentionUid && mentionSecUid)
-      if (wantMention) {
-        // 宿主自己的登录 uid 懒加载一次，用来拦「@ 自己」
+
+      /* ── ① 全局发送闸：防连发被限流（今天连发 3 条后 API 直接 403） ── */
+      const gate = await sendGate(stateDir, mode)
+      if (!gate.ok) {
+        return {
+          ok: false, error: '发送太密，被本地闸拦下了', wait_sec: gate.waitSec,
+          hint: `上一轮发送在 ${gate.lastSec} 秒前。抖音对连发很敏感（实测连发 3 条后 403）。`
+            + `等 ${gate.waitSec} 秒再试，或者干脆攒一批、隔几分钟发。`,
+        }
+      }
+
+      /* ── ② mode=ui：真 @（顶层评论，不找任何目标 ⇒ 没有死锁） ── */
+      if (mode === 'ui') {
         if (!selfUidCache) {
           const g = runPy('session-guard.py', ['check'], { timeout: 90_000 })
           const j = pickJson(g.stdout)
           if (j?.uid) selfUidCache = String(j.uid)
         }
-        if (selfUidCache && String(mentionUid) === selfUidCache) {
-          return { ok: false, error: `mention_uid=${mentionUid} 是登录号自己的 uid —— 这是 @ 自己。要 @ 谁，就从他的评论 user.uid 或主页接口拿 uid（别人的形如 11-1234567890）` }
+        if (mentionUid && selfUidCache && String(mentionUid) === selfUidCache) {
+          return { ok: false, error: `mention_uid=${mentionUid} 是登录号自己的 uid —— 这是 @ 自己` }
         }
-        if (!text.includes('@' + mentionName)) {
-          return { ok: false, error: `正文里没有「@${mentionName}」原样出现 —— 真 @ 需要正文带这个 token，或去掉 mention_* 参数发普通评论` }
-        }
-        /**
-         * ⭐ 有 replyTo 就走「回复某条 + @」：脚本会先点那条评论的「回复」再 @ 点选。
-         *    这是 2026-10-22 新加的能力 —— 之前只能发顶层评论。
-         */
         const mArgs = ['--aweme', aweme, '--name', mentionName, '--text', text]
-        if (replyTo) mArgs.push('--reply-cid', replyTo)
         const mr = runNodeTool('comment-mention-ui.mjs', mArgs, { timeout: 300_000 })
         const mres = pickJson(mr.stdout)
         if (!mres) {
-          return { ok: false, error: '真 @ 执行器没返回可解析结果', stdout: String(mr.stdout || '').slice(0, 400), stderr: String(mr.stderr || '').slice(0, 300) }
+          return { ok: false, mode, error: '真 @ 执行器没返回可解析结果', stdout: String(mr.stdout || '').slice(0, 400), stderr: String(mr.stderr || '').slice(0, 300) }
         }
+        markSent(stateDir, 'ui')
         if (mres.ok) {
-          log(`comment-mention-ui -> ${aweme}/${replyTo || 'top'}: 真 @${mentionName} 已发布（UI 点选）`)
-          // ⭐ 发成功 = 这条 @ 处理过了，标 seen（避免面板里永远显示"没回过"）
+          log(`comment-mention-ui -> ${aweme}: 真 @${mentionName} 已发布（UI 点选）`)
           try {
             noteMyComment(stateDir, aweme, { text, mention: mentionName })
             if (replyTo) markSeen(stateDir, aweme, [replyTo])
           } catch { /* 记不上不影响发 */ }
-          // UI 路径拿不到 cid（没走接口）⇒ 回读用「正文片段」找，别装作有 cid
-          let readback = null
-          try {
-            await new Promise((r) => setTimeout(r, 2500))
-            const cr = runNodeTool('comment-read-dom.mjs', ['--aweme', aweme, '--mine', '--scroll', '4'], { timeout: 200_000 })
-            const txt = String(cr.stdout || '')
-            readback = { found: txt.includes(text.slice(0, 12)), by: 'comment-read-dom（按正文片段找）', scanned_chars: txt.length }
-          } catch { readback = { found: false, by: 'comment-read-dom', note: '回读失败（不影响已发出的事实）' } }
-          return { ...mres, mention_verified: true, readback, note: '真 @ 走的是 UI 点选，sec_uid 保住了（对方会收到通知）' }
         }
-        return { ...mres, mention_verified: false }
+        const readback = await readbackAfter(stateDir, aweme, { text, cid: '' })
+        return {
+          ...mres, mode, mention_verified: Boolean(mres.ok), readback,
+          note: mres.ok
+            ? '真 @ 走的是 UI 点选，sec_uid 保住了（对方会收到通知）。⚠️ UI 路径**拿不到 cid**，所以删不掉也查不到，回读只能按正文片段找'
+            : undefined,
+        }
       }
+
+      /* ── ③ mode=api：回复楼层 / 普通评论（快，@ 是文字） ── */
+      const argv = ['--aweme', aweme, '--text', text]
+      if (replyTo) argv.push('--reply', replyTo)
       const r = runNodeTool('comment-api.mjs', argv, { timeout: 200_000 })
       const res = pickJson(r.stdout)
-      if (!res) return { ok: false, error: '发送器没返回可解析结果', stdout: r.stdout.slice(0, 400), stderr: r.stderr.slice(0, 400) }
-      // ⭐ 记进评论区记忆（谁在什么视频下说了什么）
-      if (res.ok) {
-        try { noteMyComment(stateDir, aweme, { cid: res.cid || '', text, mention: mentionName }) } catch { /* 记不上不影响发 */ }
-      }
-      // ⭐ 回读：接口 200 + 给了 cid 只说明**服务端收下了**，不代表它出现在评论区里。
-      //    再拉一遍评论，看这个 cid 在不在。
-      //    ⚠️ 拉不到**不算失败** —— 新评论有审核/延迟，用"未核实"如实说，别谎报成功也别谎报失败。
-      let readback = null
-      if (res.ok && res.cid) {
-        for (let i = 0; i < 3; i++) {
-          await new Promise((done) => setTimeout(done, 1800))
-          const cr = runPy('api-comments.py', [aweme], { timeout: 300_000 })
-          const txt = String(cr.stdout || '')
-          readback = { found: txt.includes(String(res.cid)), cid: String(res.cid), scanned: (txt.match(/cid=/g) || []).length, attempt: i + 1 }
-          if (readback.found) break
+      if (!res) return { ok: false, mode, error: '发送器没返回可解析结果', stdout: r.stdout.slice(0, 400), stderr: r.stderr.slice(0, 400) }
+
+      /**
+       * 🔴 403 = 被限流。这是今天新踩的坑：连发几条之后 API 直接 403。
+       *    要**明确告诉调用方"等一会儿"**，而不是让它重试（重试只会更糟）。
+       */
+      if (res.http === 403 || /403|Forbidden/i.test(String(res.error || res.head || ''))) {
+        bumpBlock(stateDir, 10)
+        return {
+          ok: false, mode, rate_limited: true, ...res,
+          hint: '抖音限流了（403）。**别重试** —— 至少等 10 分钟。'
+            + '连发评论会被判定异常，再发只会更久。',
         }
-        if (!readback.found) readback.note = '评论区里还没刷到这条（审核或延迟），不代表没发出去 —— 报告里写「已提交，未在评论区核实到」'
       }
-      if (res.ok) log(`comment-reply -> ${aweme}/${replyTo || 'top'}: cid=${res.cid}，回读${readback && readback.found ? '已确认在评论区' : '未核实'}`)
-      return readback ? { ...res, readback } : res
+
+      markSent(stateDir, 'api')
+      if (res.ok) {
+        try { noteMyComment(stateDir, aweme, { cid: res.cid || '', text }) } catch { /* 记不上不影响发 */ }
+      }
+      const readback = res.ok ? await readbackAfter(stateDir, aweme, { text, cid: String(res.cid || '') }) : null
+      if (res.ok) log(`comment-reply(api) -> ${aweme}/${replyTo || 'top'}: cid=${res.cid}，回读=${readback?.state || '?'}`)
+      return { ...res, mode, readback }
     },
   })
 
@@ -1169,7 +1356,9 @@ export function apply(ctx, config) {
       shown: out.length,
       list: out,
       hint: out.length
-        ? '要回的话：douyin_comment_reply { aweme_id, comment_id, text }，先给用户看草稿'
+        ? '要回的话：douyin_comment_reply { aweme_id, comment_id, text, mode:"api" }，先给用户看草稿。'
+          + '⭐ 回某人一律用 mode:"api"（直接回复）—— 他会收到「回复了我的评论」通知，'
+          + '比 @ 通知更强、1 秒发出、拿得到 cid。**不要用 @ 去"回复"人**。'
         : (ats.length ? '这些 @ 都回过了（加 include_seen:true 可以再看一遍）' : '最近没有新的 @'),
     }
   }
@@ -1178,7 +1367,9 @@ export function apply(ctx, config) {
     name: 'douyin_at_me',
     description: '⭐ **别人在评论区 @ 了我** —— 一次把「谁 @ 的 / 在哪个视频 / 说了什么 / 我回过没有」整理好，'
       + '带上记忆上下文，方便决定回不回。只读，不发任何东西。'
-      + '想回的时候用返回里的 aweme_id + comment_id 调 douyin_comment_reply。',
+      + '⭐ 要回：用返回里的 aweme_id + comment_id 调 douyin_comment_reply（mode:"api"）—— '
+      + '**有 comment_id 就直接回复，不要用 @**：对方收到「回复了我的评论」通知，'
+      + '绑定在那条评论上、有上下文、位置永久固定在楼里，1 秒发出还拿得到 cid。',
     parameters: {
       limit: { type: 'number', description: '最多看几条（默认 10，最多 30）' },
       include_seen: { type: 'boolean', description: '连已经回过的也列出来（默认 false，只看新的）' },
@@ -1419,6 +1610,11 @@ export function apply(ctx, config) {
   const dutyStateFile = join(stateDir, 'state.json')
   // 登录号自己的 uid（懒加载缓存）—— 用于拦「@ 自己」
   let selfUidCache = ''
+
+
+
+
+
   /**
    * ⭐ 跨天翻篇：插件可能连续挂好几天，`state.json` 的 day 不该停在旧日期。
    *    只重置**按天算的计数**（轮数 / 挑了几条 / 谷时窗口），
@@ -1899,6 +2095,12 @@ export function apply(ctx, config) {
            * ⭐⭐ 「在评论区 @ 你」—— 用户 2026-10-22 要求。
            *    这一轮挑到值得看的视频后，去那个视频的评论区发一条 @ 使用者本人的评论。
            *    前提：autoSend 开着 + commentAtMe 开着 + 知道要 @ 谁。
+           *
+           * ⭐ 2026-10-23 判断规则定稿（主人连着问了两次，前两版都想错了）：
+           *    这个功能是**主动推东西**给使用者 —— 那个视频下面**没有他的评论可回**
+           *    ⇒ 属于"没有对话对象"，所以用 @ 顶层是**正确的**。
+           *    但「有人 @ 我，回他」是另一回事：有 comment_id ⇒ 必须**直接回复**，不许用 @。
+           *    规则一句话：**有评论可回就回复，没评论可回才 @。**
            */
           (cfg.commentAtMe
             ? (() => {
@@ -1908,17 +2110,19 @@ export function apply(ctx, config) {
                   + ` ⇒ 这一轮**跳过 @ 评论**，只写报告。`
               }
               return `🔴 **「在评论区 @ 你」开着 —— 这是这一轮的重点任务**：\n`
+                + `   ⭐ 为什么这里用 @ 而不是"直接回复"：这个视频下面**没有他的评论可回**，\n`
+                + `      只能靠 @ 通知把他叫过来。这是 @ 唯一该用的场景。\n`
                 + `   挑到**最值得的那 1 条**（只挑 1 条，别贪）之后：\n`
-                + `   ① 调 \`douyin_comment_mention\`（**真 @ 工具**，UI 点选，会起无头 Chrome，约 20-40 秒），参数：\n`
+                + `   ① 调 \`douyin_comment_reply\`，**mode = "ui"**（真 @，UI 点选，会起无头 Chrome，约 20-40 秒），参数：\n`
                 + `      - aweme_id = 那条视频的 ID\n`
-                + `      - name = "${who}"（**必须和对方昵称完全一致**）\n`
+                + `      - mode = "ui"\n`
+                + `      - mention_name = "${who}"（**必须和对方昵称完全一致**）\n`
                 + `      - text = 一句 20-60 字的话（**不要自己写 @${who}**，工具会自动加这个 mention）\n`
                 + `      - confirm = true（自动跑，不用再问）\n`
-                + `      ⚠️ 如果工具返回 \`@ 弹层里没找到这个名字\` ⇒ 改调 \`douyin_comment_reply\` 发**普通评论**\n`
-                + `        （正文以「@${who} 」开头），并在报告里写明「真 @ 没成，发的是普通评论」。\n`
-                + `      ⚠️ 千万**不要**用 \`douyin_comment_reply\` 假装真 @ —— API 直发会被服务端剥掉 sec_uid，对方收不到通知。\n`
+                + `      ⚠️ 如果返回 \`@ 弹层里没找到这个名字\` ⇒ 这一轮**放弃 @**，在报告里写明\n`
+                + `        「真 @ 没成（昵称搜不到）」—— **不要**改成发普通评论凑数（那是刷屏）。\n`
                 + `   ② 评论内容像这样：「这条我觉得你会喜欢 —— <一句话理由>」\n`
-                + `   ③ 发完在报告里写一行「已在评论区 @ 你：<视频ID>」（真 @ 成功）或「已发普通评论（真 @ 未成）：<视频ID>」\n`
+                + `   ③ 发完在报告里写一行「已在评论区 @ 你：<视频ID>」\n`
                 + `   ⚠️ 只在**最值得的那一条**发，不要每条都发（会被当成刷屏）。`
             })()
             : `📝 「在评论区 @ 你」：关着，不要发这类评论。`),
