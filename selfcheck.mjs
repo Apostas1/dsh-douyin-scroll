@@ -86,6 +86,76 @@ try {
   else ok('没有退回用 isMyMessage 判发送方')
 } catch (e) { bad(`读不了 tools/im-send.mjs：${e.message}`) }
 
+/* ── ⭐ 4b-2. 私信「发给谁」三道闸（2026-10-23 修的三处发错人 bug） ──
+ *
+ * 起因：这三处全是"工具报成功、实际发错人"的静默错误。
+ *   ① already-open 判断用整个 bodyText ⇒ 左侧列表里任何人都在里面，
+ *      只要界面开着**任何**一个会话，就会把当前那个人的 id 当成目标返回。
+ *      实测：界面开着「枫眠」+ 发给「某帅气用户」（只给昵称）
+ *            ⇒ ok:true, to:"某帅气用户", to_sec_uid:枫眠的 id。
+ *   ② 昵称用 text.includes 匹配 ⇒「大肥鱼」（没有任何人叫这个）命中 3 个人。
+ *   ③ 会话项被平移到屏外（left<0）时，点击**毫无反应也不报错**，
+ *      然后拿旧会话的 id 去校验 ⇒ 假装切换成功。
+ *
+ * 这三条只要有一条被改回去，就会重新出现"私信发给陌生人"。
+ */
+console.log('\n4b-2. 私信「发给谁」三道闸')
+try {
+  const s = readFileSync(join(here, 'tools', 'im-send.mjs'), 'utf8')
+
+  // ① 不许再用整个页面文本判"已打开"
+  //    ⚠️ 断言要看**代码**，别被注释里的同名字样误伤：
+  //       所以先剥掉注释，再找真正会被执行的那一句。
+  const sCode = s
+    .replace(/\/\*[\s\S]*?\*\//g, '')          // 块注释
+    .replace(/^[ \t]*\/\/.*$/gm, '')            // 整行行注释
+    .replace(/([^:'"`])\/\/[^\n]*/g, '$1')      // 行尾注释（避开 https:// 这类）
+  /**
+   * 危险写法只有这两种（其余的 includes 是"只给提示、不自动选"的合法用途）：
+   *   ① `else if (who && t.includes(who))` —— 用整个 bodyText 判"已打开"
+   *   ② `hits = list.filter(c => c.text.includes(who))` —— 把模糊命中直接当收件人
+   * 只禁这两种，别一棍子打死（nearMisses 那种提示是故意的）。
+   */
+  const dangerousBodyText = /who\s*&&\s*t\.includes\(who\)/.test(sCode)
+  const dangerousHits = /hits\s*=\s*list\.filter\(\(c\)\s*=>\s*c\.text\.includes\(who\)\)/.test(sCode)
+  if (dangerousBodyText) {
+    bad('openConversation 又用 bodyText/includes 判断「已经打开」了 —— 会把消息发进当前那个人的会话')
+  } else if (dangerousHits) {
+    bad('昵称匹配又把 text.includes 的结果直接当收件人了 —— 会认错人')
+  } else if (/const cur = await currentWho\(\)/.test(sCode)) {
+    ok('「已打开」靠右栏头部精确比对（不再用整个页面文本）')
+  } else {
+    bad('openConversation 里找不到「右栏头部」判据 —— 没法确认当前会话到底是谁')
+  }
+
+  // ② 昵称匹配不许直接把 includes 的结果当成命中
+  if (/hits = list\.filter\(\(c\) => c\.text\.includes\(who\)\)\s*\n\s*how =/.test(s)) {
+    bad('昵称匹配又用 text.includes 直接命中了 ——「大肥鱼」会匹配到别人')
+  } else if (/hits = list\.filter\(\(c\) => c\.nick === who\)/.test(s)) {
+    ok('昵称先精确比对（c.nick === who）')
+  } else {
+    bad('昵称匹配没有精确比对 —— 会认错人')
+  }
+  if (/near_misses/.test(s)) ok('模糊命中只当提示（near_misses），不自动选')
+  else bad('没有 near_misses —— 模糊命中会被当成真命中')
+
+  // ③ 屏外元素必须先弄回可视区
+  if (/status: 'offscreen'/.test(s)) ok('会话项在可视区外时明确失败（offscreen），不假装成功')
+  else bad("没有 offscreen 状态 —— 点不到也会报成功")
+  if (/in_view/.test(s) && /panel:\s*panel/.test(s)) ok('列表项带出 in_view / panel（能分清在主列表还是陌生人列表）')
+  else bad('列表项没带 in_view / panel —— 分不清点不点得到')
+  if (/StrangerConversationListicon/.test(s)) ok('能自己从「陌生人消息」面板退回主列表')
+  else bad('不会切回主列表 —— 主人那条在屏外时永远发不出去')
+
+  // ④ 打字前最后一道身份核对
+  if (/发送前核对失败/.test(s)) ok('真打字之前会再核一次右栏昵称（最后一道闸）')
+  else bad('打字前没有身份核对 —— 页面重渲染后会发错人')
+
+  // ⑤ 未读数要带出来（不然"谁找过我"永远是 0）
+  if (/unreadCount/.test(s)) ok('listConversations 读 unreadCount（未读数）')
+  else bad('没读 unreadCount —— 面板算不出"谁可能有未读"')
+} catch (e) { bad(`读不了 tools/im-send.mjs（私信闸）：${e.message}`) }
+
 /* ── 4c. 「先卡片，后文字」这条规矩不能被改回去 ── */
 console.log('\n4c. 发送顺序规矩（先卡片，后文字）')
 try {

@@ -135,17 +135,65 @@ const listConversations = (ev) => ev(`(function(){
   nodes.forEach(function(n){
     var fk = Object.keys(n).find(function(k){ return k.indexOf('__reactFiber$') === 0 });
     var sec = '';
+    var unread = 0;
     if (fk) {
       var f = n[fk], d = 0;
       while (f && d < 14) {
         var p = f.memoizedProps;
-        if (p && p.conversation && p.conversation.toParticipantSecUserId) { sec = String(p.conversation.toParticipantSecUserId); break }
+        if (p && p.conversation && p.conversation.toParticipantSecUserId) {
+          sec = String(p.conversation.toParticipantSecUserId);
+          // ⭐ 未读数：React fiber 里的 unreadCount 与 DOM 红点徽标**实测完全一致**（14/14 会话核过）。
+          //    DOM 里也有 .ConversationItemUnReadCount 徽标，但 fiber 更稳（徽标会随滚动虚拟化消失）。
+          unread = Number(p.conversation.unreadCount) || 0;
+          break;
+        }
         f = f.return; d++;
       }
     }
     var r = n.getBoundingClientRect();
     var t = (n.innerText || '').replace(/\\s+/g, ' ').trim();
-    out.push({ sec_uid: sec, text: t.slice(0, 70), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2), w: Math.round(r.width), h: Math.round(r.height) });
+    /**
+     * ⭐ 昵称要**单独取**，不能拿整段 text 去掉重。
+     *    text 是「昵称 时间 最后一句话」，用 text.includes(who) 会把
+     *    "别人最后一句话里出现的词" 当成那个人 —— 实测：
+     *    用「大肥鱼」当收件人（没有任何人叫这个名字），会匹配到 3 个人。
+     *    这里给两个候选：昵称元素里的文本 → 没有就退回第一段。
+     */
+    var nickEl = n.querySelector('[class*="ConversationItemTitle"], [class*="conversationItemTitle"], [class*="nickname"], [class*="Nickname"]');
+    var nick = nickEl ? (nickEl.innerText || '').replace(/\\s+/g, ' ').trim() : '';
+    if (!nick) nick = t.split(' ')[0] || '';
+    /**
+     * ⚠️ 左侧面板有**两个列表**：主会话列表 和 「陌生人消息」列表。
+     *    当前激活哪个，另一个的项仍然在 DOM 里，但被横向平移到屏外（left 为负）。
+     *    实测：陌生人面板开着时，主列表里"主人"那条 left=-303 ⇒ 点它毫无反应。
+     *    ⇒ 把 in_view 一起报上去，让调用方知道"这个坐标点不到"。
+     */
+    var inView = r.left >= 0 && r.top >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight;
+    /**
+     * ⭐ 这条属于哪个列表：'main'（主会话列表）/ 'stranger'（陌生人消息）/ ''
+     *    两个列表在同一块区域里横向滑动，非激活的会被平移到屏外（left 为负）。
+     *    知道归属才能"切过去"，光靠 scrollIntoView 救不回来（那是横向平移，不是滚动）。
+     *    ⚠️ 判定顺序不能反：陌生人列表的 class 里**同时**含
+     *       StrangerConversationList 和 ConversationList，必须先判 stranger。
+     */
+    var panel = '';
+    var boxEl = n.parentElement, dd = 0;
+    while (boxEl && dd < 10) {
+      var bc = String(boxEl.className || '');
+      if (/StrangerConversationList/.test(bc)) { panel = 'stranger'; break }
+      if (/ConversationListwrapper/.test(bc)) { panel = 'main'; break }
+      boxEl = boxEl.parentElement; dd++;
+    }
+    out.push({
+      sec_uid: sec,
+      nick: nick.slice(0, 40),
+      text: t.slice(0, 70),
+      unread: unread,
+      in_view: inView,
+      panel: panel,
+      x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2),
+      w: Math.round(r.width), h: Math.round(r.height),
+    });
   });
   return JSON.stringify(out);
 })()`)
@@ -182,19 +230,72 @@ const currentConvId = (ev) => ev(`(function(){
 /**
  * 打开会话。返回 { status, matched }
  *   status: 'already-open' | 'clicked' | 'not-found' | 'ambiguous' | 'no-list'
+ *           | 'unverifiable' | 'mismatch' | 'offscreen'
  *   ⚠️ 只在「昵称唯一」或「给了稳定 id」时才点 —— 重名一律 ambiguous，不猜。
  *   ⚠️ 已经打开着也不轻信：给了 whoId 就必须核对当前会话的对端 id，不然会「发给错的人还报成功」。
+ *
+ * 🔴 2026-10-23 修了三个会把私信发错人的 bug（都是实测复现的）：
+ *
+ *   ① 【already-open 判断用了整个页面文本】
+ *      原来：`const t = await bodyText(ev); ... else if (who && t.includes(who))`
+ *      `bodyText` 是 `document.body.innerText` —— **包含左边的会话列表**，
+ *      而列表里永远列着所有人 ⇒ `t.includes(who)` 几乎永真。
+ *      后果：只要界面上有**任何一个**会话开着（上次读过谁就是谁），
+ *            再让工具发给另一个人，它会直接返回 `already-open`，
+ *            并把**当前那个人的 sec_uid** 当成你要找的人 —— 于是消息发进别人的对话框，
+ *            而返回值里 `to` 写的是你要发的那个人。**调用方完全看不出错。**
+ *      实测：界面开着「枫眠」，`--to 某帅气用户`（只给昵称）⇒
+ *            ok:true, to:"某帅气用户", to_sec_uid: 枫眠的 id。
+ *      ⇒ 现在：**只看右栏头部**（真正表示"当前对端"的那一小块），且必须与昵称**精确相等**；
+ *              对不上就老老实实去列表里点。
+ *
+ *   ② 【昵称用 includes 匹配】
+ *      原来 `list.filter(c => c.text.includes(who))`，text 里含"最后一句话"。
+ *      实测：用「大肥鱼」当收件人（没有任何人叫这个名字）会匹配到 3 个人，
+ *            最后发给「哈基米斯基」。用「你好」会匹配到 6 个。
+ *      ⇒ 现在：**先比 nick 是否相等**，再用 text 兜底（并标注 matched_by）。
+ *
+ *   ③ 【屏外元素点不到，却报成功】
+ *      左侧面板有两个列表（主列表 / 陌生人消息）。非激活的那个被横向平移到屏外。
+ *      实测：陌生人面板开着时，主列表里"主人"那条 left=-303，
+ *            派发 mousePressed 到 x=-156 **毫无反应、也不报错**，
+ *            点完右栏还是原来那个人 ⇒ 后续 acCurrentConvId 校验用的是旧会话……
+ *      最坏情况是"看起来切换了、其实没切"。
+ *      ⇒ 现在：点击前先要求 `in_view`；不在可视区**先把它滚进可视区**，滚不进来就
+ *              返回 `status:'offscreen'` —— 明确失败，不假装成功。
  */
 async function openConversation(ev, send, who, whoId) {
+  /**
+   * ⭐ 判断"当前会话是不是就是他"要用**右栏头部**，不是 bodyText。
+   *    右栏头部 = `[class*="componentsRightPanel"]` 的第一行文本，那才是对端昵称。
+   *    （bodyText 含左侧列表，任何人都在里面 —— 那正是 bug ① 的根源）
+   */
+  const currentWho = async () => {
+    const nick = String(await ev(`(function(){
+      var r = document.querySelector('[class*="componentsRightPanel"]');
+      if (!r) return '';
+      var lines = (r.innerText || '').split('\\n').map(function(s){return s.trim()}).filter(Boolean);
+      return lines.length ? lines[0] : '';
+    })()`) || '').trim()
+    const id = String(await currentConvId(ev) || '')
+    return { nick, id }
+  }
+
   if (await hasEditor(ev)) {
-    const curId = String(await currentConvId(ev) || '')
-    const t = await bodyText(ev)
+    const cur = await currentWho()
     if (whoId) {
-      if (curId && curId === whoId) return { status: 'already-open', matched: { sec_uid: curId, nick: who } }
-      if (!curId) return { status: 'unverifiable', matched: null, hint: '会话开着但读不到对端 id，不敢确认发给谁 —— 请关掉会话重试，或改用昵称' }
+      if (cur.id && cur.id === whoId) return { status: 'already-open', matched: { sec_uid: cur.id, nick: who || cur.nick } }
+      if (!cur.id) return { status: 'unverifiable', matched: null, hint: '会话开着但读不到对端 id，不敢确认发给谁 —— 请关掉会话重试，或改用昵称' }
       // 当前开着的是别人 ⇒ 继续往下走，去列表里点对的那个
-    } else if (who && t.includes(who)) {
-      return { status: 'already-open', matched: { sec_uid: curId, nick: who } }
+    } else if (who) {
+      /**
+       * ⭐ 只有昵称时的判据：右栏头部**精确等于**昵称才算已打开。
+       *    ⚠️ 不要用 includes：昵称 "拣" 是 "拣东西" 的前缀；而且这里以前是整个 bodyText。
+       */
+      if (cur.nick && cur.nick === who && cur.id) {
+        return { status: 'already-open', matched: { sec_uid: cur.id, nick: cur.nick } }
+      }
+      // 右栏读不到昵称 ⇒ 不能想当然，落到下面去点列表
     }
   }
   const raw = await listConversations(ev)
@@ -203,36 +304,187 @@ async function openConversation(ev, send, who, whoId) {
   if (!list.length) return { status: 'no-list', matched: null }
 
   let hits = []
+  let how = ''
+  /** 精确匹配不到时的兜底候选（只做提示，**不自动选**） */
+  let nearMisses = []
   if (whoId) {
     hits = list.filter((c) => c.sec_uid === whoId)
+    how = 'sec_uid'
   } else if (who) {
-    hits = list.filter((c) => c.text.includes(who))
+    /**
+     * 🔴 三级匹配，**越往后越保守**（2026-10-23 重做）：
+     *   ① 昵称**完全相等**      → 直接用
+     *   ② 昵称**以输入开头**    → 允许（"某帅气" → "某帅气用户"），仍算唯一命中才用
+     *   ③ 整段 text 包含        → ❌ **不再自动采用**，只当作"你可能想找"的提示
+     *
+     *    为什么砍掉 ③：
+     *      text 是「昵称 时间 最后一句话」。用「大肥鱼」当收件人时会命中 3 个人
+     *      （哈基米斯基 / zPz / 拣 —— 因为他们的**最后一句话**里都有"大肥鱼"），
+     *      报错还写成"有多个同名的人"，让人以为真的有 3 个同名。
+     *      实测确认过：一个叫「大肥鱼」的都没有。
+     *      ⇒ 找不到就叫找不到，别拿别人的话当名字。
+     */
+    hits = list.filter((c) => c.nick === who)
+    how = 'nickname(精确)'
+    if (!hits.length) {
+      const pref = list.filter((c) => c.nick && c.nick.startsWith(who))
+      if (pref.length === 1) { hits = pref; how = 'nickname(前缀)' }
+      else if (pref.length > 1) nearMisses = pref
+    }
+    if (!hits.length && !nearMisses.length) {
+      // ③ 只用来给提示，绝不自动选
+      nearMisses = list.filter((c) => c.text.includes(who)).slice(0, 6)
+    }
   } else {
     return { status: 'not-found', matched: null }
   }
 
-  if (!hits.length) return { status: 'not-found', matched: null, candidates: list.map((c) => ({ sec_uid: c.sec_uid, nick: nickOf(c.text) })) }
+  if (!hits.length) {
+    return {
+      status: 'not-found', matched: null, matched_by: how,
+      /** ⭐ 模糊候选单独放，明确标注"没有一个人叫这个名字" */
+      near_misses: nearMisses.map((c) => ({ sec_uid: c.sec_uid, nick: c.nick, unread: c.unread })),
+      hint: nearMisses.length
+        ? `没有任何人的昵称是「${who}」。`
+          + `下面这些人的**最后一句话**里出现了这几个字（不是名字）：`
+          + nearMisses.map((c) => c.nick).join('、')
+          + ' —— 要发给谁请用 --to-id 指定。'
+        : `会话列表里没有昵称为「${who}」的人。`,
+      candidates: list.map((c) => ({ sec_uid: c.sec_uid, nick: c.nick, unread: c.unread })),
+    }
+  }
   if (hits.length > 1) {
     // 同名多个 ⇒ 绝不猜（猜错就是把私信发给陌生人）
     return {
       status: 'ambiguous',
       matched: null,
-      candidates: hits.map((c) => ({ sec_uid: c.sec_uid, nick: nickOf(c.text) })),
+      candidates: hits.map((c) => ({ sec_uid: c.sec_uid, nick: c.nick, unread: c.unread })),
       hint: '会话列表里有多个同名的人 —— 请改用 --to-id <sec_uid> 指定',
     }
   }
   const b = hits[0]
+
+  /**
+   * ⭐ 点击前先把它**弄到可视区里**。
+   *
+   *    左侧面板有两个列表（主会话列表 / 「陌生人消息」），它们在同一块区域里
+   *    **横向滑动**：非激活的那个被平移到屏外（left 为负）。
+   *    对屏外坐标派发 mousePressed **没有任何反应、也不报错** —— 点了等于白点。
+   *
+   *    救法有两层（顺序不能反）：
+   *      ① 它在"另一个列表"里 ⇒ 先点那个面板的返回箭头/入口，把面板切过去
+   *      ② 只是滚出了纵向可视区 ⇒ scrollIntoView
+   *    两层都救不回来 ⇒ 返回 offscreen，**明确失败，不假装成功**。
+   *
+   *    ⚠️ 为什么不能只用 scrollIntoView：
+   *       横向平移是 transform/left 位移，不是滚动条 ⇒ scrollIntoView 对 x<0 完全无效
+   *       （实测 before [−303,126] → after [−303,126]，一点没动）。
+   */
+  if (!b.in_view) {
+    const want = b.panel || 'main'
+    // ① 切列表：目标在 main、但当前屏外 ⇒ 点「返回」箭头退出陌生人面板
+    if (want === 'main') {
+      const hasStrangerTitle = await ev(`!!document.querySelector('[class*="StrangerConversationListtitle"]')`)
+      if (hasStrangerTitle) {
+        const back = JSON.parse(String(await ev(`(function(){
+          var best = null;
+          Array.prototype.slice.call(document.querySelectorAll('div,svg,span')).forEach(function(e){
+            var cls = String((e.className && e.className.baseVal !== undefined) ? e.className.baseVal : e.className || '');
+            if (!/StrangerConversationListicon/.test(cls)) return;
+            var r = e.getBoundingClientRect();
+            if (r.width < 10 || r.width > 40 || r.height < 10 || r.height > 40) return;
+            if (r.left < 0 || r.top < 0) return;
+            best = { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) };
+          });
+          return JSON.stringify(best);
+        })()`) || 'null'))
+        if (back && typeof back.x === 'number') {
+          await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: back.x, y: back.y, button: 'none', buttons: 0 })
+          await sleep(80)
+          await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: back.x, y: back.y, button: 'left', buttons: 1, clickCount: 1 })
+          await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: back.x, y: back.y, button: 'left', buttons: 0, clickCount: 1 })
+          await sleep(1200)
+        }
+      }
+    } else if (want === 'stranger') {
+      // 目标在陌生人面板里，但当前不在 ⇒ 点「陌生人消息」入口切过去
+      const entry = JSON.parse(String(await ev(`(function(){
+        var best = null;
+        Array.prototype.slice.call(document.querySelectorAll('div,span')).forEach(function(e){
+          var cls = String((e.className && e.className.baseVal !== undefined) ? e.className.baseVal : e.className || '');
+          if (!/conversationStrangerBoxtitle/.test(cls)) return;
+          var r = e.getBoundingClientRect();
+          if (r.left < 0 || r.top < 0) return;
+          best = { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) };
+        });
+        return JSON.stringify(best);
+      })()`) || 'null'))
+      if (entry && typeof entry.x === 'number') {
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: entry.x, y: entry.y, button: 'none', buttons: 0 })
+        await sleep(80)
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: entry.x, y: entry.y, button: 'left', buttons: 1, clickCount: 1 })
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: entry.x, y: entry.y, button: 'left', buttons: 0, clickCount: 1 })
+        await sleep(1500)
+      }
+    }
+
+    // ② 切完再算一次坐标（顺便处理纵向滚出可视区的情况）
+    const rescanned = JSON.parse(String(await ev(`(function(){
+      var want = ${JSON.stringify(String(b.nick || ''))};
+      var wantSec = ${JSON.stringify(String(b.sec_uid || ''))};
+      var nodes = Array.prototype.slice.call(document.querySelectorAll('[data-e2e="conversation-item"]'));
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        var keys = Object.keys(n), fk = null;
+        for (var k = 0; k < keys.length; k++) if (keys[k].indexOf('__reactFiber$') === 0) { fk = keys[k]; break }
+        var sec = '';
+        if (fk) { var f = n[fk], d = 0; while (f && d < 14) { var p = f.memoizedProps; if (p && p.conversation && p.conversation.toParticipantSecUserId) { sec = String(p.conversation.toParticipantSecUserId); break } f = f.return; d++; } }
+        var nickEl = n.querySelector('[class*="ConversationItemTitle"], [class*="conversationItemTitle"], [class*="nickname"], [class*="Nickname"]');
+        var nk = nickEl ? (nickEl.innerText || '').replace(/\\s+/g, ' ').trim() : ((n.innerText || '').replace(/\\s+/g, ' ').trim().split(' ')[0] || '');
+        if (wantSec ? sec !== wantSec : nk !== want) continue;
+        var r = n.getBoundingClientRect();
+        var ok = r.left >= 0 && r.top >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight;
+        if (!ok) { n.scrollIntoView({ block: 'center', inline: 'center' }); r = n.getBoundingClientRect(); ok = r.left >= 0 && r.top >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight; }
+        return JSON.stringify({ ok: ok, x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), left: Math.round(r.left) });
+      }
+      return JSON.stringify({ ok: false, reason: 'gone' });
+    })()`) || '{}'))
+    if (!rescanned.ok) {
+      return {
+        status: 'offscreen', matched: null,
+        hint: `「${b.nick}」在会话列表里，但切换列表后仍然不在可视区（left=${rescanned.left ?? '?'}）。`
+          + ' 对屏外坐标派发鼠标事件不会生效 —— 已中止，没发出去。',
+        want_nick: b.nick, want_sec_uid: b.sec_uid || '', left: rescanned.left ?? null,
+      }
+    }
+    b.x = rescanned.x
+    b.y = rescanned.y
+    await sleep(250)
+  }
+
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: b.x, y: b.y, button: 'none', buttons: 0 })
   await sleep(80)
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: b.x, y: b.y, button: 'left', buttons: 1, clickCount: 1 })
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: b.x, y: b.y, button: 'left', buttons: 0, clickCount: 1 })
   await sleep(2200)
-  // 点完再核对一次：开着的是不是真的是他
-  const after = String(await currentConvId(ev) || '')
-  if (whoId && after && after !== whoId) {
-    return { status: 'mismatch', matched: null, want: whoId, got: after, hint: '点开的会话对端不是要发的那个人，已中止' }
+
+  /**
+   * 点完再核对一次：开着的是不是真的是他。
+   * ⚠️ 两个判据都要过：
+   *    · 有 whoId ⇒ 对端 id 必须相等
+   *    · 只有昵称 ⇒ 右栏头部必须**精确等于**昵称（这是防"点了没反应还报成功"的兜底）
+   */
+  const after = await currentWho()
+  if (whoId && after.id && after.id !== whoId) {
+    return { status: 'mismatch', matched: null, want: whoId, got: after.id, hint: '点开的会话对端不是要发的那个人，已中止' }
   }
-  return { status: 'clicked', matched: { sec_uid: after || b.sec_uid, nick: nickOf(b.text) } }
+  if (!whoId && who && after.nick && after.nick !== who) {
+    return {
+      status: 'mismatch', matched: null, want: who, got: after.nick,
+      hint: '点了「' + who + '」但右栏变成「' + after.nick + '」，对不上，已中止',
+    }
+  }
+  return { status: 'clicked', matched: { sec_uid: after.id || b.sec_uid, nick: after.nick || b.nick }, matched_by: how }
 }
 
 async function main() {
@@ -255,23 +507,35 @@ async function main() {
       let list = []
       try { list = JSON.parse(raw) || [] } catch { list = [] }
       const people = list.map((x) => {
-        const nick = nickOf(x.text)
+        // ⭐ 优先用 DOM 里真正的昵称字段；没有才退回「整段文本的第一段」
+        const nick = String(x.nick || '').trim() || nickOf(x.text)
         // 会话项文本是「昵称 时间 最后一句话」，去掉昵称和时间，剩下的是预览
         const preview = String(x.text || '').slice(nick.length).trim()
           .replace(/^\d{1,2}:\d{2}\s*/, '')
           .replace(/^(昨天|前天|\d+月\d+日)\s*/, '')
           .slice(0, 50)
-        return { nick, sec_uid: x.sec_uid || '', preview, has_id: Boolean(x.sec_uid) }
+        return {
+          nick, sec_uid: x.sec_uid || '', preview, has_id: Boolean(x.sec_uid),
+          /** ⭐ 未读条数：fiber 里的 unreadCount，实测与红点徽标 14/14 一致 */
+          unread: Number(x.unread) || 0,
+          /** ⚠️ 是否在可视区 —— false 的话点它没用（另一个列表被平移到屏外） */
+          in_view: x.in_view !== false,
+        }
       }).filter((p) => p.nick)
       // 同名的人标出来（这种必须用 sec_uid 区分）
       const counts = {}
       for (const p of people) counts[p.nick] = (counts[p.nick] || 0) + 1
       for (const p of people) p.duplicate = counts[p.nick] > 1
+      const unreadTotal = people.reduce((s, p) => s + p.unread, 0)
       return out({
         ok: true, mode: 'list', read_only: true,
         count: people.length,
         people,
         no_id_count: people.filter((p) => !p.has_id).length,
+        /** ⭐ 未读总数 / 有未读的人数 —— 这才是"谁找过我"的可靠信号 */
+        unread_total: unreadTotal,
+        unread_people: people.filter((p) => p.unread > 0).length,
+        offscreen_count: people.filter((p) => !p.in_view).length,
         hint: people.length
           ? (people.some((p) => p.duplicate)
             ? '有同名的人 —— 选的时候看「最近一条消息」区分，别选错'
@@ -304,14 +568,28 @@ async function main() {
       })
     }
     if (opened.status === 'no-list') return out({ ok: false, error: '会话列表没加载出来（可能还没登录）', chrome: chromed })
+    if (opened.status === 'offscreen') {
+      return out({
+        ok: false, error: opened.hint || '那个人的会话项不在可视区，点了不会生效，已中止',
+        nick: opened.want_nick, sec_uid: opened.want_sec_uid, detail: opened, chrome: chromed,
+      })
+    }
     if (opened.status === 'unverifiable' || opened.status === 'mismatch') {
       return out({ ok: false, error: opened.hint || '核对会话身份失败，已中止', detail: opened })
     }
     if (opened.status === 'not-found') {
-      return out({ ok: false, error: TOID ? `会话列表里没有 sec_uid=${TOID} 这个人` : `在会话列表里没找到「${TO}」`, candidates: opened.candidates || [], chrome: chromed })
+      return out({
+        ok: false,
+        error: opened.hint || (TOID ? `会话列表里没有 sec_uid=${TOID} 这个人` : `在会话列表里没找到「${TO}」`),
+        // ⚠️ near_misses 是"最后一句话里碰巧出现这几个字"的人，**不是**候选收件人
+        near_misses: opened.near_misses || [],
+        candidates: opened.candidates || [], chrome: chromed,
+      })
     }
     if (!(await hasEditor(c.ev))) return out({ ok: false, error: '会话没打开（找不到输入框）', opened, chrome: chromed })
     const target = opened.matched || { sec_uid: TOID || '', nick: TO }
+    /** 到底靠什么认的人：sec_uid / 昵称精确 / 昵称模糊 —— 如实带出去，别让调用方猜 */
+    const matchedBy = opened.matched_by || (TOID ? 'sec_uid' : 'nickname(精确)')
 
     // ── 只读模式：把会话读出来（带「谁发的」）──
     if (READ) {
@@ -321,7 +599,9 @@ async function main() {
       return out({
         ok: true, mode: 'read', read_only: true,
         to: target.nick, to_sec_uid: target.sec_uid || undefined,
-        matched_by: TOID ? 'sec_uid' : 'nickname(唯一)',
+        matched_by: matchedBy,
+        // ⚠️ 明写出来：读的是"当前打开的会话"，而 to 是"认出来的人"——两者已经核过一致
+        verified_open: true,
         count: msgs.length, mine: cnt('me'), them: cnt('them'), unknown: cnt('unknown'),
         sender_attribution: 'avatar-side（36px 头像落在列表左/右半边；unknown = 该组没有头像可继承）',
         // 最新的在最后一条
@@ -336,7 +616,26 @@ async function main() {
 
     const before = (await bodyText(c.ev)).length
     const beforeMsgs = await readMessages(c.ev)
-    if (DRY) return out({ ok: true, sent: false, dry: true, to: target.nick, to_sec_uid: target.sec_uid || undefined, len: text.length, matched_by: TOID ? 'sec_uid' : 'nickname(唯一)', msgs_in_view: beforeMsgs.length, chrome: chromed })
+    if (DRY) return out({ ok: true, sent: false, dry: true, to: target.nick, to_sec_uid: target.sec_uid || undefined, len: text.length, matched_by: matchedBy, msgs_in_view: beforeMsgs.length, chrome: chromed })
+
+    /**
+     * 🔴 打字前的最后一道身份核对（2026-10-23 加）。
+     *    前面 openConversation 已经核过一次，但"点输入框"这一步本身也可能
+     *    因为页面重渲染而落到别的会话上。**真发之前再确认右栏是不是他** ——
+     *    这一步很便宜（一次 evaluate），但它是"发错人"的最后一道闸。
+     */
+    const gateNick = String(await c.ev(`(function(){
+      var r = document.querySelector('[class*="componentsRightPanel"]');
+      if (!r) return '';
+      var lines = (r.innerText || '').split('\\n').map(function(s){return s.trim()}).filter(Boolean);
+      return lines.length ? lines[0] : '';
+    })()`) || '').trim()
+    if (gateNick && target.nick && gateNick !== target.nick) {
+      return out({
+        ok: false, sent: false, error: '发送前核对失败：右栏是「' + gateNick + '」，不是「' + target.nick + '」，已中止（没发出去）',
+        want: target.nick, got: gateNick, chrome: chromed,
+      })
+    }
 
     // 点输入框
     const pos = JSON.parse(await c.ev(`(function(){
