@@ -2887,6 +2887,8 @@ export function apply(ctx, config) {
           } catch { /* 读不到按没回处理 */ }
           chatWatchLog(`自动回话结束（code=${code}${replied ? `，回了：「${replied}」` : '，没看到回复记录'}）`)
           cwWrite({ replyState: replied ? 'done' : 'fail', replyAt: Date.now(), replyText: replied, replyCode: code })
+          // ⭐ 回话一结束立刻补看：刚才排队没回的消息马上接上（不等下一拍）
+          try { setTimeout(() => { chatWatchLastMs = 0; chatWatchTick() }, 3_000).unref?.() } catch { /* 下一拍也会带上 */ }
         })
         child.on('error', (e) => {
           chatReplyRunning = false
@@ -2940,6 +2942,19 @@ export function apply(ctx, config) {
         return
       }
       if (!theirs.length) { cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok', lastError: '' }); return }
+      // ⭐ 推进"已看见"基准的分寸（2026-10-24 实测吞了一条才改的）：
+      //    · 回话空闲 ⇒ 这批全部接走，基准推进到最新
+      //    · 回话正忙 ⇒ **不推进基准**（消息留在"未处理"）—— 当前回话结束后，
+      //      下一拍会把 [旧基准, 最新] 一起读出来补回。只弹通知，绝不丢消息。
+      //    · 自动回话关着 ⇒ 只提醒，基准照常推进
+      if (cfg.chatReply && chatReplyRunning) {
+        cwState.notified += theirs.length
+        cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_new', lastError: '', lastNewAt: theirs[theirs.length - 1].at, lastNewText: theirs[theirs.length - 1].text.slice(0, 40), toast: 'busy：回话正忙，排队等回' })
+        const headBusy = theirs[0].text.slice(0, 60)
+        chatWatchLog(`回话正忙：${theirs.length} 条先记账不推进（回完这拍会带上补回）：${headBusy}`)
+        try { sendToast({ title: `${cfg.dmTo || '私信'} 又来消息了`, body: '小鱼还在回上一条，回完就接这条' }) } catch { /* 通知失败不影响 */ }
+        return
+      }
       chatWatchLastSeenAt = theirs[theirs.length - 1].at
       cwState.notified += theirs.length
       const head = theirs[0].text.slice(0, 60)
