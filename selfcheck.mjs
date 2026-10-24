@@ -931,24 +931,11 @@ try {
   else bad('状态屏还是机器腔 —— 主人点名要「小鱼在干啥」的拟人描述')
   if (/chatWatchPrimed/.test(idx)) ok('首拍只「对表」不提醒（不会把历史消息重播一遍）')
   else bad('没有首拍对表 —— 一开机可能把旧消息全弹一遍')
-  // ⑥ 自动回话（2026-10-24 主人拍板）：默认关 + DEFAULTS 同步 + 提示词红线
-  if (/chatReply: z\.boolean\(\)\.default\(false\)/.test(idx)) ok('chatReply 配置项在（默认关，用户自己开）')
-  else bad('没有 chatReply 配置项')
-  if (/DEFAULTS = \{[\s\S]{0,950}?chatReply: false/.test(idx)) ok('DEFAULTS 表带 chatReply（2026-10-24 点不开事故的教训）')
-  else bad('DEFAULTS 表没有 chatReply —— 开关会点了没反应')
-  if (/chatReplyPrompt/.test(idx) && /不许干别的/.test(idx)) ok('回话提示词有红线（只回私信，不刷视频不写日报）')
-  else bad('回话提示词没有任务边界 —— 那个会话可能跑去干别的')
-  if (/chatReplyPrompt[\s\S]{0,2500}?douyin_im_read/.test(idx)) ok('回话前先读记忆上下文（接得上聊天）')
-  else bad('回话不读上下文 —— 会把聊过的事当没说过')
-  if (/chatReplyRunning/.test(idx) && /chatReplyRun[\s\S]{0,700}?watchdog/.test(idx)) ok('自动回话有防双开 + 5 分钟看门狗')
-  else bad('自动回话没锁/没看门狗 —— 可能连开好几个会话')
-  if (/replyState/.test(cl) && /正游过去回消息/.test(cl)) ok('状态屏有回话拟人态（正在回/刚回完/没回成）')
-  else bad('状态屏没有回话状态 —— 回没回、回成没回成用户看不见')
-  // 🔴 2026-10-24 实测吞消息事故：回话正忙时新消息被标"已看见"却永远没人回
-  if (/chatReply && chatReplyRunning/.test(idx) && /不推进基准/.test(idx)) ok('回话正忙时不丢消息（基准不推进，回完补回）')
-  else bad('回话正忙时新消息会被吞 —— 2026-10-24 实测事故，必须防')
-  if (/回话一结束立刻补看/.test(idx)) ok('回话结束 3 秒内补看排队的消息（不等下一拍）')
-  else bad('回完话要等 30 秒才接下一条 —— 排队消息回得太慢')
+  // ⑥ 自动回话已拆（2026-10-24 主人定稿：「我要的是迁移，不是开发新功能」）：
+  //    插件只留「眼睛」（读+通知+状态屏）；「回话」由 AI 值班（常驻会话）做——
+  //    今早实测 12 秒来自已活着的 AI，插件里「每条消息现起一个会话」实测 73 秒+吞消息，已拆。
+  if (/chatReplyRun|chatReplyPrompt|chatReply:/.test(idx)) bad('插件里又有「现起会话回话」的代码 —— 已定稿拆掉，回话归 AI 值班')
+  else ok('插件没有「现起会话回话」（回话 = AI 值班，插件只做眼睛）')
 } catch (e) { bad(`消息/聊天检查失败：${e.message}`) }
 
 /* ── 4o. 自动发送总开关 + 跑一轮的失败反馈（2026-10-22 用户要求） ── */

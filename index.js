@@ -137,11 +137,12 @@ export const Config = !z ? undefined : z.object({
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
   /**
-   * ⭐⭐ 自动回话（2026-10-24 主人拍板）：盯到新消息后，起一个 headless 会话
-   *    （带人设+记忆+对方的话）由它来拟回复、调 douyin_dm 发出。
-   *    复用 runDuty 的管道（overlay 挂 douyin 工具、模型跟随桌面版）。
+   * ⭐ 2026-10-24 定稿（主人：「我要的是迁移，不是开发新功能」）：
+   *    聊天模式 = 今早实测那套的「读」半边（30 秒一读 + 通知 + 状态屏）。
+   *    「回话」半边**不做在插件里**——今早的 12 秒来自**已活着的 AI 直接回**；
+   *    插件里曾做过「每条消息现起一个会话」，实测 73 秒、还吞消息，已拆掉。
+   *    回话 = AI 值班（常驻会话 + 定时器），插件的状态屏负责让它可见。
    */
-  chatReply: z.boolean().default(false).extra('volatile', true),
   /** 通知：toast（Windows 通知，默认）/ file（不额外提醒）/ webhook / both */
   notifyMode: z.string().default('toast').extra('volatile', true),
   /** 私信发给谁：昵称（只用于显示/提醒） */
@@ -247,7 +248,7 @@ export function apply(ctx, config) {
     dmTo: '', dmToId: '',
     // ⭐ 聊天模式（2026-10-24）：⚠️ 这里漏加过 ⇒ clampPatch 把面板的 patch 整个 strip 掉，
     //    开关点了没反应。DEFAULTS / zod schema 两处必须同步。
-    chatWatch: false, chatWatchSec: 30, chatReply: false,
+    chatWatch: false, chatWatchSec: 30,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
@@ -2305,56 +2306,6 @@ export function apply(ctx, config) {
   }
 
   /**
-   * ⭐⭐ 聊天自动回话的提示词（2026-10-24 主人拍板「要做自动回话」）。
-   *    和刷轮共用整条管道（overlay 挂 douyin 工具、模型跟随桌面版、看门狗），
-   *    但任务完全不同：**只回一条私信**，不刷视频、不写日报。
-   *    回复质量三要素都从这儿进：人设（三层同款）+ 记忆（mergeDmMemory 已经在盯梢时合并过）
-   *    + 对方最新说的话（盯梢循环传进来）。
-   */
-  const chatReplyPrompt = (peer, newMsgs) => {
-    // 人设：跟 promptFor 同一套三层查找，抽成函数避免两处漂移
-    let ownerDoc = ''
-    let personaFrom = ''
-    try {
-      const cands = [
-        { file: join(stateDir, 'persona.md'), who: 'douyin-scroll', from: '使用者自己那份' },
-        { file: join(pluginDir, 'prompts', 'persona.md'), who: 'douyin-scroll', from: '插件自带' },
-        { file: join(pluginDir, 'prompts', 'persona.default.md'), who: 'default', from: '默认中性人设' },
-      ]
-      for (const c of cands) {
-        if (!existsSync(c.file)) continue
-        const raw = readFileSync(c.file, 'utf8')
-        const who = (/persona:\s*([A-Za-z0-9_-]+)/i.exec(raw.split(/\r?\n/, 1)[0] || '') || [])[1]
-        if ((who || '').toLowerCase() !== c.who) continue
-        ownerDoc = `\n\n===== 我的人设（${c.from}，**按这个来**）=====\n` + raw.slice(0, 6000) + '\n===== 设定结束 =====\n'
-        personaFrom = c.from
-        break
-      }
-    } catch { /* 拿不到人设就按中性说话 */ }
-    const nowBJT = (() => {
-      try { const d = new Date(Date.now() + 8 * 3600_000).toISOString(); return d.slice(0, 10) + ' ' + d.slice(11, 16) } catch { return '' }
-    })()
-    const quote = newMsgs.map((m) => `· 「${String(m.text || '').slice(0, 200)}」（${m.at || ''}）`).join('\n')
-    return `你是这个账号的抖音助手。现在唯一的任务：**替号主回复一条私信**。`
-      + `⏰ 现在时间（真实北京时间）：${nowBJT}。工作目录 = ${stateDir}（插件家）。`
-      + ownerDoc
-      + (ownerDoc ? '' : '⭐ 没拿到人设 ⇒ 按中性、友好、口语化说话，别扮演任何人。')
-      + `\n\n📨 **对方（${peer.nick || '私信对象'}）刚发来：**\n${quote}`
-      + `\n\n📋 **先调 \`mcp__douyin__douyin_im_read\`（参数 to_id='${peer.sec_uid}'）** —— 返回里有 context：`
-      + `这个人以前聊过什么、他的长期事实。**回复必须接得上上下文**，别把聊过的事当没说过。`
-      + `\n✍️ **然后拟一条回复并发送**：调 \`mcp__douyin__douyin_dm\`，参数：`
-      + `  to_id='${peer.sec_uid}'，text=<你拟的回复>，confirm=true。`
-      + `\n   ⭐ 回复的规矩：`
-      + `   · 一条就好，**50 字以内**，口语、像人聊天，别写成信`
-      + `   · 接住对方的话（回答他问的 / 回应他说的），别自顾自开新话题`
-      + `   · 对方是号主本人（${peer.nick || ''}）——人设里怎么称呼他就怎么称呼`
-      + `   · 发送工具可能要 15-30 秒（起无头浏览器），等着，别中途放弃`
-      + `\n🚫 **不许干别的**：不刷视频、不写日报、不发卡片、不回评论。就回这一条私信。`
-      + `\n收尾：把「回了什么」写进 ${join(stateDir, 'chat-replies.jsonl')}（追加一行 JSON：{"at":"${new Date().toISOString()}","to":"${(peer.nick || '').replace(/"/g, '')}","text":"<回的原文>"}）。`
-      + (personaFrom ? `\n（本轮人设来源：${personaFrom}）` : '')
-  }
-
-  /**
    * ⭐ 保底：那一轮**没写出报告**时，宿主自己补一份"占位报告"。
    *    （bili-scroll 的用户实测反馈：卡住时 out/ 是空的 ⇒ 使用者完全看不到发生了什么）
    */
@@ -2826,7 +2777,7 @@ export function apply(ctx, config) {
   /** ⭐ 每一拍都把状态写进 chat-watch-state.json —— 面板轮询它，用户能实时看到
    *    「几秒前看过 · 结果如何 · 通知弹没弹 · 错在哪」（2026-10-24 主人要求）。 */
   const cwStateFile = join(stateDir, 'chat-watch-state.json')
-  const cwState = { lastCheckAt: 0, lastResult: '', lastError: '', lastNote: '', lastNewAt: '', lastNewText: '', toast: '', checks: 0, notified: 0, replyState: '', replyAt: 0, replyText: '', replyCode: 0 }
+  const cwState = { lastCheckAt: 0, lastResult: '', lastError: '', lastNote: '', lastNewAt: '', lastNewText: '', toast: '', checks: 0, notified: 0 }
   const cwWrite = (patch) => {
     try {
       Object.assign(cwState, patch)
@@ -2836,71 +2787,6 @@ export function apply(ctx, config) {
         to: cfg.dmTo || '', via: 'http（不启浏览器）',
       }, null, 1), 'utf8')
     } catch { /* 状态写不进也不能出事 */ }
-  }
-
-  /**
-   * ⭐⭐ 自动回话执行器（2026-10-24）：起一个 headless 会话替号主回私信。
-   *    和 runDuty 共用 overlay（douyin 工具 / 模型跟随 / 工作区=插件家），
-   *    但**独立状态机**——回话不该被"上一轮刷抖音还没跑完"卡住，反过来也不占刷轮的锁。
-   *    🔴 异常必须全兜（宿主红线）；超时看门狗同款（默认 15 分钟太长，回话给 5 分钟）。
-   */
-  let chatReplyRunning = false
-  const chatReplyRun = (peer, newMsgs) => {
-    if (chatReplyRunning) {
-      chatWatchLog('自动回话：上一个还没回完，这批先不回（等下一拍会带上）')
-      return
-    }
-    chatReplyRunning = true
-    cwWrite({ replyState: 'running', replyAt: Date.now() })
-    ;(async () => {
-      try {
-        const dsh = resolveDsh()
-        const overlay = ensureOverlay()   // autoSend 关着时 overlay 不挂 douyin 工具 ⇒ 那一轮想发也发不出去（能力层闸）
-        const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
-        if (overlay) args.push('--patch', overlay)
-        args.push(chatReplyPrompt(peer, newMsgs))
-        chatWatchLog(`自动回话开跑（${peer.nick || peer.sec_uid}）`)
-        const child = spawn(dsh.command, args, {
-          cwd: stateDir, shell: dsh.shell, windowsHide: true,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: pyEnv({ DOUYIN_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
-        })
-        const watchdog = setTimeout(() => {
-          try {
-            chatWatchLog('自动回话超过 5 分钟 ⇒ 强制结束')
-            child.kill()
-            setTimeout(() => { try { child.kill('SIGKILL') } catch { /* 已经没了 */ } }, 10_000).unref?.()
-          } catch { /* 杀不掉就等自然退出 */ }
-        }, 5 * 60_000)
-        watchdog.unref?.()
-        child.stdout?.on('data', (b) => { try { chatWatchLog('[回话] ' + String(b).trim().slice(0, 300)) } catch { /* 不许炸宿主 */ } })
-        child.stderr?.on('data', (b) => { try { chatWatchLog('[回话·err] ' + String(b).trim().slice(0, 300)) } catch { /* 同上 */ } })
-        child.on('exit', (code) => {
-          chatReplyRunning = false
-          clearTimeout(watchdog)
-          // 看看真回出去没有：回话会话把记录追加到 chat-replies.jsonl
-          let replied = ''
-          try {
-            const lines = readFileSync(join(stateDir, 'chat-replies.jsonl'), 'utf8').trim().split('\n').filter(Boolean)
-            const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null
-            if (last && Date.now() - Date.parse(last.at || 0) < 5 * 60_000) replied = String(last.text || '').slice(0, 40)
-          } catch { /* 读不到按没回处理 */ }
-          chatWatchLog(`自动回话结束（code=${code}${replied ? `，回了：「${replied}」` : '，没看到回复记录'}）`)
-          cwWrite({ replyState: replied ? 'done' : 'fail', replyAt: Date.now(), replyText: replied, replyCode: code })
-          // ⭐ 回话一结束立刻补看：刚才排队没回的消息马上接上（不等下一拍）
-          try { setTimeout(() => { chatWatchLastMs = 0; chatWatchTick() }, 3_000).unref?.() } catch { /* 下一拍也会带上 */ }
-        })
-        child.on('error', (e) => {
-          chatReplyRunning = false
-          chatWatchLog(`自动回话起不来：${e?.message ?? e}`)
-          cwWrite({ replyState: 'fail', replyAt: Date.now(), replyText: '', replyCode: -1 })
-        })
-      } catch (e) {
-        chatReplyRunning = false
-        chatWatchLog(`自动回话出错（已兜住）：${e?.message ?? e}`)
-        cwWrite({ replyState: 'fail', replyAt: Date.now(), replyText: '' })
-      }
-    })()
   }
 
   const chatWatchTick = async () => {
@@ -2942,19 +2828,8 @@ export function apply(ctx, config) {
         return
       }
       if (!theirs.length) { cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok', lastError: '' }); return }
-      // ⭐ 推进"已看见"基准的分寸（2026-10-24 实测吞了一条才改的）：
-      //    · 回话空闲 ⇒ 这批全部接走，基准推进到最新
-      //    · 回话正忙 ⇒ **不推进基准**（消息留在"未处理"）—— 当前回话结束后，
-      //      下一拍会把 [旧基准, 最新] 一起读出来补回。只弹通知，绝不丢消息。
-      //    · 自动回话关着 ⇒ 只提醒，基准照常推进
-      if (cfg.chatReply && chatReplyRunning) {
-        cwState.notified += theirs.length
-        cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_new', lastError: '', lastNewAt: theirs[theirs.length - 1].at, lastNewText: theirs[theirs.length - 1].text.slice(0, 40), toast: 'busy：回话正忙，排队等回' })
-        const headBusy = theirs[0].text.slice(0, 60)
-        chatWatchLog(`回话正忙：${theirs.length} 条先记账不推进（回完这拍会带上补回）：${headBusy}`)
-        try { sendToast({ title: `${cfg.dmTo || '私信'} 又来消息了`, body: '小鱼还在回上一条，回完就接这条' }) } catch { /* 通知失败不影响 */ }
-        return
-      }
+      // 基准推进：插件只负责「看见 + 提醒」；回话由 AI 值班（常驻会话）做，
+      // 它有自己的读取基准，不和这里的混淆。
       chatWatchLastSeenAt = theirs[theirs.length - 1].at
       cwState.notified += theirs.length
       const head = theirs[0].text.slice(0, 60)
@@ -2972,13 +2847,6 @@ export function apply(ctx, config) {
         sendWebhook({ url: cfg.webhookUrl, preset: cfg.webhookPreset, title: `${cfg.dmTo || '私信'} 来消息了`, markdown: theirs.map((m) => `- ${m.text.slice(0, 100)}`).join('\n') }).catch(() => { /* webhook 失败不影响 */ })
       }
       cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_new', lastError: '', lastNewAt: theirs[theirs.length - 1].at, lastNewText: theirs[theirs.length - 1].text.slice(0, 40), toast: toastState })
-      // ⭐⭐ 自动回话（2026-10-24 主人拍板）：chatReply 开着就起一个会话去回
-      if (cfg.chatReply) {
-        chatReplyRun({
-          sec_uid: toId,
-          nick: cfg.dmTo || j.matched.nickname || '',
-        }, theirs)
-      }
     } catch (e) {
       chatWatchLog(`这一拍出错（已兜住）：${e?.message ?? e}`)
       cwWrite({ lastCheckAt: Date.now(), lastResult: 'error', lastError: String(e?.message ?? e).slice(0, 160) })
