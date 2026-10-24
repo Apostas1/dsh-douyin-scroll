@@ -66,6 +66,7 @@ function createMain() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       backgroundThrottling: false,   // 🔴 别漏：后台也要跑动画（whale-girl 同款）
+      webSecurity: false,            // 🔴 本地壳专用：file:// 下要 fetch PSD/wav（目录都在本机，无安全面）
     },
   })
   win.setAlwaysOnTop(true, 'screen-saver')   // 🔴 三处时机之一（创建时）

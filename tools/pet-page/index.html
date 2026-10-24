@@ -6,13 +6,16 @@
 <link rel="stylesheet" href="pet.css">
 </head>
 <body>
-  <!-- 弹幕层：全屏，永远不接点击 -->
+  <!-- 引擎画布（WebGL，透明背景） -->
+  <canvas id="gl"></canvas>
+
+  <!-- 弹幕层 -->
   <div id="danmaku"></div>
 
-  <!-- 她本体：分层 PNG 叠加 + 泡泡 + 道具 -->
+  <!-- 她本体容器（负责拖动/定位/泡泡；渲染在 canvas 里） -->
   <div id="pet">
     <div id="pet-bubble"></div>
-    <div id="pet-body"></div>
+    <div id="pet-body" title=""></div>
   </div>
 
   <!-- 聊天面板 -->
@@ -25,7 +28,7 @@
     </div>
   </div>
 
-  <!-- 右键菜单（自绘，网页内） -->
+  <!-- 右键菜单 -->
   <div id="menu">
     <div class="mi" data-act="chat">💬 跟她聊天</div>
     <div class="mi" data-act="feed">🍚 喂饭（大白饭）</div>
@@ -39,6 +42,12 @@
     <div class="mi" data-act="quit">🚪 退出（关掉她）</div>
   </div>
 
+  <!-- 引擎库（Anime2.5DRig，MIT）+ 本页逻辑 -->
+  <script src="engine/ag-psd.min.js"></script>
+  <script src="engine/rigger.js"></script>
+  <script src="engine/renderer.js"></script>
+  <script src="engine/runtime.js"></script>
+  <script src="engine/genericparts.js"></script>
   <script src="pet.js"></script>
 </body>
 </html>

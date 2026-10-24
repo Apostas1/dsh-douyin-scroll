@@ -73,11 +73,22 @@ zzz.resize((SMALL, SMALL), Image.LANCZOS).save(os.path.join(OUT, "zzz.png"))
 print("道具 zzz OK")
 
 # ── 4) manifest ──────────────────────────────────────────
+# ── 10) 模型原件：引擎版桌宠直接吃 PSD（Anime2.5DRig 自动 rig） ──
+try:
+    import shutil
+    shutil.copyfile(os.path.join(ROOT, "psd", "model.psd"), os.path.join(OUT, "model.psd"))
+    print("model.psd OK（引擎直载）")
+except Exception as e:
+    print(f"model.psd 跳过: {e}")
+
 manifest = {
     "canvas": SMALL,
     "layers": LAYER_ORDER,
-    "props": ["phone", "zzz"],
-    "built_from": "鲸鱼娘拆解.psd（主人 2026-10-24 用豆包生成并拆层）",
+    "layer_variants": {"irides": {"entp": "irides-dark.png"}},
+    "overlays": {"entp": "darkmist.png"},
+    "props": ["phone", "zzz", "hardhat", "wrench", "ricebowl"],
+    "sfx": ["sfx-pop", "sfx-gulp"],
+    "built_from": "鲸鱼娘拆解.psd（主人 2026-10-24 用豆包生成并拆层）；道具/变体/音效由 pet-build.py 现画/现合成",
 }
 with open(os.path.join(OUT, "manifest.json"), "w", encoding="utf-8") as fp:
     json.dump(manifest, fp, ensure_ascii=False, indent=1)
