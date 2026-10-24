@@ -1,0 +1,14 @@
+{
+  "name": "dsh-deskpet-shell",
+  "productName": "DS-DeskPet",
+  "version": "0.1.0",
+  "description": "桌宠 Windows 壳：透明置顶 Electron 窗加载 pet-page（参考 whale-girl 桌面壳的实现）",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

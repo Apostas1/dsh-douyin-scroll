@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>deskpet-page</title>
+<link rel="stylesheet" href="pet.css">
+</head>
+<body>
+  <!-- 弹幕层：全屏，永远不接点击 -->
+  <div id="danmaku"></div>
+
+  <!-- 她本体：分层 PNG 叠加 + 泡泡 + 道具 -->
+  <div id="pet">
+    <div id="pet-bubble"></div>
+    <div id="pet-body"></div>
+  </div>
+
+  <!-- 聊天面板 -->
+  <div id="chat">
+    <div id="chat-title">跟她聊天</div>
+    <div id="chat-log"></div>
+    <div id="chat-row">
+      <input id="chat-input" type="text" placeholder="说点什么…（Enter 发送）">
+      <button id="chat-send">发</button>
+    </div>
+  </div>
+
+  <!-- 右键菜单（自绘，网页内） -->
+  <div id="menu">
+    <div class="mi" data-act="chat">💬 跟她聊天</div>
+    <div class="mi" data-act="feed">🍚 喂饭（大白饭）</div>
+    <div class="mi" data-act="repair">🔧 维修工模式</div>
+    <div class="sep"></div>
+    <div class="mi" data-act="danmaku">📺 弹幕模式</div>
+    <div class="mi" data-act="walk">🚶 走动</div>
+    <div class="mi" data-act="persona">🎭 人格：下一任</div>
+    <div class="sep"></div>
+    <div class="mi" data-act="hide">😪 去休息（面板可叫回）</div>
+    <div class="mi" data-act="quit">🚪 退出（关掉她）</div>
+  </div>
+
+  <script src="pet.js"></script>
+</body>
+</html>
