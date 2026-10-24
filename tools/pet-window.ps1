@@ -277,21 +277,45 @@ $script:repairOn = $false
 $script:danmakuIntentUntil = 0   # 右键弹幕的「待确认窗口期」截止时刻（unix 秒）
 $script:holdUntil = 0            # 泡泡保活：台词/打字回复在保活期内不许被待机清扫抹掉
 $script:doctorSeen = $false      # 维修工体检结果播过了吗（一篇只播一轮）
+$script:staleSaid = $false       # 留守模式说过了吗（说一次，不刷屏）
+$script:bornAt = $null           # 留守计时起点（状态文件彻底没了从这刻起算）
+$script:lastActivity = ''        # 上一条「在干嘛」播报（拟人状态，变了才说）
+$script:lastActivityAt = 0
+$script:talkUntil = 0            # 打字机说话期间嘴要动（unix 秒）
 
 function Load-All-Layers($spriteDir) {
   $order = @('back hair','tail','legwear','footwear','neck','topwear','handwear','headwear','face','eyebrow','eyewhite','irides','eyelash','mouth','front hair')
+  # 🔴 v5.5 分层驱动（跟 Anime2.5DRig 学的）：每张图层挂「平移+旋转」变换，
+  #    动作系统按**头组/身组/尾巴**分别驱动——点头真点头（头动身不动），
+  #    不再是整体缩放的假动作。
+  $script:layerT = @{}
+  $script:headLayers = @('headwear','face','eyebrow','eyewhite','irides','eyelash','mouth','front hair')
   foreach ($n in $order) {
     $img = New-Object System.Windows.Controls.Image
     $img.Stretch = 'Uniform'
     $f = $n
     if ($n -eq 'irides' -and [string]$script:cfg.persona -eq 'entp') { $f = 'irides-dark' }
     $img.Source = Build-Bitmap (Join-Path $spriteDir ("layers\" + $f + ".png"))
+    $lt = New-Object System.Windows.Media.TranslateTransform
+    $lr = New-Object System.Windows.Media.RotateTransform
+    $lr.CenterX = 0.5; $lr.CenterY = 1.0   # 绕图层底部转（≈脖颈位置，小角度近似统一枢轴）
+    $lg = New-Object System.Windows.Media.TransformGroup
+    [void]$lg.Children.Add($lt); [void]$lg.Children.Add($lr)
+    $img.RenderTransform = $lg
+    $script:layerT[$n] = @{ t = $lt; r = $lr }
     [void]$body.Children.Add($img)
     $script:layers[$n] = $img
   }
   # 眼随鼠标：irides 层平移（限 ±7px）
   $script:iridesT = New-Object System.Windows.Media.TranslateTransform
   $script:layers['irides'].RenderTransform = $script:iridesT
+  # 🔴 v5.5 虹膜缩放（眨眼用：眼皮合上时虹膜一起压扁，眨眼才看得见）
+  $script:irisSc = New-Object System.Windows.Media.ScaleTransform
+  $script:layers['irides'].RenderTransformOrigin = '0.5,0.5'
+  $irisGroup = New-Object System.Windows.Media.TransformGroup
+  [void]$irisGroup.Children.Add($script:iridesT)
+  [void]$irisGroup.Children.Add($script:irisSc)
+  $script:layers['irides'].RenderTransform = $irisGroup
   # 眨眼：eyelash scaleY
   $script:layers['eyelash'].RenderTransformOrigin = '0.5,0.42'
   $lashScale = New-Object System.Windows.Media.ScaleTransform
@@ -353,6 +377,8 @@ function Set-Motion([string]$persona) {
 }
 
 # ── 眨眼 timer（随机 2.8-5.2s）──
+# 🔴 v5.5（主人抓的「连眨眼都没有」）：以前只缩眼皮——眼皮那层大部分是透明的，
+#    缩了看不出来。现在眼皮 + 虹膜一起合（虹膜纵向压扁），这才看得见她在眨眼。
 $blinkTimer = New-Object System.Windows.Threading.DispatcherTimer
 $blinkTimer.Add_Tick({
   try {
@@ -361,6 +387,14 @@ $blinkTimer.Add_Tick({
     $blink.AutoReverse = $true
     $blink.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
     $script:lashScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $blink)
+    if ($script:irisSc) {
+      $bi = New-Object System.Windows.Media.Animation.DoubleAnimation(1, 0.12, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(90)))
+      $bi.AutoReverse = $true
+      $script:irisSc.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $bi)
+      $bix = New-Object System.Windows.Media.Animation.DoubleAnimation(1, 0.88, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(90)))
+      $bix.AutoReverse = $true
+      $script:irisSc.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $bix)
+    }
   } catch {}
 })
 
@@ -458,9 +492,28 @@ $script:lastStateKey = ''
 $script:lastAutoAt = 0
 $poll.Add_Tick({
   try {
-    if (-not (Test-Path $stateFile)) { $win.Close(); return }
-    $age = ([DateTime]::UtcNow - (Get-Item $stateFile).LastWriteTimeUtc).TotalSeconds
-    if ($age -gt 90) { $win.Close(); return }
+    # 🔴 v5.5 留守模式（主人抓的「重启面板她就消失」）：宿主重启要一两分钟，
+    #    以前 90 秒没状态她就自杀——主人回来她没了。现在改成：状态断了先说一句
+    #    人话（"主人去忙了吧，鱼在这里等"），然后**安静留守 30 分钟**；
+    #    状态回来就当无事发生，30 分钟还没回来才退（宿主真被卸载了）。
+    $stateUp = Test-Path $stateFile
+    $age = 9999.0
+    if ($stateUp) { $age = ([DateTime]::UtcNow - (Get-Item $stateFile).LastWriteTimeUtc).TotalSeconds }
+    if (-not $stateUp -or $age -gt 90) {
+      if (-not $script:bornAt) {
+        $script:bornAt = [DateTime]::UtcNow
+        $script:staleSaid = $false
+      }
+      $goneSec = ([DateTime]::UtcNow - $script:bornAt).TotalSeconds
+      if ($goneSec -gt 1800) { $win.Close(); return }   # 留守 30 分钟还没人来 ⇒ 真被卸载了
+      if (-not $script:staleSaid) {
+        $script:staleSaid = $true
+        Set-Bubble '主人是不是在重启呀…鱼在这里等，不走 (๑•́ ₃ •̀๑)'
+      }
+      return
+    }
+    # 状态回来了：留守解除，当无事发生
+    if ($script:bornAt) { $script:bornAt = $null; $script:staleSaid = $false }
     $j = Read-State
     if (-not $j) { return }
     # 开关被面板关掉 ⇒ 退（面板联动）
@@ -534,6 +587,15 @@ $poll.Add_Tick({
       Set-Bubble (Pick (P $link)); $script:lastAutoAt = $nowSec
     } elseif (-not $auto -and $bt.Text -and $nowSec -gt $script:holdUntil) {
       Set-Bubble ''
+    }
+    # 🔴 v5.5 拟人状态播报：宿主把「这一刻在干嘛」用人话写进状态（activity），
+    #    她念出来——像真的有人在刷视频，而不是状态灯闪。变了才说，不打架。
+    $act = ''
+    try { $act = [string]$j.activity } catch { $act = '' }
+    if ($act -and $act -ne $script:lastActivity -and $nowSec -gt ($script:lastActivityAt + 3)) {
+      $script:lastActivity = $act
+      $script:lastActivityAt = $nowSec
+      Set-Bubble $act
     }
   } catch {}
 })
@@ -635,33 +697,52 @@ function Talk-Toggle {
   }
 }
 function Bubble-Type([string]$text) {
-  # 打字机：逐字冒进头顶泡泡；期间嘴跟着开合（squash 当口型用）
+  # 打字机：逐字冒进头顶泡泡，说话期间嘴跟着张合（v5.5 用真嘴层 Set-Mouth）。
+  # 🔴 修「发了没反应」：旧版把 $run/$typeTimer 等当**函数局部变量**——定时器触发时
+  #    函数早已返回，PowerShell 里这些变量已经没了 ⇒ 逐字回调全是空操作，泡泡永远空。
+  #    全部挂到 $script: 作用域（脚本级闭包），回调才拿得到。
   Set-Bubble ''
   $bubble.Visibility = [System.Windows.Visibility]::Visible
   $bt.Inlines.Clear()
-  $run = New-Object System.Windows.Documents.Run ''
-  [void]$bt.Inlines.Add($run)
+  $script:typeRun = New-Object System.Windows.Documents.Run ''
+  [void]$bt.Inlines.Add($script:typeRun)
+  $script:typeText = $text
+  $script:typeI = 0
   $script:holdUntil = ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds + 6.5
-  $typeTimer = New-Object System.Windows.Threading.DispatcherTimer
-  $typeTimer.Interval = [TimeSpan]::FromMilliseconds(45)
-  $i = 0
-  $typeTimer.Add_Tick({
-    try {
-      $i++
-      $run.Text = $text.Substring(0, $i)
-      $chew = New-Object System.Windows.Media.Animation.DoubleAnimation(1, 0.94, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(70)))
-      $chew.AutoReverse = $true
-      $squash.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $chew)
-      if ($i -ge $text.Length) {
-        $typeTimer.Stop()
-        $t = New-Object System.Windows.Threading.DispatcherTimer
-        $t.Interval = [TimeSpan]::FromSeconds(6)
-        $t.Add_Tick({ $t.Stop(); if ($talkbar.Visibility -eq [System.Windows.Visibility]::Collapsed) { Set-Bubble '' } })
-        $t.Start()
-      }
-    } catch { try { $typeTimer.Stop() } catch {} }
-  })
-  $typeTimer.Start()
+  $script:talkUntil = ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds + ($text.Length * 0.055) + 0.6
+  if (-not $script:typeTimer) {
+    $script:typeTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:typeTimer.Interval = [TimeSpan]::FromMilliseconds(45)
+    $script:typeTimer.Add_Tick({
+      try {
+        if ($script:typeI -lt $script:typeText.Length) {
+          $script:typeI++
+          $script:typeRun.Text = $script:typeText.Substring(0, $script:typeI)
+        } else {
+          $script:typeTimer.Stop()
+          $t = New-Object System.Windows.Threading.DispatcherTimer
+          $t.Interval = [TimeSpan]::FromSeconds(6)
+          $t.Add_Tick({ $t.Stop(); if ($talkbar.Visibility -eq [System.Windows.Visibility]::Collapsed) { Set-Bubble '' } })
+          $t.Start()
+        }
+      } catch { try { $script:typeTimer.Stop() } catch {} }
+    })
+  }
+  if (-not $script:mouthTimer) {
+    # 嘴开合：说话期间随机张合（0.05s 一拍），说完闭嘴
+    $script:mouthTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:mouthTimer.Interval = [TimeSpan]::FromMilliseconds(110)
+    $script:mouthTimer.Add_Tick({
+      try {
+        $nowSec = ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds
+        if ($nowSec -lt $script:talkUntil) {
+          Set-Mouth ((Get-Random -Minimum 2 -Maximum 9) / 10.0)
+        } else { Set-Mouth 0; $script:mouthTimer.Stop() }
+      } catch { try { $script:mouthTimer.Stop() } catch {} }
+    })
+  }
+  $script:typeTimer.Start()
+  $script:mouthTimer.Start()
 }
 $tbSend.Add_Click({
   $text = $tbInput.Text.Trim()
@@ -678,24 +759,68 @@ $tbInput.Add_KeyDown({
   if ($e.Key -eq 'Enter') { $tbSend.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent)) }
 })
 
-# ── 小动作系统（主人问「动作这些你确定都弄好了吗」的窗体正解）──
-# PSD 没有动作文件 ⇒ 动作 = 关键帧编排：缩放/旋转逐帧插值；演完归位回 idle 节奏。
+# ── 小动作系统 v5.5（分层真动作 · 跟 Anime2.5DRig 的参数引擎学的）──
+# 🔴 主人抓的「一个动作都没做，连眨眼都没有」：v5.3 只会整体缩放（假动作）。
+#    现在 15 张图层每张挂了变换，动作按**头组/身组/尾巴/眉毛/嘴**分别驱动：
+#    点头=头组转+身组微反；歪头=头组转；摇头=头组横移；尾巴=tail 层独立摆。
+# 动作帧语法：{ms, headR(头组转角), headX(头组横移), bodyR(身组转角), bodyY(身组下压),
+#             tail(尾巴摆角), brow(眉毛y), mouth(嘴开合0-1)}
 $script:actionUntil = 0
 $script:actionFrames = $null
 $script:actionIdx = 0
 $script:actionTable = @{
-  happy    = @{ dur=1.4; say='开心～'; frames=@(
-                @{ ms=160; sy=1.10 }, @{ ms=160; sy=1.10 }, @{ ms=160; sy=1.08 }) }
-  surprise = @{ dur=1.2; say='诶？！'; frames=@(
-                @{ ms=140; sy=1.14; sx=0.95 }, @{ ms=300; sy=1.06 }) }
-  sulk     = @{ dur=1.8; say='哼…'; frames=@(
-                @{ ms=400; sy=0.94; sx=1.04 }, @{ ms=500; sy=0.96 }) }
-  wave     = @{ dur=1.5; say='挥挥～'; frames=@(
-                @{ ms=200; rot=10 }, @{ ms=200; rot=-8 }, @{ ms=200; rot=10 }) }
-  sleepy   = @{ dur=1.8; say='困了啦…'; frames=@(
-                @{ ms=500; sy=0.95; rot=4 }, @{ ms=500; sy=0.97; rot=-3 }) }
-  spin     = @{ dur=1.6; say='转圈圈～'; frames=@(
-                @{ ms=300; rot=14 }, @{ ms=300; rot=-14 }, @{ ms=300; rot=10 }) }
+  happy    = @{ dur=1.6; say='开心～'; frames=@(
+                @{ ms=200; headR=3; bodyY=3 }, @{ ms=200; headR=-3; bodyY=0 }, @{ ms=200; headR=3; bodyY=3 }, @{ ms=300; tail=18; mouth=0.7 }, @{ ms=300; tail=-14 }) }
+  surprise = @{ dur=1.3; say='诶？！'; frames=@(
+                @{ ms=150; headR=-4; headX=2; brow=-4 }, @{ ms=400; headR=2; brow=-3; mouth=0.9 }, @{ ms=350; mouth=0.3 }) }
+  sulk     = @{ dur=1.9; say='哼…'; frames=@(
+                @{ ms=400; headR=-6; headX=-3; brow=4; bodyY=2 }, @{ ms=500; headR=-4; tail=-10 }, @{ ms=500; headR=-6 }) }
+  wave     = @{ dur=1.7; say='挥挥～'; frames=@(
+                @{ ms=250; headR=5; bodyR=2; tail=12 }, @{ ms=250; headR=-4; tail=-10 }, @{ ms=250; headR=5; tail=12 }, @{ ms=300; mouth=0.6 }) }
+  sleepy   = @{ dur=2.0; say='困了啦…'; frames=@(
+                @{ ms=550; headR=7; bodyY=3 }, @{ ms=550; headR=8; bodyY=4; mouth=0.2 }, @{ ms=500; headR=6 }) }
+  spin     = @{ dur=1.7; say='转圈圈～'; frames=@(
+                @{ ms=280; headR=8; bodyR=4; tail=20 }, @{ ms=280; headR=-8; bodyR=-4; tail=-18 }, @{ ms=280; headR=6; tail=12 }) }
+}
+# 嘴层变换（说话/张嘴）：mouth 层往下拉+微缩 = 张嘴的错觉（位图分层能做到的最像做法）
+$script:mouthT = $null
+function Set-Mouth([double]$open) {
+  try {
+    if (-not $script:mouthT -and $script:layerT -and $script:layerT['mouth']) { $script:mouthT = $script:layerT['mouth'].t }
+    if ($script:mouthT) { $script:mouthT.Y = $open * 3.0 }   # 嘴层微下移 = 张开
+  } catch {}
+}
+# 每帧应用一个动作帧（90ms 步进，DoubleAnimation 走过去）
+function Apply-ActionFrame($f) {
+  try {
+    $dur = [TimeSpan]::FromMilliseconds([double]($f.ms))
+    $headNames = @('headwear','face','eyebrow','eyewhite','irides','eyelash','mouth','front hair')
+    $bodyNames = @('neck','topwear','handwear','legwear','footwear')
+    if ($f.PSObject.Properties['headR']) {
+      foreach ($n in $headNames) { if ($script:layerT[$n]) { $an = New-Object System.Windows.Media.Animation.DoubleAnimation(0, [double]$f.headR, $dur); $an.AutoReverse = $true; $an.EasingFunction = [System.Windows.Media.Animation.SineEase]::new(); $script:layerT[$n].r.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $an) } }
+    }
+    if ($f.PSObject.Properties['headX']) {
+      foreach ($n in $headNames) { if ($script:layerT[$n]) { $an = New-Object System.Windows.Media.Animation.DoubleAnimation(0, [double]$f.headX, $dur); $an.AutoReverse = $true; $script:layerT[$n].t.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $an) } }
+    }
+    if ($f.PSObject.Properties['bodyR']) {
+      foreach ($n in $bodyNames) { if ($script:layerT[$n]) { $an = New-Object System.Windows.Media.Animation.DoubleAnimation(0, [double]$f.bodyR, $dur); $an.AutoReverse = $true; $script:layerT[$n].r.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $an) } }
+    }
+    if ($f.PSObject.Properties['bodyY']) {
+      foreach ($n in $bodyNames) { if ($script:layerT[$n]) { $an = New-Object System.Windows.Media.Animation.DoubleAnimation(0, [double]$f.bodyY, $dur); $an.AutoReverse = $true; $script:layerT[$n].t.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $an) } }
+    }
+    if ($f.PSObject.Properties['tail'] -and $script:layerT['tail']) {
+      $an = New-Object System.Windows.Media.Animation.DoubleAnimation(0, [double]$f.tail, $dur)
+      $an.AutoReverse = $true; $an.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
+      $script:layerT['tail'].r.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $an)
+    }
+    if ($f.PSObject.Properties['brow'] -and $script:layerT['eyebrow']) {
+      $an = New-Object System.Windows.Media.Animation.DoubleAnimation(0, [double]$f.brow, $dur)
+      $an.AutoReverse = $true
+      $script:layerT['eyebrow'].t.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $an)
+    }
+    if ($f.PSObject.Properties['mouth']) { Set-Mouth ([double]$f.mouth) }
+    else { Set-Mouth 0 }
+  } catch {}
 }
 function Start-Action([string]$name) {
   $a = $script:actionTable[$name]
@@ -716,29 +841,20 @@ $script:actionTimer.Add_Tick({
     $a = $script:actionFrames
     if ($script:actionIdx -ge $a.Count) {
       $script:actionTimer.Stop(); $script:actionFrames = $null
-      # 归位：清掉编排动画，回 idle 节奏
-      $squash.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $null)
-      $squash.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null)
-      $sway.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
+      # 归位：所有图层变换动画清零，回 idle 节奏
+      foreach ($k in $script:layerT.Keys) {
+        try {
+          $script:layerT[$k].t.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null)
+          $script:layerT[$k].t.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null)
+          $script:layerT[$k].r.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
+        } catch {}
+      }
       Set-Motion ([string]$script:cfg.persona)
+      Set-Mouth 0
       return
     }
     $f = $a[$script:actionIdx]; $script:actionIdx++
-    if ($f.sx) {
-      $ax = New-Object System.Windows.Media.Animation.DoubleAnimation(1, $f.sx, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($f.ms)))
-      $ax.AutoReverse = $true; $ax.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
-      $squash.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $ax)
-    }
-    if ($f.sy) {
-      $ay = New-Object System.Windows.Media.Animation.DoubleAnimation(1, $f.sy, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($f.ms)))
-      $ay.AutoReverse = $true; $ay.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
-      $squash.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $ay)
-    }
-    if ($f.rot) {
-      $ar = New-Object System.Windows.Media.Animation.DoubleAnimation(0, $f.rot, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($f.ms)))
-      $ar.AutoReverse = $true; $ar.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
-      $sway.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $ar)
-    }
+    Apply-ActionFrame $f
   } catch { try { $script:actionTimer.Stop(); $script:actionFrames = $null } catch {} }
 })
 function Chat-Brain([string]$text) {

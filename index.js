@@ -2663,10 +2663,12 @@ export function apply(ctx, config) {
       })
       ;(async () => {
         try {
+          petSay('刷抖音喽！鱼先去把候选捞回来～')
           const ev = buildEvidence(Math.max(1, Math.min(Number(cfg.maxPerRun) || 12, 30)))
           log(ev.ok
             ? `证据包已备好：${ev.count} 条 → ${join(stateDir, 'round-evidence.json')}`
             : `证据包没备成（${ev.error}）—— 这一轮照样起，模型会读到空包并如实写进报告`)
+          petSay(ev.ok ? `捞到 ${ev.count} 条候选，鱼在挨个看…` : '候选没捞着…鱼空着手也要把这轮跑完')
           const dsh = resolveDsh()
           const overlay = ensureOverlay()
           const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
@@ -2674,6 +2676,7 @@ export function apply(ctx, config) {
           args.push(promptFor(why))
           const cwd = stateDir
           log(`刷抖音开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
+          petSay('开工开工～鱼一条条挑，马上回来')
           const child = spawn(dsh.command, args, {
             cwd,
             shell: dsh.shell,
@@ -2706,6 +2709,7 @@ export function apply(ctx, config) {
             dutyRunning = false
             bumpState({ dutyRunningAt: 0, roundActive: false })
             log(`刷抖音结束（${why}，code=${code}）`)
+            petSay(code === 0 ? '这轮挑完啦！报告写好了，主人去看呀～' : '这轮…有点不顺利，鱼歇会儿再战')
             stubReportIfMissing(code)
             rotateLogIfBig()
             try {
@@ -2943,6 +2947,14 @@ export function apply(ctx, config) {
   let petSpawningAt = 0
   let petOnPrev = null
   const petHideFile = () => join(stateDir, 'pet-hide.json')
+  /** 🔴 v5.5 拟人状态：把「这一刻在干嘛」用人话写进桌宠状态，她念出来。
+   *  只追加字段，不动其他键；写失败不影响正事。 */
+  const petSay = (text) => {
+    try {
+      const j = readJson(petWinStateFile, null)
+      writeJson(petWinStateFile, { ...(j || {}), activity: String(text || ''), ts: Date.now() })
+    } catch { /* 播报是锦上添花，失败不碍事 */ }
+  }
   /** 窗口意图文件：右键菜单写 pet-cmd.json，keeper 每拍应用（readJson 已剥 BOM——PS5.1 教训） */
   const petCmdFile = () => join(stateDir, 'pet-cmd.json')
   const petApplyCmd = () => {
