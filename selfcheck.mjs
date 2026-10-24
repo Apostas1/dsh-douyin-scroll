@@ -942,9 +942,8 @@ try {
   if (/chatReplyRun|chatReplyPrompt|chatReply:/.test(idx)) bad('插件里又有「现起会话回话」的代码 —— 已定稿拆掉，回话归 AI 值班')
   else ok('插件没有「现起会话回话」（回话 = AI 值班，插件只做眼睛）')
 
-  // ⑦ 桌宠（2026-10-24 v2：桌面级置顶窗口——主人要求「悬浮在所有窗口上」）：
-  //    宿主 petKeeper + /pet/state + PowerShell/WPF 置顶透明窗（pet-window.ps1）。
-  if (/pet\/state/.test(idx) && /petStateOf/.test(idx)) ok('后端有 /pet/state（真实状态聚合成「她在干嘛」）')
+  // ⑦ 桌宠状态源（2026-10-24 v3：窗口/开关全搬去独立插件 dsh-deskpet，这里只留状态）
+  if (/pet\/state/.test(idx) && /petStateOf/.test(idx)) ok('后端有 /pet/state（真实状态聚合，dsh-deskpet 经它联动）')
   else bad('没有桌宠状态接口')
   // 🔴 素材服务必须白名单（别开成任意文件读取）——
   //    从「路由匹配那行」往后截 900 字符（注释里也提 /pet/asset，从那里截会截错段）
@@ -957,28 +956,13 @@ try {
     if (/assets\/pet\//.test(gi)) ok('.gitignore 挡住了 assets/pet/（桌宠素材是主人私货，不随仓库发布）')
     else bad('.gitignore 没挡 assets/pet/ —— 私货素材会被推上公开仓库')
   } catch { bad('读不到 .gitignore') }
-  // v2：桌面窗口三件套 —— 脚本在、置顶透明、宿主有 keeper
-  try {
-    const ps1 = existsSync(join(here, 'tools', 'pet-window.ps1')) ? readFileSync(join(here, 'tools', 'pet-window.ps1'), 'utf8') : ''
-    if (ps1) {
-      if (/Topmost\s*=\s*\$true/.test(ps1)) ok('桌面窗置顶（Topmost —— 悬浮所有窗口之上，主人 2026-10-24 要求）')
-      else bad('桌面窗没置顶 —— 不满足「悬浮在所有窗口上」')
-      if (/AllowsTransparency/.test(ps1) && /ShowInTaskbar\s*=\s*\$false/.test(ps1)) ok('桌面窗透明无边框 + 不进任务栏')
-      else bad('桌面窗属性不对（要透明无边框且不进任务栏）')
-      if (/pet-hide\.json/.test(ps1)) ok('右键她可去休息（写 hide 标记，keeper 不再拉起）')
-      else bad('没有右键退场')
-      if (/phone\.png/.test(ps1) && /zzz\.png/.test(ps1)) ok('窗口认状态道具（watch=手机 / sleep=Zzz）')
-      else bad('窗口不认状态道具')
-    } else bad('缺 tools/pet-window.ps1 —— 桌宠窗口本体没了')
-  } catch (e) { bad(`桌面窗检查失败：${e.message}`) }
-  if (/petKeeperTick/.test(idx) && /pet-window\.ps1/.test(idx)) ok('宿主有 petKeeper（按开关拉起/收掉窗口 + 写状态文件）')
-  else bad('没有 petKeeper —— 窗口没人管')
-  // 🔴 GUI 浮层必须撤（v2 起是桌面窗口，网页浮层会出现两只她）
-  if (/slots\.inject\('shell\.overlay'/.test(cl)) bad('还在往 shell.overlay 注册桌宠 —— v2 起是桌面窗口，GUI 浮层必须撤')
-  else ok('GUI 内没有桌宠浮层（桌面窗口接管，不会出现两只）')
-  // petOn 必须 zod + DEFAULTS 双登记（同 chatWatch 的事故口径）
-  if (/petOn: z\.boolean\(\)\.default\(true\)/.test(idx) && /DEFAULTS = \{[\s\S]{0,1000}?petOn: true/.test(idx)) ok('petOn 双登记（zod + DEFAULTS 都有，默认开）')
-  else bad('petOn 只登记了一边 —— 开关会点了没反应')
+  // 🔴 v3 防倒退：窗口管理已搬去 dsh-deskpet，这里不许再养窗口/keeper/开关
+  if (/petKeeperTick|pet-window\.ps1|petWinChild/.test(idx)) bad('还在养桌宠窗口（keeper/ps1/子进程）—— 已搬去 dsh-deskpet，留在这儿会出两只她')
+  else ok('不再养桌宠窗口（已搬去 dsh-deskpet，只留状态源）')
+  if (/petOn: z\./.test(idx) || /petOn: true/.test(idx)) bad('petOn 配置还在 —— deskpet 插件有自己的开关，两个开关会打架')
+  else ok('petOn 已随桌宠迁走（开关归 dsh-deskpet）')
+  if (/slots\.inject\('shell\.overlay'/.test(cl)) bad('还在往 shell.overlay 注册桌宠')
+  else ok('GUI 内没有桌宠浮层')
   // 状态优先级：run > error > watch > idle；sleep = 时段全关+聊天关
   if (/state = 'run'/.test(idx) && /state = 'sleep'/.test(idx) && /state = 'watch'/.test(idx)) ok('状态机四态齐（run/watch/sleep + 兜底 idle）')
   else bad('状态机不完整')

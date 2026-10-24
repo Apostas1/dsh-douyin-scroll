@@ -141,12 +141,7 @@ export const Config = !z ? undefined : z.object({
   chatWatch: z.boolean().default(true).extra('volatile', true),
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
-  /**
-   * ⭐ 桌宠（2026-10-24）：右下角的「窗口宠」开关。
-   *    素材在 assets/pet/（主人本地私货，.gitignore 已隔离，不随仓库发布）——
-   *    别的机器装了没有素材时，开着也不会显示（/pet/state 的 asset_ok 会挡）。
-   */
-  petOn: z.boolean().default(true).extra('volatile', true),
+  // ⚠️ 2026-10-24 petOn 已随桌宠搬到独立插件 dsh-deskpet（状态源 /pet/state 还在）。
   /**
    * ⭐ 2026-10-24 定稿（使用者：「我要的是迁移，不是开发新功能」）：
    *    聊天模式 = 今早实测那套的「读」半边（30 秒一读 + 通知 + 状态屏）。
@@ -260,7 +255,6 @@ export function apply(ctx, config) {
     // ⭐ 聊天模式（2026-10-24 定稿：默认开启，使用者拍板；要关就整个关掉）。
     //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
     chatWatch: true, chatWatchSec: 30,
-    petOn: true,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
@@ -2904,67 +2898,13 @@ export function apply(ctx, config) {
         checked_ago: cw.lastCheckAt ? Math.round((Date.now() - cw.lastCheckAt) / 1000) : null,
       } : { on: false },
       asset_ok: Boolean(petManifestOf()),
-      pet_on: Boolean(cfg.petOn),
       now: Date.now(),
     }
   }
-  /** 桌宠窗口状态文件：桌面窗（pet-window.py）轮询这个文件决定显示什么。
-   *  写入很轻（小 JSON）；15 秒一拍跟 GUI 内浮层时代一个节奏。 */
-  const petWinStateFile = join(stateDir, 'pet-window-state.json')
-  const petWinWrite = () => {
-    try {
-      const s = petStateOf()
-      writeFileSync(petWinStateFile, JSON.stringify({ ...s, sprite_dir: petSpriteDirOf() }, null, 1), 'utf8')
-    } catch { /* 写不进去也不能出事 */ }
-  }
-  /** petKeeper：盯 petOn 开关——开着且桌面窗没活着就拉起；关了/素材没了就收掉。
-   *  窗口本体是 PowerShell + WPF（tools/pet-window.ps1，置顶透明窗，系统自带运行时）。
-   *  右键她 = 「去休息」：窗口写 pet-hide.json 后自退 —— keeper 看见 hide 就**不再拉起**，
-   *  直到主人把面板开关关一次再开（关的时候删 hide 标记）。
-   *  🔴 定时器回调必须自己兜异常（宿主红线）。 */
-  let petWinChild = null
-  let petOnPrev = null
-  const petHideFile = () => join(stateDir, 'pet-hide.json')
-  const petKeeperTick = () => {
-    try {
-      const s = petStateOf()
-      // 开关从开→关：清掉「去休息」标记（下次打开 = 全新的她）
-      if (petOnPrev === true && !cfg.petOn) { try { rmSync(petHideFile(), { force: true }) } catch { /* 无所谓 */ } }
-      petOnPrev = Boolean(cfg.petOn)
-      const hidden = existsSync(petHideFile())
-      const want = Boolean(cfg.petOn) && s.asset_ok && !hidden
-      const alive = petWinChild && !petWinChild.killed
-      if (want && !alive) {
-        petWinWrite()
-        const ps = join(pluginDir, 'tools', 'pet-window.ps1')
-        const pwsh = process.env.ProgramFiles && existsSync(join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'))
-          ? join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe')
-          : 'powershell.exe'
-        petWinChild = spawn(pwsh, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps], {
-          windowsHide: true,   // 只藏 PowerShell 自己的控制台；她的 WPF 窗口照常显示
-          stdio: 'ignore',
-          env: pyEnv({ DOUYIN_HOME: stateDir }),
-        })
-        petWinChild.unref?.()
-        petWinChild.on('exit', () => { petWinChild = null })
-        log('桌宠窗口已拉起（置顶透明窗，右键她可让她去休息）')
-      } else if (!want && alive) {
-        try { petWinChild.kill() } catch { /* 已经没了 */ }
-        petWinChild = null
-        log('桌宠开关关了 / 素材没了 / 她在休息 —— 桌面窗已收')
-      }
-      if (want) petWinWrite()
-    } catch (e) { log(`petKeeper 这一拍出错（已兜住）：${e?.message ?? e}`) }
-  }
-  try {
-    const pk = setInterval(petKeeperTick, 15_000)
-    pk.unref?.()
-    petKeeperTick()
-    ctx.effect(() => () => {
-      clearInterval(pk)
-      try { petWinChild?.kill() } catch { /* 收摊 */ }
-    }, 'douyin-duty: 桌宠窗口守护')
-  } catch (e) { log(`petKeeper 没起来：${e?.message ?? e}`) }
+  /* ── 桌宠已搬去独立插件 dsh-deskpet（2026-10-24 主人指令 ⑦：新建桌宠项目）。
+   *    这里只留「状态源」：petStateOf() + /pet/state 供外部读；
+   *    不再拉窗口、不写 pet-window-state.json、不养 keeper —— 那些归 dsh-deskpet。
+   *    （旧的窗口守护代码已整体删除，历史见 CHANGELOG 0.4.x。） */
 
   /* ─────────────── 健康信号 ─────────────── */
   const healthFile = join(stateDir, 'health.json')
@@ -3216,9 +3156,9 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, ...s, now: Date.now() })
     }
 
-    /* ─────────────── ⭐ 桌宠（2026-10-24）───────────────
-     * /pet/state  —— 聚合真实状态（petStateOf() 在路由外定义，桌面窗的写入器共用）。
-     * /pet/asset/* —— 白名单素材服务（见下）。
+    /* ─────────────── ⭐ 桌宠状态源（2026-10-24 v3：只留状态，窗口归 dsh-deskpet）───────────────
+     * /pet/state  —— 聚合真实状态（petStateOf()），dsh-deskpet 的窗口经它联动。
+     * /pet/asset/* —— 白名单素材服务（历史保留；dsh-deskpet 自带素材，这里不再必需）。
      */
     if (req.method === 'GET' && path === '/api/douyin-duty/pet/state') {
       return sendJson(res, 200, petStateOf())

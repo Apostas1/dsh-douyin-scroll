@@ -626,30 +626,18 @@ if (rLog) {
   else { console.log('  ❌ 没显示上次跑时间'); fail++ }
 }
 
-/* ── 桌宠（2026-10-24 v2：桌面级置顶窗口）──
- *    她不再走 GUI 浮层（上面已断言不许注册 shell.overlay）。
- *    这里验「桌面窗那条路」的关键件：窗口脚本存在 + keeper 写状态文件。 */
+/* ── 桌宠（2026-10-24 v3：窗口已搬去独立插件 dsh-deskpet）──
+ *    这里只守状态源 + 防倒退（不许再养窗口）。 */
 console.log('\n【桌宠】')
 {
   const idx = readFileSync(join(ROOT, 'index.js'), 'utf8')
-  const win = join(ROOT, 'tools', 'pet-window.ps1')
-  if (existsSync(win)) console.log('  ✅ 桌面窗脚本在（tools/pet-window.ps1，置顶透明窗）')
-  else { console.log('  ❌ 缺 tools/pet-window.ps1 —— 桌宠窗口本体没了'); fail++ }
-  const ps1 = existsSync(win) ? readFileSync(win, 'utf8') : ''
-  if (/Topmost\s*=\s*\$true/.test(ps1)) console.log('  ✅ 窗口置顶（Topmost，浮在所有窗口上——主人 2026-10-24 要求）')
-  else { console.log('  ❌ 窗口没置顶'); fail++ }
-  if (/AllowsTransparency/.test(ps1) && /WindowStyle.*None/.test(ps1)) console.log('  ✅ 无边框全透明（只看见她，看不见窗）')
-  else { console.log('  ❌ 不是透明无边框窗'); fail++ }
-  if (/phone\.png/.test(ps1) && /zzz\.png/.test(ps1)) console.log('  ✅ 状态驱动道具（watch=手机 / sleep=Zzz）')
-  else { console.log('  ❌ 窗口不认状态道具'); fail++ }
-  if (/pet-hide\.json/.test(ps1) && /MouseRightButtonDown/.test(ps1)) console.log('  ✅ 右键去休息（写 hide 标记后自退）')
-  else { console.log('  ❌ 没有右键退场'); fail++ }
-  if (/petKeeperTick/.test(idx) && /pet-window\.ps1/.test(idx)) console.log('  ✅ 宿主有 petKeeper（拉起/收掉桌面窗 + 15 秒写状态）')
-  else { console.log('  ❌ 没有 petKeeper —— 窗口没人管'); fail++ }
-  // 面板开关文案更新过（指向桌面窗口而不是右下角浮层）
   const cl = readFileSync(join(ROOT, 'client.js'), 'utf8')
-  if (/所有窗口的最上层/.test(cl)) console.log('  ✅ 面板文案是桌面窗口版')
-  else { console.log('  ❌ 面板文案还是 GUI 浮层版'); fail++ }
+  if (/petStateOf/.test(idx) && /\/pet\/state/.test(idx)) console.log('  ✅ 状态源在（/pet/state，dsh-deskpet 经它联动）')
+  else { console.log('  ❌ 状态源没了 —— deskpet 联动会瞎'); fail++ }
+  if (/petKeeperTick|pet-window\.ps1|petWinChild/.test(idx)) { console.log('  ❌ 还在养桌宠窗口 —— 已搬去 dsh-deskpet，会出两只她'); fail++ }
+  else console.log('  ✅ 不养窗口（已搬去 dsh-deskpet）')
+  if (/桌宠/.test(cl)) { console.log('  ❌ 面板还有桌宠卡片 —— 开关会跟 deskpet 打架'); fail++ }
+  else console.log('  ✅ 面板没有桌宠卡片（开关归 dsh-deskpet）')
 }
 
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')
