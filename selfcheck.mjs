@@ -156,6 +156,54 @@ try {
   else bad('没读 unreadCount —— 面板算不出"谁可能有未读"')
 } catch (e) { bad(`读不了 tools/im-send.mjs（私信闸）：${e.message}`) }
 
+/* ── 4b-3. 纯 HTTP 读私信（im-http.mjs，2026-10-24） ──
+ *
+ * 背景：浏览器读私信冷启动 ~10s，且"谁发的"靠头像左右猜、时间戳恒为 0。
+ * 抖音 IM 实际走 imapi.douyin.com 的 protobuf（只要 Cookie，实测 ~0.7s）。
+ * 这里守住三件事：
+ *   ① im-http.mjs 必须是**纯只读**（出现发送代码立刻报红）
+ *   ② 它必须带真实时间戳和发送者 uid（这是它相对浏览器路径的核心优势）
+ *   ③ index.js 的 douyin_im_read 必须先试它、失败退回浏览器（两条路不能只留一条）
+ *   ④ 信封必须是自己构造的 —— 不许把第三方 base64 常量抄进来
+ *      （逆向项目公开的信封里嵌着**他们自己的会话 ID**，抄进来是脏东西）
+ */
+console.log('\n4b-3. 纯 HTTP 读私信（im-http.mjs）')
+try {
+  const h = readFileSync(join(here, 'tools', 'im-http.mjs'), 'utf8')
+
+  // ① 只读红线（剥掉注释再查，免得注释里的说明文字自咬尾巴）
+  const hCode = h.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '').replace(/([^:'"`])\/\/[^\n]*/g, '$1')
+  if (/message\/send|\/v1\/send|sendMsg|publish/i.test(hCode)) {
+    bad('im-http.mjs 里出现了发送代码 —— 它必须只是个只读工具，发私信只走 im-send.mjs')
+  } else ok('im-http.mjs 是纯只读（没有任何发送调用）')
+  if (h.includes('--read') && !/argv\.includes\('--write'\)|--send/.test(h)) ok('入口只认 --read 参数')
+  else bad('im-http.mjs 的参数入口不对')
+
+  // ② 数据质量：时间戳 + 发送者
+  if (/field10|at:\s*iso|毫秒时间戳/.test(h)) ok('消息带真实毫秒时间戳（iso()）')
+  else bad('没解时间戳 —— HTTP 路径的核心优势没了')
+  if (/发送者 uid|sender === myUid/.test(h)) ok('发送者按协议字段判（uid 比对，不靠头像猜）')
+  else bad('没按 uid 判发送者 —— 会退回头像猜的老毛病')
+  if (/short_id:\s*String/.test(h)) ok('short_id 以字符串透传（19 位数，Number 会丢精度）')
+  else bad('short_id 走了 Number —— 会被截断')
+
+  // ③ index.js 双路径
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  if (/im-http\.mjs/.test(idx)) ok('douyin_im_read 先走 HTTP 快路径（im-http.mjs）')
+  else bad('index.js 没接 im-http.mjs —— 快路径丢了')
+  if (/im-send\.mjs/.test(idx) && /陌生人/.test(idx.slice(idx.indexOf('douyin_im_read'), idx.indexOf('douyin_im_read') + 4000))) {
+    ok('读不到时退回浏览器路径（陌生人消息只有那条路能读）')
+  } else bad('没有浏览器兜底 —— 陌生人的私信会读不到')
+  if (/via:\s*'http'/.test(idx)) ok('返回里带 via 标明走的哪条路')
+  else bad('没有 via 字段 —— 分不清这次读走的是哪条路')
+
+  // ④ 信封必须是自建的
+  if (/CK0CEKZOGg|_ENVELOPE_B64\s*=\s*"A-Za-z0-9/.test(h)) {
+    bad('im-http.mjs 里抄了第三方 base64 信封常量 —— 要自己构造（别人的信封里嵌着他们自己的会话 ID）')
+  } else if (/buildEnvelope/.test(h)) ok('信封是 buildEnvelope 自建的（没有第三方常量）')
+  else bad('找不到 buildEnvelope —— 信封构造没了')
+} catch (e) { bad(`读不了 tools/im-http.mjs：${e.message}`) }
+
 /* ── 4c. 「先卡片，后文字」这条规矩不能被改回去 ── */
 console.log('\n4c. 发送顺序规矩（先卡片，后文字）')
 try {

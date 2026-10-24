@@ -228,6 +228,36 @@ const currentConvId = (ev) => ev(`(function(){
 })()`)
 
 /**
+ * ⭐ 等会话列表真的渲染出来（**别拿"URL 已经是 /chat"当加载完成**）。
+ *
+ * 🔴 2026-10-23 实测踩到的坑：
+ *    冷启动（无头 Chrome 刚起来）时 `location.href` 可能**已经是 /chat**，
+ *    于是原来那句 `if (!url.includes('/chat')) { navigate; sleep(5000) }` 被跳过，
+ *    紧接着就去 listConversations —— 此时列表还没渲染，`querySelectorAll` 返回 **0 个**，
+ *    或者只返回几个 —— 于是"找不到人"，报成 `not-found`。
+ *    实测：冷启动后 `--read 枫眠` 直接失败，candidates 里只有 1 个人（应该有 14 个）。
+ *
+ * 所以：**轮询等列表出现**，并在拿到第一次之后再多等一会儿让它稳定（虚拟列表会分批渲染）。
+ * 返回最后看到的条数（0 = 等超时了，列表真的没出来）。
+ */
+async function waitList(ev, { timeoutMs = 15000, settleMs = 600 } = {}) {
+  const t0 = Date.now()
+  let last = 0
+  let stable = 0
+  while (Date.now() - t0 < timeoutMs) {
+    const n = Number(await ev(`document.querySelectorAll('[data-e2e="conversation-item"]').length`)) || 0
+    if (n > 0) {
+      // 拿到之后就等它"不再变多"，避免只渲染了一部分就往下走
+      if (n === last) stable++
+      else { stable = 0; last = n }
+      if (stable >= 2) return n
+    }
+    await sleep(settleMs)
+  }
+  return last
+}
+
+/**
  * 打开会话。返回 { status, matched }
  *   status: 'already-open' | 'clicked' | 'not-found' | 'ambiguous' | 'no-list'
  *           | 'unverifiable' | 'mismatch' | 'offscreen'
@@ -298,6 +328,8 @@ async function openConversation(ev, send, who, whoId) {
       // 右栏读不到昵称 ⇒ 不能想当然，落到下面去点列表
     }
   }
+  // ⭐ 别急着找 —— 先等列表真的渲染出来（冷启动时 URL 已是 /chat 但列表还没好）
+  await waitList(ev)
   const raw = await listConversations(ev)
   let list = []
   try { list = JSON.parse(raw) || [] } catch { list = [] }
@@ -503,6 +535,8 @@ async function main() {
         await sleep(5000)
       }
       await sleep(2500)
+      // ⭐ 等列表渲染出来再读（冷启动时 2500ms 可能不够）
+      await waitList(c.ev)
       const raw = await listConversations(c.ev)
       let list = []
       try { list = JSON.parse(raw) || [] } catch { list = [] }

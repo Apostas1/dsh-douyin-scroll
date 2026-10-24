@@ -1538,10 +1538,11 @@ export function apply(ctx, config) {
 
   tool({
     name: 'douyin_im_read',
-    description: '读私信：无头 Chrome（无窗口）打开会话，返回最近的对话 —— 每条都带 `from`（me / them / unknown），'
-      + '所以能分清「他刚回了什么」和「我上次说了什么」。只读，不发任何东西。'
+    description: '读私信：**先走纯 HTTP 快路径**（~1 秒，不启浏览器，每条带真实时间戳和发送者），'
+      + '目标不在已建立会话里（比如陌生人）时自动退回无头 Chrome 路径。'
+      + '每条都带 `from`（me / them / unknown），能分清「他刚回了什么」和「我上次说了什么」。只读，不发任何东西。'
       + '⭐ **会自动带上记忆**：返回里 `context` 是我记得的这个人（长期事实 + 之前聊过的内容），'
-      + '回话之前先看它，别把聊过的事当没说过。',
+      + '回话之前先看它，别把聊过的事当没说过。返回里 `via` 标明这次走的哪条路。',
     parameters: {
       to: { type: 'string', description: '要打开的会话昵称；留空用配置 dmTo' },
       to_id: { type: 'string', description: '⭐ 稳定 id（sec_uid）；重名时给这个' },
@@ -1551,6 +1552,58 @@ export function apply(ctx, config) {
       const to = String(args.to || cfg.dmTo || '').trim()
       const toId = String(args.to_id || cfg.dmToId || '').trim()
       if (!to && !toId) return { ok: false, error: '不知道读谁的会话', hint: '传 to / to_id，或在设置里填私信对象' }
+      const limit = Math.max(1, Math.min(Number(args.limit) || 30, 60))
+
+      /**
+       * ⭐ 快路径（2026-10-24）：先试纯 HTTP（tools/im-http.mjs，不碰浏览器）。
+       *    实测 ~0.7s 拿到全部已建立会话 + 每会话 20 条消息，而且**每条带真实
+       *    毫秒时间戳和发送者 uid**（浏览器路径这两样都拿不到）。
+       *    ⚠️ 它只覆盖「已建立会话」；陌生人消息不在里面。所以：
+       *      · HTTP 说 OK 且里面找得到这个人 → 直接用（不启 Chrome）
+       *      · 其余情况（接口挂 / 限流 / 这人不在已建立会话里）→ 自动退回浏览器路径
+       *    两条路返回结构对齐，调用方（值班轮/面板）不用改。
+       */
+      let http = null
+      try {
+        const r0 = runNodeTool('im-http.mjs', ['--read', '--limit', String(limit)], { timeout: 30_000 })
+        http = pickJson(r0.stdout)
+      } catch { http = null }
+      if (http && http.ok && Array.isArray(http.conversations)) {
+        // 在已建立会话里找目标：按 uid（conv_id 里的两个 uid，去掉自己）
+        const wantedUid = toId || ''
+        const hit = http.conversations.find((c) => c.peer_uid && c.peer_uid === wantedUid)
+          || (to && http.conversations.length === 1 ? http.conversations[0] : undefined)
+        if (hit) {
+          const allMsgs = hit.messages || []
+          const msgs = allMsgs.slice(-limit)
+          let context = null
+          let memory = null
+          try {
+            const secUid = String(toId || '').trim()
+            if (secUid) {
+              memory = mergeDmMemory(stateDir, secUid, to || hit.peer_uid, allMsgs)
+              context = dmContext(stateDir, secUid, { recent: 12 })
+            }
+          } catch (e) { log(`读私信记忆失败（不影响这次读）：${e?.message ?? e}`) }
+          log(`im-read(HTTP) ${to || toId}: ${allMsgs.length} 条，${http.ms}ms，没启浏览器`)
+          return {
+            ok: true, via: 'http',
+            to, to_sec_uid: toId || undefined,
+            matched_by: 'uid(已建立会话)',
+            count: allMsgs.length,
+            mine: allMsgs.filter((m) => m.from === 'me').length,
+            them: allMsgs.filter((m) => m.from === 'them').length,
+            unknown: 0,
+            sender_attribution: '协议字段（发送者 uid，不是头像左右推断）',
+            messages: msgs,
+            their_latest: allMsgs.filter((m) => m.from === 'them').slice(-3).reverse(),
+            context: context || { note: '这个人以前没聊过（记忆里没有记录）' },
+            memory: memory ? { rounds: memory.rounds, total: memory.total, added: memory.added } : null,
+          }
+        }
+        // 找不到这个人（可能是陌生人）⇒ 落到浏览器路径，它能读陌生人
+      }
+
       const argv = ['--read']
       if (to) argv.push('--to', to)
       if (toId) argv.push('--to-id', toId)
@@ -1558,7 +1611,6 @@ export function apply(ctx, config) {
       const j = pickJson(r.stdout)
       if (!j) return { ok: false, error: '读不到会话', stdout: r.stdout.slice(0, 400), stderr: r.stderr.slice(0, 300) }
       if (!j.ok) return j
-      const limit = Math.max(1, Math.min(Number(args.limit) || 30, 60))
       const allMsgs = Array.isArray(j.messages) ? j.messages : []
       const msgs = allMsgs.slice(-limit)
 
