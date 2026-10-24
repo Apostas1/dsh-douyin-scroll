@@ -1013,13 +1013,15 @@ try {
   else bad('autoSend 开着时提示词没变化')
 
   // ③ 面板必须有开关，而且要在**显眼位置**（不能埋在长面板底部）
+  // 🔴 2026-10-24 主人令：面板重排——「开始使用」置顶，第二张才是「刷抖音」（含自动发送）。
+  //    旧的顺序约定（自动发送在开始使用之前）作废；新约定：开始使用 → 刷抖音 → 自动发送 → 评论区@我
   if (/自动发送/.test(cl) && /autoSend/.test(cl)) ok('面板有「自动发送」开关')
   else bad('面板没有自动发送开关')
   {
-    const iAuto = cl.indexOf("'自动发送'")
     const iStart = cl.indexOf("'开始使用'")
-    if (iAuto > 0 && iStart > iAuto) ok('自动发送卡在「开始使用」之前（不用滚到底才看见）')
-    else bad('自动发送卡位置太靠后 —— 用户找不到')
+    const iAuto = cl.indexOf("'自动发送'")
+    if (iStart > 0 && iAuto > iStart) ok('「开始使用」置顶、自动发送在其后（2026-10-24 主人令的新顺序）')
+    else bad(`卡片顺序不对（开始使用@${iStart} 自动发送@${iAuto}）—— 开始使用应置顶`)
   }
 
   /* ── ④ 「在评论区 @ 你」（用户 2026-10-22 要求，加在自动发送下面） ── */
@@ -1029,13 +1031,12 @@ try {
   else bad('缺 commentSelfName')
   if (/在评论区 @ 你/.test(cl)) ok('面板有「在评论区 @ 你」开关')
   else bad('面板没有「在评论区 @ 你」')
-  // 位置：自动发送之后、开始使用之前
+  // 位置：自动发送之后（2026-10-24 重排后它在开始使用/状态卡之后的自动发送卡里）
   {
     const iSend = cl.indexOf("'自动发送'")
     const iAtMe = cl.indexOf("'在评论区 @ 你'")
-    const iStart = cl.indexOf("'开始使用'")
-    if (iSend >= 0 && iAtMe > iSend && iStart > iAtMe) ok('「在评论区 @ 你」位置正确（自动发送下面）')
-    else bad(`「在评论区 @ 你」位置不对（自动发送@${iSend} @你@${iAtMe} 开始使用@${iStart}）`)
+    if (iSend >= 0 && iAtMe > iSend) ok('「在评论区 @ 你」位置正确（自动发送下面）')
+    else bad(`「在评论区 @ 你」位置不对（自动发送@${iSend} @你@${iAtMe}）`)
   }
   // 提示词必须真的让模型去做这件事
   if (/「在评论区 @ 你」开着 —— 这是这一轮的重点任务/.test(idx)) ok('提示词写了「在评论区 @ 你」的具体做法')
