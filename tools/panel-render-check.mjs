@@ -593,12 +593,13 @@ if (/会自动发/.test(allText)) console.log('  ✅ 默认显示"会自动发"'
 else { console.log('  ❌ 默认状态不对（应该是"会自动发"）'); fail++ }
 if (/只管「插件自己在后台跑的轮次」/.test(allText)) console.log('  ✅ 说清了适用范围（只管后台轮次）')
 else { console.log('  ❌ 没说清适用范围'); fail++ }
-// 卡片位置：应该在「开始使用」之前（别埋在长面板底部）
+// 卡片位置（🔴 2026-10-24 主人令新顺序：开始使用置顶 → 刷抖音 → 自动发送 → 评论区@我）
 {
-  const iAuto = allText.indexOf('自动发送')
   const iStart = allText.indexOf('开始使用')
-  if (iAuto > 0 && iStart > iAuto) console.log('  ✅ 自动发送卡在「开始使用」之前（不用滚到底才看见）')
-  else { console.log('  ❌ 自动发送卡位置太靠后'); fail++ }
+  const iAuto = allText.indexOf('自动发送')
+  // iStart=-1 才算"没有开始使用卡"；=0 正是置顶成功
+  if (iStart >= 0 && iAuto > iStart) console.log('  ✅ 「开始使用」置顶、自动发送在其后（新顺序）')
+  else { console.log(`  ❌ 卡片顺序不对（开始使用@${iStart} 自动发送@${iAuto}）—— 开始使用应置顶`); fail++ }
 }
 
 /* ── 「在评论区 @ 你」（加在自动发送下面） ── */
@@ -607,13 +608,12 @@ if (/在评论区 @ 你/.test(allText)) console.log('  ✅ 有「在评论区 @ 
 else { console.log('  ❌ 没有「在评论区 @ 你」'); fail++ }
 if (/关着：不往评论区发任何东西/.test(allText)) console.log('  ✅ 默认显示"关着"')
 else { console.log('  ❌ 默认状态没说'); fail++ }
-// 位置：必须在「自动发送」之后、「开始使用」之前
+// 位置：必须在「自动发送」之后（重排后开始使用在最顶，不再约束与它的相对位置）
 {
   const iSend = allText.indexOf('自动发送')
   const iAtMe = allText.indexOf('在评论区 @ 你')
-  const iStart = allText.indexOf('开始使用')
-  if (iSend >= 0 && iAtMe > iSend && iStart > iAtMe) console.log('  ✅ 位置正确（自动发送下面、开始使用之前）')
-  else { console.log(`  ❌ 位置不对（自动发送@${iSend} 评论区@我@${iAtMe} 开始使用@${iStart}）`); fail++ }
+  if (iSend >= 0 && iAtMe > iSend) console.log('  ✅ 位置正确（自动发送下面）')
+  else { console.log(`  ❌ 位置不对（自动发送@${iSend} 评论区@我@${iAtMe}）`); fail++ }
 }
 
 /* ── 看日志 ── */
