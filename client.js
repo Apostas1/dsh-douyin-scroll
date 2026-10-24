@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
      *    对一下面板右上角显示的 `v<版本>·b<N>` 就知道。
      */
-    const PANEL_BUILD = 18
+    const PANEL_BUILD = 20
 
     const asJson = async (res) => {
       if (res.ok) return res.json()
@@ -37,6 +37,8 @@ window.__ModuleLoader__.load({
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body || {}),
     }))
+    // jpost 但失败/404 返回 null（用在新旧宿主兼容探测上，不炸面板）
+    const jpostSoft = async (p, body) => { try { return await jpost(p, body) } catch { return null } }
 
     const CSS = `
 [data-dy-page]{display:flex;flex-direction:column;gap:16px;padding:4px 2px 10px;max-width:660px;font-size:13px;}
@@ -255,6 +257,29 @@ window.__ModuleLoader__.load({
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
+      /**
+       * ⭐ 查登录的号：带重试的账号查询（主人 2026-10-24 验收「一直显示正在查登录的号」）。
+       *    旧版只在面板打开时查一次，/account 慢或失败就永远停在「正在查…」。
+       *    现在：先拿缓存（秒回）；空/失败则带 refresh=1 强查，最多重试 3 次（间隔 4s）。
+       */
+      const loadAccount = async (attempt) => {
+        try {
+          let a = null
+          try { a = await jget('/account') } catch { a = null }
+          if (a && a.account && a.account.nick) { setAcc(a.account); return true }
+          // 缓存空/没昵称 ⇒ 强制查一次（宿主跑体检，慢但准）
+          a = await jget('/account?refresh=1')
+          if (a && a.account && (a.account.nick || a.account.uid)) { setAcc(a.account); return true }
+          return false
+        } catch {
+          if ((attempt || 0) < 2) {   // 还有得救：4 秒后再来（宿主可能正忙）
+            await new Promise((r) => setTimeout(r, 4000))
+            return loadAccount((attempt || 0) + 1)
+          }
+          return false
+        }
+      }
+
       React.useEffect(() => {
         let alive = true
         ;(async () => {
@@ -264,11 +289,13 @@ window.__ModuleLoader__.load({
             setSt(s)
             if (c && c.config) setCfg(c.config)
             if (s && s.loggedIn) {
-              // 账号昵称：先用缓存（快），拿不到再后台查
-              try {
-                const a = await jget('/account')
-                if (alive && a && a.account) setAcc(a.account)
-              } catch { /* 拿不到昵称不影响用 */ }
+              // 账号昵称：带重试，查到才把「正在查登录的号…」换下来
+              const okAcc = alive ? await loadAccount(0) : false
+              if (alive && !okAcc) {
+                // 查了三轮还是空：挂一句实话，别让主人盯着"正在查"干等
+                setAcc({ nick: '', uid: '', alive: false, at: '', failed: true })
+                say('登录态在，但昵称没查到 —— 不影响使用', 'warn')
+              }
             }
           } catch (e) {
             if (alive) say('读设置失败：' + String((e && e.message) || e), 'warn')
@@ -312,10 +339,8 @@ window.__ModuleLoader__.load({
           if (s) setSt(s)
           if (c && c.config) setCfg(c.config)
           if (s && s.loggedIn) {
-            try {
-              const a = await jget('/account?refresh=1')
-              if (a && a.account) setAcc(a.account)
-            } catch { /* 忽略 */ }
+            const okAcc = await loadAccount(0)
+            if (!okAcc) setAcc({ nick: '', uid: '', alive: false, at: '', failed: true })
           } else setAcc(null)
         } catch { /* 刷不动就留着旧的 */ }
       }
@@ -351,19 +376,43 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
-      /** 第二步：我扫完了（轮询到成功；成功后会顺带关掉登录窗口） */
+      /** 第二步：我扫完了（轮询到成功；成功后会顺带关掉登录窗口）
+       * 🔴 2026-10-24 主人验收「点了没反应」：旧版同步等 120 秒（宿主 spawnSync
+       *    被 watch 堵死，面板期间什么都查不动）。改成**小步轮询**：每次只让宿主
+       *    check 一次（秒回），前端自己转；不再有「按下去整页僵死」。 */
       const onWaitLogin = async () => {
         setBusy('wait')
         try {
-          const r = await jpost('/login/wait', { seconds: 120 })
-          if (r && r.ok) {
-            setQr(null)
-            say('登录成功 —— 可以刷了', 'good')
-            await refresh()
-          } else {
-            const why = (r && (r.hint || r.error)) || '还没好'
-            setQrHint(why)
-            say(r && r.timeout ? '没等到，再试一次' : '还没好', 'warn')
+          let done = false
+          let usedCheck = true
+          for (let i = 0; i < 40 && !done; i++) {   // 40 次 × ~2s ≈ 80 秒
+            const r = await jpostSoft('/login/check', {})
+            if (r === null) { usedCheck = false; break }   // 宿主太旧没有这条路由 ⇒ 落回 wait
+            if (r && r.ok) {
+              done = true
+              setQr(null)
+              say('登录成功 —— 可以刷了', 'good')
+              await refresh()
+              break
+            }
+            if (r && r.up === false) {   // 登录浏览器没了：别傻转，直接给提示
+              setQrHint(r.hint || '登录用的浏览器还没开 —— 先点「扫码登录」')
+              say('没等到，先出二维码', 'warn')
+              break
+            }
+            if (r && r.verify && r.verify.length) {
+              setQrHint('卡在验证：' + r.verify.join(' / ') + ' —— 在那个浏览器窗口里做完，不用重扫')
+            } else if (i === 3) {
+              setQrHint('在等你扫码…（手机抖音 → 扫一扫）')
+            }
+          }
+          if (!done && usedCheck) { say('没等到，再试一次', 'warn'); setQrHint((prev) => prev || '等了一会儿还没扫上 —— 二维码可能过期了，点「重新出码」再来') }
+          if (!done && !usedCheck) {   // 旧宿主兜底：一次 wait（还是同步，但只 20 秒）
+            try {
+              const r = await jpost('/login/wait', { seconds: 20 })
+              if (r && r.ok) { setQr(null); say('登录成功 —— 可以刷了', 'good'); await refresh() }
+              else { setQrHint((r && (r.hint || r.error)) || '还没好 —— 再点一次「我扫完了」'); say('还没好', 'warn') }
+            } catch (e) { setQrHint('等待失败：' + String((e && e.message) || e)) }
           }
         } catch (e) { setQrHint('等待登录失败：' + String((e && e.message) || e)); say('等待失败', 'warn') }
         finally { setBusy('') }
@@ -655,6 +704,66 @@ window.__ModuleLoader__.load({
 
       return h('div', { 'data-dy-page': '' },
 
+        /* ── 开始使用：三步装机 + 扫码登录（⭐ 2026-10-24 主人令：放最上面，
+         *    已登录时这里带「退出登录」按钮；第二个才是「刷抖音」状态卡）──
+         * 🔴 2026-10-22：以前这里只写一句「命令行跑 node tools/qr-login.mjs start」——
+         *    对新手等于"你自己去折腾"。现在做成**点按钮 → 出二维码 → 手机扫 → 点我扫完了**。
+         *    进度条按状态自己算：没环境 → 没登录 → 能用了。 */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '开始使用'),
+              h('div', { 'data-dy-sub': '' },
+                st.venvReady && st.loggedIn
+                  ? '✅ 都装好了，可以直接用'
+                  : `还差 ${!st.venvReady ? '两步' : '一步'} —— 跟着数字点就行`)),
+            h('span', {
+              'data-dy-badge': '',
+              'data-on': (st.venvReady && st.loggedIn) ? '' : undefined,
+            }, (st.venvReady && st.loggedIn) ? '就绪' : '未就绪')),
+
+          /* 第 ① 步 */
+          h('div', { 'data-dy-row': '' },
+            h('span', { 'data-dy-step': '', 'data-done': st.venvReady ? '' : undefined }, st.venvReady ? '✓' : '1'),
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-sub': '' }, st.venvReady ? '运行环境好了' : '装运行环境（约 30 秒，一次就够）')),
+            st.venvReady
+              ? null
+              : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'install', onClick: onInstall },
+                busy === 'install' ? '装着…' : '装环境')),
+
+          /* 第 ② 步 —— 扫码登录（新手最容易卡的地方，做成主按钮） */
+          h('div', { 'data-dy-row': '' },
+            h('span', { 'data-dy-step': '', 'data-done': st.loggedIn ? '' : undefined }, st.loggedIn ? '✓' : '2'),
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-sub': '' }, st.loggedIn ? '已登录，可以刷了' : '扫码登录抖音（用手机抖音扫一下）')),
+            st.loggedIn
+              ? h('button', { 'data-dy-btn': '', disabled: busy === 'login', onClick: onLogout }, '退出登录')
+              : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'login', onClick: onQr },
+                busy === 'login' ? '准备中…' : '扫码登录')),
+
+          /* 二维码区：只在没登录时出现 */
+          !st.loggedIn
+            ? h('div', { 'data-dy-loginbox': '' },
+              qr && qr.url
+                ? h('div', { 'data-dy-row': '', style: { flexDirection: 'column', alignItems: 'center', gap: '10px', padding: '6px 0' } },
+                  h('img', {
+                    'data-dy-qr': '', src: qr.url, alt: '抖音登录二维码',
+                    style: { width: '190px', height: '190px', borderRadius: '10px', background: '#fff', padding: '6px' },
+                  }),
+                  h('div', { 'data-dy-sub': '', style: { textAlign: 'center' } },
+                    '手机抖音 → 右上角「≡」→ 扫一扫'),
+                  h('div', { 'data-dy-row': '' },
+                    h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'wait', onClick: onWaitLogin },
+                      busy === 'wait' ? '等你扫…' : '我扫完了'),
+                    h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: () => onQr(true) }, '重新出码'),
+                    h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: onCloseLogin }, '关掉窗口')),
+                  h('div', { 'data-dy-sub': '', style: { textAlign: 'center', maxWidth: '420px' } },
+                    '扫完如果抖音还弹「短信验证码」或「拖动滑块」—— 在那个弹出的浏览器窗口里做完，再点「我扫完了」。不用重新扫。'))
+                : h('div', { 'data-dy-sub': '' },
+                  qrHint || '点上面的「扫码登录」，会弹出一个浏览器窗口显示二维码，手机扫一下就行。'))
+            : null),
+
         /* ── 状态 ── */
         h('div', { 'data-dy-card': '' },
           h('div', { 'data-dy-row': '' },
@@ -678,7 +787,9 @@ window.__ModuleLoader__.load({
             /* ⭐ 登录的是哪个号 —— 只显示昵称就够（ID 太长，对用户没用） */
             st.loggedIn && acc && acc.nick
               ? h('span', { 'data-dy-account': '' }, '👤 ' + acc.nick)
-              : (st.loggedIn ? h('span', { 'data-dy-sub': '' }, '正在查登录的号…') : null),
+              : (st.loggedIn
+                ? h('span', { 'data-dy-sub': '' }, acc && acc.failed ? '（昵称没查到，不影响用）' : '正在查登录的号…')
+                : null),
             h('span', {
               'data-dy-badge': '',
               'data-on': st.venvReady ? '' : undefined,
@@ -866,65 +977,6 @@ window.__ModuleLoader__.load({
             h('div', { 'data-dy-grow': '' },
               h('div', { 'data-dy-sub': '' }, '走动：在桌面上溜达（眼随鼠标一直开着）')),
             h(Switch, { on: cfg.petWalk !== false, onChange: (v) => patch({ petWalk: v }, v ? '她开始溜达' : '她定住了') }))),
-
-        /* ── 开始使用：三步装机 + 扫码登录 ──
-         * 🔴 2026-10-22：以前这里只写一句「命令行跑 node tools/qr-login.mjs start」——
-         *    对新手等于"你自己去折腾"。现在做成**点按钮 → 出二维码 → 手机扫 → 点我扫完了**。
-         *    进度条按状态自己算：没环境 → 没登录 → 能用了。 */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '开始使用'),
-              h('div', { 'data-dy-sub': '' },
-                st.venvReady && st.loggedIn
-                  ? '✅ 都装好了，可以直接用'
-                  : `还差 ${!st.venvReady ? '两步' : '一步'} —— 跟着数字点就行`)),
-            h('span', {
-              'data-dy-badge': '',
-              'data-on': (st.venvReady && st.loggedIn) ? '' : undefined,
-            }, (st.venvReady && st.loggedIn) ? '就绪' : '未就绪')),
-
-          /* 第 ① 步 */
-          h('div', { 'data-dy-row': '' },
-            h('span', { 'data-dy-step': '', 'data-done': st.venvReady ? '' : undefined }, st.venvReady ? '✓' : '1'),
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-sub': '' }, st.venvReady ? '运行环境好了' : '装运行环境（约 30 秒，一次就够）')),
-            st.venvReady
-              ? null
-              : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'install', onClick: onInstall },
-                busy === 'install' ? '装着…' : '装环境')),
-
-          /* 第 ② 步 —— 扫码登录（新手最容易卡的地方，做成主按钮） */
-          h('div', { 'data-dy-row': '' },
-            h('span', { 'data-dy-step': '', 'data-done': st.loggedIn ? '' : undefined }, st.loggedIn ? '✓' : '2'),
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-sub': '' }, st.loggedIn ? '已登录，可以刷了' : '扫码登录抖音（用手机抖音扫一下）')),
-            st.loggedIn
-              ? h('button', { 'data-dy-btn': '', disabled: busy === 'login', onClick: onLogout }, '退出登录')
-              : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'login', onClick: onQr },
-                busy === 'login' ? '准备中…' : '扫码登录')),
-
-          /* 二维码区：只在没登录时出现 */
-          !st.loggedIn
-            ? h('div', { 'data-dy-loginbox': '' },
-              qr && qr.url
-                ? h('div', { 'data-dy-row': '', style: { flexDirection: 'column', alignItems: 'center', gap: '10px', padding: '6px 0' } },
-                  h('img', {
-                    'data-dy-qr': '', src: qr.url, alt: '抖音登录二维码',
-                    style: { width: '190px', height: '190px', borderRadius: '10px', background: '#fff', padding: '6px' },
-                  }),
-                  h('div', { 'data-dy-sub': '', style: { textAlign: 'center' } },
-                    '手机抖音 → 右上角「≡」→ 扫一扫'),
-                  h('div', { 'data-dy-row': '' },
-                    h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'wait', onClick: onWaitLogin },
-                      busy === 'wait' ? '等你扫…' : '我扫完了'),
-                    h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: () => onQr(true) }, '重新出码'),
-                    h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: onCloseLogin }, '关掉窗口')),
-                  h('div', { 'data-dy-sub': '', style: { textAlign: 'center', maxWidth: '420px' } },
-                    '扫完如果抖音还弹「短信验证码」或「拖动滑块」—— 在那个弹出的浏览器窗口里做完，再点「我扫完了」。不用重新扫。'))
-                : h('div', { 'data-dy-sub': '' },
-                  qrHint || '点上面的「扫码登录」，会弹出一个浏览器窗口显示二维码，手机扫一下就行。'))
-            : null),
 
         /* ── 环境体检 ── */
         h('div', { 'data-dy-card': '' },

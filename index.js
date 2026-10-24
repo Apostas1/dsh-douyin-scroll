@@ -3227,24 +3227,27 @@ export function apply(ctx, config) {
     /* ── 当前账号：面板显示"登录的哪个号" ──
      * 先给缓存（account.json），再后台刷新一次（慢，但准）。
      * 拿不到就说拿不到，别编一个昵称出来。
+     * 🔴 2026-10-24 主人验收「找不到我登的号」：扫码**之前**可能留过一份空记录
+     *    （nick/uid 全空）—— 那种记录不许当"新鲜缓存"，必须重新查。
      */
     if (req.method === 'GET' && path === '/api/douyin-duty/account') {
       const cached = readJson(join(stateDir, 'account.json'), null)
       if (!hasCredential(stateDir)) return sendJson(res, 200, { ok: true, logged_in: false, account: null })
       const force = String(url.searchParams.get('refresh') || '') === '1'
-      // 有缓存且不超过 1 小时、又不是强制刷新 ⇒ 直接给缓存（面板打开时别卡 10 秒）
-      if (!force && cached && Date.now() - Number(new Date(cached.at).getTime() || 0) < 3600_000) {
+      const cachedGood = !!(cached && (cached.nick || cached.uid))   // 空记录不算数
+      // 有像样的缓存且不超过 1 小时、又不是强制刷新 ⇒ 直接给缓存（面板打开时别卡 10 秒）
+      if (!force && cachedGood && Date.now() - Number(new Date(cached.at).getTime() || 0) < 3600_000) {
         return sendJson(res, 200, { ok: true, logged_in: true, account: cached, cached: true })
       }
       try {
         const g = runPy('session-guard.py', ['check'], { timeout: 90_000 })
         const j = pickJson(g.stdout)
-        if (!j) return sendJson(res, 200, { ok: false, logged_in: true, account: cached, error: '体检脚本没返回结果' })
+        if (!j) return sendJson(res, 200, { ok: false, logged_in: true, account: cachedGood ? cached : null, error: '体检脚本没返回结果' })
         const acc = { nick: j.nick || '', uid: j.uid || '', alive: j.alive === true, at: new Date().toISOString() }
         try { writeJson(join(stateDir, 'account.json'), acc) } catch { /* 写不进去也能用 */ }
         return sendJson(res, 200, { ok: true, logged_in: true, account: acc, cached: false })
       } catch (e) {
-        return sendJson(res, 200, { ok: false, logged_in: true, account: cached, error: String(e?.message ?? e) })
+        return sendJson(res, 200, { ok: false, logged_in: true, account: cachedGood ? cached : null, error: String(e?.message ?? e) })
       }
     }
 
@@ -3681,18 +3684,20 @@ export function apply(ctx, config) {
       }
     }
     // 「我扫完了」：轮询到登录成功（最多 ~120 秒）
+    // 🔴 2026-10-24 主人验收「点了没反应」：旧版在这里 spawnSync watch 120 秒，
+    //    宿主整个被堵死（面板僵死、状态接口全无响应）。现在 watch 只用于
+    //    **异步兜底**；面板实际走下面的 /login/check 小步轮询（秒回）。
     if (req.method === 'POST' && path === '/api/douyin-duty/login/wait') {
       const body = await readBody(req)
-      const sec = Math.max(10, Math.min(Number(body?.seconds) || 120, 300))
-      const r = runNodeTool('qr-login.mjs', ['watch', String(sec)], { timeout: (sec + 30) * 1000 })
-      // watch 会打多行 JSON，取最后一个完整对象
+      const sec = Math.max(2, Math.min(Number(body?.seconds) || 3, 8))
+      const r = runNodeTool('qr-login.mjs', ['watch', String(sec)], { timeout: (sec + 20) * 1000 })
       const lines = String(r.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)
       let last = null
       for (let i = lines.length - 1; i >= 0 && !last; i--) {
         try { last = JSON.parse(lines[i]) } catch { /* 继续往上找 */ }
       }
       if (!last) {
-        return sendJson(res, 200, { ok: false, error: '没等到结果', detail: String(r.stderr || r.stdout || '').slice(-400) })
+        return sendJson(res, 200, { ok: false, pending: true, error: '没等到结果', detail: String(r.stderr || r.stdout || '').slice(-400) })
       }
       if (last.ok) {
         log(`扫码登录：成功，凭证已保存（${last.cookies || '?'} 条 Cookie）`)
@@ -3713,6 +3718,29 @@ export function apply(ctx, config) {
         refreshCfg()
       }
       return sendJson(res, 200, last)
+    }
+    // ⭐ 单次登录检查（面板「我扫完了」的轮询引擎：秒回，不堵宿主）
+    //    直接复用 qr-login.mjs check（连 CDP 读 cookie，成功就地导出凭证）
+    if (req.method === 'POST' && path === '/api/douyin-duty/login/check') {
+      const r = runNodeTool('qr-login.mjs', ['check'], { timeout: 30_000 })
+      const j = pickJson(r.stdout)
+      if (!j) return sendJson(res, 200, { ok: false, pending: true, error: 'check 没返回结果', detail: String(r.stderr || '').slice(-300) })
+      if (j.ok) {
+        log(`扫码登录：check 命中，凭证已保存（${j.cookies || '?'} 条 Cookie）`)
+        try {
+          const g = runPy('session-guard.py', ['check'], { timeout: 90_000 })
+          const jj = pickJson(g.stdout)
+          if (jj && (jj.nick || jj.uid)) {
+            writeJson(join(stateDir, 'account.json'), {
+              nick: jj.nick || '', uid: jj.uid || '', alive: jj.alive === true,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch { /* 昵称拿不到不影响 */ }
+        try { runNodeTool('qr-login.mjs', ['close'], { timeout: 40_000 }) } catch { /* 关不掉也不致命 */ }
+        refreshCfg()
+      }
+      return sendJson(res, 200, j)
     }
     // 关掉登录用的浏览器（用户嫌窗口碍事 / 出码失败要重来时）
     if (req.method === 'POST' && path === '/api/douyin-duty/login/close') {
