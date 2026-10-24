@@ -331,13 +331,17 @@ def main():
                     text = content_raw[:120]
                 if not text:
                     continue
+                # ⭐ 排序不信线序（协议顺序实测过不稳定），直接按时间戳排旧→新
                 messages.append({
+                    "_ts": at_ms,
                     "from": "me" if sender == my_uid else "them",
                     "text": text[:200],
                     "at": iso(at_ms),
                     "kind": kind,
                 })
-            messages.reverse()  # 协议序新在前 ⇒ 翻成旧→新（与 im-send --read 一致）
+            messages.sort(key=lambda x: x["_ts"] or 0)
+            for m in messages:
+                m.pop("_ts", None)
             convs.append({
                 "conv_id": conv_id,
                 "short_id": as_str(g1(core, 2)),   # ⭐ 19 位数字：必须当字符串透传

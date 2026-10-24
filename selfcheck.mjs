@@ -194,6 +194,8 @@ try {
   // ④ 数据质量 + 通道伪装
   if (/毫秒时间戳|field10/.test(h) && /def iso/.test(h)) ok('消息带真实毫秒时间戳（iso()）')
   else bad('没解时间戳 —— HTTP 路径的核心优势没了')
+  if (/messages\.sort\(key=lambda/.test(hCode)) ok('消息按时间戳排序（不信线序 —— 小 limit 不会挑到最旧的）')
+  else bad('没按时间戳排序 —— 小 limit 会挑到最旧的消息')
   if (/sender == my_uid/.test(hCode)) ok('发送者按协议字段判（uid 比对，不靠头像猜）')
   else bad('没按 uid 判发送者 —— 会退回头像猜的老毛病')
   if (/impersonate="chrome"/.test(hCode)) ok('走 curl_cffi 伪装 Chrome 指纹（不拿裸脚本指纹戳 IM 接口）')
