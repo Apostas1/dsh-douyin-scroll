@@ -273,6 +273,7 @@ $script:lastPropSet = ''
 $script:fedAt = 0
 $script:fedCount = 0
 $script:repairOn = $false
+$script:danmakuIntentUntil = 0   # 右键弹幕的「待确认窗口期」截止时刻（unix 秒）
 
 function Load-All-Layers($spriteDir) {
   $order = @('back hair','tail','legwear','footwear','neck','topwear','handwear','headwear','face','eyebrow','eyewhite','irides','eyelash','mouth','front hair')
@@ -472,14 +473,22 @@ $poll.Add_Tick({
     }
     $script:cfg.walk = ($j.walk -ne $false)
     # 弹幕开关 → 开/关弹幕窗
-    $wantDm = ($j.danmaku -eq $true)
+    # 🔴 v5.1（主人验收「右键弹幕开不了/面板看不见弹幕」两修）：
+    #  ① 待确认窗口期：右键 Send-Cmd 后宿主最多 10 秒才回写状态文件，
+    #     这期间 poll 读到的旧值会把刚开的弹幕关掉 —— 本地意图后 15 秒内
+    #     poll 尊重本地 danmakuIntent，不被旧状态覆盖。
+    #  ② 看不见：弹幕白字在浅色壁纸上隐身 —— 加深色描边+底条（见 New-Danmaku）。
+    $nowSecDm = ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds
+    $intentFresh = $script:danmakuIntentUntil -gt $nowSecDm
+    $wantDm = if ($intentFresh) { [bool]$script:cfg.danmaku } else { ($j.danmaku -eq $true) }
     if ($wantDm -and -not $script:dmWin) { Start-Danmaku }
     if (-not $wantDm -and $script:dmWin) { Stop-Danmaku }
-    # 联动状态 → 道具 + 台词
+    # 联动状态 → 道具 + 台词（repairOn 是最高优先级层，谁都不许覆盖它）
     $link = [string]$j.link.state
     $key = "$link|$($script:repairOn)|$personaChanged"
     if ($script:repairOn) {
       Set-Prop 'hardhat,wrench'
+      $blinkTimer.Start()
     } elseif ($link -eq 'watch') {
       Set-Prop 'phone'
     } elseif ($link -eq 'sleep') {
@@ -549,6 +558,10 @@ function Feed {
 # ── 维修工模式（换装 + 新手引导：调宿主体检接口的结果让主人看）──
 function Repair-Mode {
   $script:repairOn = -not $script:repairOn
+  # 🔴 v5.1：repairOn 是**最高优先级层**——poll 每拍都会重算道具，这里必须把
+  #    lastPropSet 设成 poll 会算出的同一个值，两边才不打架（主人抓的「点两次
+  #    维修工就不见」：第二次关闭时 lastPropSet='' 但 poll 在 sleep 态会设 zzz，
+  #    状态机互相覆盖 ⇒ 道具层错乱）
   if ($script:repairOn) {
     Set-Prop 'hardhat,wrench'
     Set-Bubble (P 'repair')[0]
@@ -558,7 +571,7 @@ function Repair-Mode {
     $t.Add_Tick({ $t.Stop(); if ($script:repairOn) { Set-Bubble (P 'repair')[3] } })
     $t.Start()
   } else {
-    $script:lastPropSet = ''
+    $script:lastPropSet = 'RESET'   # 强制 poll 下一拍重算（'' 会被去重跳过）
     Set-Bubble (P 'repair')[4]
   }
 }
@@ -685,7 +698,9 @@ $script:miRepair = Add-Item '维修工模式' { Repair-Mode } $false
 $menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 $script:miDm = Add-Item '弹幕模式' {
   Send-Cmd @{ danmaku = -not ($script:cfg.danmaku -eq $true) }
-  # 宿主 10 秒内才写回状态文件——本地先按新值起/停弹幕，不等
+  # 待确认窗口期：15 秒内 poll 尊重本地值（宿主状态文件没回来也不被覆盖）
+  $script:danmakuIntentUntil = ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds + 15
+  # 本地立即起/停，不等宿主
   if ($script:cfg.danmaku) { if (-not $script:dmWin) { Start-Danmaku } } else { if ($script:dmWin) { Stop-Danmaku } }
 } $false
 $script:miWalk = Add-Item '走动' { Send-Cmd @{ walk = -not ($script:cfg.walk -eq $true) } } $true
@@ -787,19 +802,27 @@ function New-Danmaku([double]$startX) {
     $tb.Text = Pick $list
     $tb.FontSize = (Get-Random -Minimum 15 -Maximum 27)
     $tb.FontWeight = 'Bold'
-    $colors = @('#FFFFFF', '#FFE066', '#FF8FA3', '#7FE3FF', '#B7FF7F')
+    # 🔴 v5.1 可见性（主人抓的「看不见弹幕」）：白字在浅色壁纸上隐身——
+    #    改随机亮色 + 深色描边 + 半透明底条，任何壁纸上都清楚
+    $colors = @('#FFE066', '#FF8FA3', '#7FE3FF', '#B7FF7F', '#FFB86C', '#FFFFFF')
     $tb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($colors[(Get-Random -Minimum 0 -Maximum $colors.Count)])
-    $tb.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect
+    $tb.Stroke = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CC101420')
+    $tb.StrokeThickness = 1.2
+    $bd = New-Object System.Windows.Controls.Border
+    $bd.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#66000000')
+    $bd.CornerRadius = New-Object System.Windows.CornerRadius 6
+    $bd.Padding = '6,2'
+    $bd.Child = $tb
     $wa = [System.Windows.SystemParameters]::WorkArea
     $y = $wa.Top + 30 + (Get-Random -Minimum 0 -Maximum [int]($wa.Height - 110))
-    [void]$script:dmCanvas.Children.Add($tb)
-    $tb.Measure([System.Windows.Size]::new($wa.Width, 80))
-    $len = $tb.DesiredSize.Width
-    Canvas.SetLeft($tb, $startX); Canvas.SetTop($tb, $y)
+    [void]$script:dmCanvas.Children.Add($bd)
+    $bd.Measure([System.Windows.Size]::new($wa.Width, 80))
+    $len = $bd.DesiredSize.Width
+    Canvas.SetLeft($bd, $startX); Canvas.SetTop($bd, $y)
     $dur = (Get-Random -Minimum 6 -Maximum 13)
     $anim = New-Object System.Windows.Media.Animation.DoubleAnimation($startX, $wa.Left - $len - 80, [System.Windows.Duration]::new([TimeSpan]::FromSeconds($dur)))
-    $anim.Completed.Add({ try { $script:dmCanvas.Children.Remove($tb) } catch {} })
-    $tb.BeginAnimation([System.Windows.Controls.Canvas]::LeftProperty, $anim)
+    $anim.Completed.Add({ try { $script:dmCanvas.Children.Remove($bd) } catch {} })
+    $bd.BeginAnimation([System.Windows.Controls.Canvas]::LeftProperty, $anim)
   } catch {}
 }
 function Stop-Danmaku {
@@ -838,6 +861,23 @@ $top = New-Object System.Windows.Threading.DispatcherTimer
 $top.Interval = [TimeSpan]::FromSeconds(15)
 $top.Add_Tick({ try { $win.Topmost = $false; $win.Topmost = $true } catch {} })
 $top.Start()
+
+# 🔴 全局异常兜底（主人验收「有几率不见」的根修）：
+#    任何一个 handler / timer 抛出未接异常，Dispatcher 直接死 ⇒ 窗口整个消失。
+#    ⚠️ 不能用 [System.Windows.Application]::Current —— 纯脚本 WPF 里它是 null，
+#    对 null 调方法会把整个脚本带走（上一版就是这么把「有几率」造出来的）。
+#    直接挂当前 Dispatcher 的事件。
+try {
+  $disp = [System.Windows.Threading.Dispatcher]::CurrentDispatcher
+  $disp.add_DispatcherUnhandledException({
+    param($s, $e)
+    try {
+      $msg = "[$(Get-Date -Format 'HH:mm:ss')] $($e.Exception.GetType().Name): $($e.Exception.Message)`n---"
+      try { Add-Content -Path (Join-Path $home_ 'pet-window-errors.log') -Value $msg -Encoding UTF8 } catch {}
+      $e.Handled = $true   # 吞掉，她活着
+    } catch {}
+  })
+} catch {}
 
 $win.Add_Closed({ $poll.Stop(); $top.Stop(); $blinkTimer.Stop(); $gaze.Stop(); $walk.Stop(); $quip.Stop(); Stop-Danmaku })
 
