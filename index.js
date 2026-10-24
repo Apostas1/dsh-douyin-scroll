@@ -130,6 +130,12 @@ export const Config = !z ? undefined : z.object({
   mentionName: z.string().default('').extra('volatile', true),
   /** http 执行器的地址 */
   httpCommentUrl: z.string().default('').extra('volatile', true),
+  /** ⭐⭐ 聊天盯梢（2026-10-24）：后台每 N 秒读一次私信对象的会话，有新消息就通知。
+   *  来源：主人当天实测的「会话模式」——30 秒一读、看见就回（实测响应 ~12 秒）。
+   *  间隔默认 30 秒；读取走 HTTP 快路径（im-http.py，~1.1 秒/次、不启浏览器、身份铁闸）。 */
+  chatWatch: z.boolean().default(false).extra('volatile', true),
+  /** 盯梢间隔（秒），10–300，默认 30 */
+  chatWatchSec: z.natural().default(30).extra('volatile', true),
   /** 通知：toast（Windows 通知，默认）/ file（不额外提醒）/ webhook / both */
   notifyMode: z.string().default('toast').extra('volatile', true),
   /** 私信发给谁：昵称（只用于显示/提醒） */
@@ -2747,6 +2753,62 @@ export function apply(ctx, config) {
     ctx.effect(() => () => clearInterval(timer), 'douyin-duty: 谷时定时器')
   } catch (e) { log(`定时器没起来：${e?.message ?? e}`) }
 
+  /* ─────────────── 聊天盯梢（2026-10-24，主人实测的「会话模式」进插件） ───────────────
+   * 每 chatWatchSec 秒读一次私信对象（dmToId）的会话——走 HTTP 快路径（im-http.py），
+   * 不启浏览器。发现「对方新说的话」⇒ Windows 通知 + 写 chat-watch.log + 合并进记忆。
+   * 回复仍由人（或值班轮）来：这一层只负责「看见 + 提醒」。
+   * 🔴 定时器回调必须自己兜异常（同上）；盯梢失败只记日志、不重试轰炸。
+   */
+  let chatWatchLastMs = 0            // 上次盯梢时刻（节流用）
+  let chatWatchLastSeenAt = ''       // 已经提醒过的最新一条「对方消息」时间戳
+  let chatWatchBusy = false
+  const chatWatchLog = (s) => { try { appendFileSync(join(stateDir, 'chat-watch.log'), `[${new Date().toISOString()}] ${s}\n`, 'utf8') } catch { /* 日志写不进就算了 */ } }
+
+  const chatWatchTick = async () => {
+    const nowMs = Date.now()
+    const sec = Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))
+    if (chatWatchBusy) return
+    if (nowMs - chatWatchLastMs < sec * 1000) return
+    chatWatchLastMs = nowMs
+    chatWatchBusy = true
+    try {
+      refreshCfg()
+      if (!cfg.chatWatch) return
+      const toId = String(cfg.dmToId || '').trim()
+      if (!toId) return // 没配私信对象就不盯（身份铁闸要 sec_uid）
+      if (!hasCredential(stateDir)) return
+      const r = runPy('im-http.py', ['--read', '--peer-sec-uid', toId, '--limit', '8'], { timeout: 30_000 })
+      const j = pickJson(r.stdout)
+      if (!j || !j.ok || !j.matched) return // 限流/接口挂/不在会话里：静默等下一拍，退浏览器没意义（这里不为读而启浏览器）
+      const msgs = Array.isArray(j.matched.messages) ? j.matched.messages : []
+      // 合并进记忆（这样面板/值班轮打开就能看到，不会"刚读到却说没聊过"）
+      try { mergeDmMemory(stateDir, toId, cfg.dmTo || j.matched.nickname || '', msgs) } catch { /* 记忆失败不影响盯梢 */ }
+      // 找出比上次提醒更新的「对方消息」
+      const theirs = msgs.filter((m) => m.from === 'them' && m.at && m.at > chatWatchLastSeenAt)
+      if (!theirs.length) return
+      chatWatchLastSeenAt = theirs[theirs.length - 1].at
+      const head = theirs[0].text.slice(0, 60)
+      chatWatchLog(`新消息 ${theirs.length} 条（${cfg.dmTo || toId}）：${head}`)
+      // 通知（toast / webhook 按配置；file = 只写日志不弹）
+      const mode = String(cfg.notifyMode || 'toast')
+      if (mode === 'toast' || mode === 'both') {
+        try { sendToast({ title: `${cfg.dmTo || '私信'} 来消息了`, body: theirs.slice(0, 3).map((m) => m.text.slice(0, 80)).join('\n') }) } catch { /* 通知失败不影响 */ }
+      }
+      if (mode === 'webhook' || mode === 'both') {
+        sendWebhook({ url: cfg.webhookUrl, preset: cfg.webhookPreset, title: `${cfg.dmTo || '私信'} 来消息了`, markdown: theirs.map((m) => `- ${m.text.slice(0, 100)}`).join('\n') }).catch(() => { /* webhook 失败不影响 */ })
+      }
+    } catch (e) {
+      chatWatchLog(`这一拍出错（已兜住）：${e?.message ?? e}`)
+    } finally {
+      chatWatchBusy = false
+    }
+  }
+  try {
+    const cw = setInterval(() => { chatWatchTick() }, 10_000)   // 10 秒醒一次看「到没到点」，真正读的频率由 chatWatchSec 决定
+    cw.unref?.()
+    ctx.effect(() => () => clearInterval(cw), 'douyin-duty: 聊天盯梢')
+  } catch (e) { log(`聊天盯梢没起来：${e?.message ?? e}`) }
+
   /* ─────────────── 健康信号 ─────────────── */
   const healthFile = join(stateDir, 'health.json')
   const writeHealth = () => {
@@ -3049,6 +3111,35 @@ export function apply(ctx, config) {
       const toId = String(body?.to_id || cfg.dmToId || '').trim()
       const to = String(body?.to || cfg.dmTo || '').trim()
       if (!toId && !to) return sendJson(res, 200, { ok: false, error: '不知道读谁的会话' })
+      /**
+       * ⭐ 快路径（2026-10-24）：有 to_id 就先走 HTTP（im-http.py，~1.1 秒、不启浏览器、
+       *    身份铁闸=sec_uid 反查核验）。命不中（陌生人/接口挂）再退回浏览器路径。
+       *    和 douyin_im_read 工具同一套双路径。
+       */
+      if (toId) {
+        try {
+          const r0 = runPy('im-http.py', ['--read', '--peer-sec-uid', toId, '--limit', '40'], { timeout: 30_000 })
+          const h = pickJson(r0.stdout)
+          if (h && h.ok && h.matched) {
+            const msgs = Array.isArray(h.matched.messages) ? h.matched.messages : []
+            let context = null
+            try {
+              mergeDmMemory(stateDir, toId, to || h.matched.nickname || '', msgs)
+              context = dmContext(stateDir, toId, { recent: 20 })
+            } catch { /* 记忆失败不影响读 */ }
+            log(`chat/read(HTTP) ${h.matched.nickname || toId}: ${msgs.length} 条，${h.ms}ms`)
+            return sendJson(res, 200, {
+              ok: true, via: 'http', to: to || h.matched.nickname, to_sec_uid: toId,
+              count: msgs.length,
+              mine: msgs.filter((m) => m.from === 'me').length,
+              them: msgs.filter((m) => m.from === 'them').length,
+              unknown: 0,
+              messages: msgs.slice(-40),
+              context: context || { note: '这个人以前没聊过（记忆里没有记录）' },
+            })
+          }
+        } catch { /* 快路径失败 → 下面走浏览器 */ }
+      }
       const argv = ['--read']
       if (to) argv.push('--to', to)
       if (toId) argv.push('--to-id', toId)

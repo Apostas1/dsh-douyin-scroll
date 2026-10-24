@@ -896,6 +896,27 @@ try {
   // 🔴 聊天发送必须落记忆（不然下次读还是不知道说过什么）
   if (/chat\/send'[\s\S]{0,1500}?noteSent\(stateDir/.test(idx)) ok('聊天发出去的消息会进记忆')
   else bad('聊天发送不写记忆')
+
+  // ④ 聊天盯梢（2026-10-24 会话模式进插件）：后端盯梢 + 面板开关 + 自动刷新 + 快路径
+  if (/chatWatchTick/.test(idx)) ok('后端有聊天盯梢循环（新消息 → 通知）')
+  else bad('后端没有盯梢循环 —— 会话模式没进插件')
+  if (/chatWatch: z\.boolean\(\)\.default\(false\)/.test(idx)) ok('chatWatch 配置项在（默认关，用户自己开）')
+  else bad('没有 chatWatch 配置项')
+  if (/chatWatchSec: z\.natural\(\)\.default\(30\)/.test(idx)) ok('盯梢间隔默认 30 秒（主人定的）')
+  else bad('盯梢间隔默认值不对')
+  if (/聊天盯梢/.test(cl) && /Switch/.test(cl)) ok('设置页有「聊天盯梢」开关')
+  else bad('面板没有聊天盯梢开关')
+  if (/React\.useEffect[\s\S]{0,900}?chat\/read/.test(cl) && /, 30_000\)/.test(cl)) ok('聊天界面开着时 30 秒自动刷新')
+  else bad('聊天界面不会自动刷新')
+  if (/chat\/read'[\s\S]{0,900}?im-http\.py/.test(idx)) ok('/chat/read 也走 HTTP 快路径（面板刷新不冷启浏览器）')
+  else bad('/chat/read 没接快路径 —— 面板每刷一次冷启一次浏览器')
+  // 🔴 盯梢只许读不许发：盯梢循环里出现 im-send/send 就报红
+  const cwLoop = idx.slice(idx.indexOf('chatWatchTick ='), idx.indexOf('chatWatchTick =') + 3200)
+  if (/im-send|sendDm|--text/.test(cwLoop)) bad('盯梢循环里出现了发送代码 —— 盯梢只许「看见+提醒」，回话必须由人点头')
+  else ok('盯梢循环是纯只读（看见+提醒，不代发）')
+  // 🔴 定时器异常必须自己兜（宿主红线）
+  if (/chatWatchTick[\s\S]{0,2000}?catch/.test(idx)) ok('盯梢循环兜住了异常（不会带崩宿主）')
+  else bad('盯梢循环没兜异常 —— 一出错整个宿主进程没了')
 } catch (e) { bad(`消息/聊天检查失败：${e.message}`) }
 
 /* ── 4o. 自动发送总开关 + 跑一轮的失败反馈（2026-10-22 用户要求） ── */

@@ -197,6 +197,8 @@ window.__ModuleLoader__.load({
       const [runLog, setRunLog] = React.useState(null)
       // 「在评论区 @ 你」要 @ 的昵称（输入框草稿）
       const [atMeDraft, setAtMeDraft] = React.useState(null)
+      // 聊天盯梢间隔的输入草稿（2026-10-24）
+      const [cwSecDraft, setCwSecDraft] = React.useState(null)
       // dsh 入口路径（输入框草稿）—— 2026-10-23 加，见「出问题了？」卡片
       const [dshBinDraft, setDshBinDraft] = React.useState(null)
 
@@ -417,6 +419,20 @@ window.__ModuleLoader__.load({
         } catch (e) { say('读不到会话：' + String((e && e.message) || e), 'warn') }
         finally { setBusy('') }
       }
+
+      /** ⭐ 聊天界面开着时自动刷新（2026-10-24 会话模式）：30 秒拉一次新消息，
+       *  走 HTTP 快路径所以很轻；关掉聊天界面就停。正在输入/发送中不打扰。 */
+      React.useEffect(() => {
+        if (!chat || !chat.who) return undefined
+        const t = setInterval(async () => {
+          try {
+            if (busy === 'send') return
+            const r = await jpost('/chat/read', { to: chat.who.nick, to_id: chat.who.sec_uid || '' })
+            if (r && r.ok) setChat((prev) => (prev && prev.who.sec_uid === (r.to_sec_uid || prev.who.sec_uid) ? { ...prev, data: r } : prev))
+          } catch { /* 刷不到就等下一拍 */ }
+        }, 30_000)
+        return () => clearInterval(t)
+      }, [chat && chat.who && chat.who.sec_uid, busy === 'send'])
 
       const sendChat = async () => {
         const text = String(chatText || '').trim()
@@ -715,6 +731,44 @@ window.__ModuleLoader__.load({
               h('button', {
                 'data-dy-mini': '', disabled: Boolean(busy) || atMeDraft === null,
                 onClick: async () => { await patch({ commentSelfName: String(atMeDraft || '').trim() }, '已保存要 @ 的昵称'); setAtMeDraft(null) },
+              }, '保存'))
+            : null,
+
+          /* ⭐⭐ 聊天盯梢（2026-10-24）：主人实测的「会话模式」进插件。
+           *   每 N 秒静默读一次私信对象的会话（HTTP 快路径，不起浏览器），
+           *   他来新消息就弹 Windows 通知。回话还是你来（或叫值班轮）。 */
+          h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '聊天盯梢'),
+              h('div', { 'data-dy-sub': '' },
+                (cfg.chatWatch
+                  ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息，有就弹通知。不起浏览器，很轻。`
+                  : '关着：不来新消息提醒。开了它，人不在电脑前也能知道他找你。'))),
+            h(Switch, {
+              on: Boolean(cfg.chatWatch),
+              disabled: !cfg.dmToId,
+              onChange: (v) => patch({ chatWatch: v }, v
+                ? '✅ 已打开聊天盯梢（有新消息弹通知）'
+                : '已关闭聊天盯梢'),
+            })),
+          !cfg.dmToId
+            ? h('div', { 'data-dy-sub': '' }, '（先在下面「私信发给谁」选好对象，这个才有用）')
+            : null,
+          cfg.chatWatch
+            ? h('div', { 'data-dy-row': '' },
+              h('span', { 'data-dy-sub': '' }, '间隔（秒，10–300）'),
+              h('input', {
+                'data-dy-input': '', style: { width: '90px' }, type: 'number', min: 10, max: 300,
+                value: cwSecDraft !== null ? cwSecDraft : String(cfg.chatWatchSec || 30),
+                onChange: (e) => setCwSecDraft(e.target.value),
+              }),
+              h('button', {
+                'data-dy-mini': '', disabled: Boolean(busy) || cwSecDraft === null,
+                onClick: async () => {
+                  const n = Math.max(10, Math.min(Number(cwSecDraft) || 30, 300))
+                  await patch({ chatWatchSec: n }, `盯梢间隔已存：${n} 秒`)
+                  setCwSecDraft(null)
+                },
               }, '保存'))
             : null),
 
