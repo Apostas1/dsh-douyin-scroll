@@ -785,7 +785,7 @@ window.__ModuleLoader__.load({
               h('div', { 'data-dy-sub': '' },
                 (cfg.chatWatch
                   ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息，有就弹通知。不起浏览器，很轻。`
-                  : '关着。开了它，人不在电脑前也能知道他找你（新消息弹 Windows 通知）。'))),
+                  : '关着（默认是开的）。人不在电脑前想知道他找没找你，就再打开。')),
             h(Switch, {
               on: Boolean(cfg.chatWatch),
               disabled: !cfg.dmToId || busy === 'patch',

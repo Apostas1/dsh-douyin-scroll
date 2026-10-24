@@ -133,7 +133,12 @@ export const Config = !z ? undefined : z.object({
   /** ⭐⭐ 聊天盯梢（2026-10-24）：后台每 N 秒读一次私信对象的会话，有新消息就通知。
    *  来源：主人当天实测的「会话模式」——30 秒一读、看见就回（实测响应 ~12 秒）。
    *  间隔默认 30 秒；读取走 HTTP 快路径（im-http.py，~1.1 秒/次、不启浏览器、身份铁闸）。 */
-  chatWatch: z.boolean().default(false).extra('volatile', true),
+  /**
+   * ⭐ 聊天模式总开关（2026-10-24 定稿：主人拍板「默认开启，要关就整个关掉」）。
+   *    一个开关管全部：30 秒一读 + 新消息通知 + 状态屏。不再有单独的「自动回话」——
+   *    回话由 AI 值班做（已活着的会话，~12 秒），插件只做眼睛。
+   */
+  chatWatch: z.boolean().default(true).extra('volatile', true),
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
   /**
@@ -246,9 +251,9 @@ export function apply(ctx, config) {
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
     updateUrl: '',
     dmTo: '', dmToId: '',
-    // ⭐ 聊天模式（2026-10-24）：⚠️ 这里漏加过 ⇒ clampPatch 把面板的 patch 整个 strip 掉，
-    //    开关点了没反应。DEFAULTS / zod schema 两处必须同步。
-    chatWatch: false, chatWatchSec: 30,
+    // ⭐ 聊天模式（2026-10-24 定稿：默认开启，主人拍板；要关就整个关掉）。
+    //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
+    chatWatch: true, chatWatchSec: 30,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }

@@ -900,12 +900,12 @@ try {
   // ④ 聊天模式（2026-10-24 会话模式进插件）：后端盯梢 + 面板开关 + 自动刷新 + 快路径
   if (/chatWatchTick/.test(idx)) ok('后端有聊天模式盯梢循环（新消息 → 通知）')
   else bad('后端没有盯梢循环 —— 会话模式没进插件')
-  if (/chatWatch: z\.boolean\(\)\.default\(false\)/.test(idx)) ok('chatWatch 配置项在（默认关，用户自己开）')
-  else bad('没有 chatWatch 配置项')
+  if (/chatWatch: z\.boolean\(\)\.default\(true\)/.test(idx)) ok('chatWatch 默认开（2026-10-24 主人定稿：默认开启，要关就整个关掉）')
+  else bad('chatWatch 默认值不对 —— 主人拍板过默认开')
   // 🔴 防倒退：DEFAULTS 表必须也带 chatWatch（2026-10-24 事故：只加了 zod 没加 DEFAULTS，
   //    clampPatch 只放行 DEFAULTS 里的键 ⇒ 面板开关点了没反应）
-  if (/DEFAULTS = \{[\s\S]{0,900}?chatWatch: false/.test(idx)) ok('DEFAULTS 表带 chatWatch（面板的 patch 不会被 strip）')
-  else bad('DEFAULTS 表没有 chatWatch —— 面板开关会点了没反应（2026-10-24 踩过）')
+  if (/DEFAULTS = \{[\s\S]{0,900}?chatWatch: true/.test(idx)) ok('DEFAULTS 表带 chatWatch 且默认 true（面板的 patch 不会被 strip）')
+  else bad('DEFAULTS 表没有 chatWatch（或默认值不对）—— 面板开关会点了没反应')
   if (/chatWatchSec: z\.natural\(\)\.default\(30\)/.test(idx)) ok('看消息间隔默认 30 秒（主人定的）')
   else bad('看消息间隔默认值不对')
   if (/聊天模式/.test(cl) && /Switch/.test(cl)) ok('设置页有「聊天模式」开关')
