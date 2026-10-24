@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
      *    对一下面板右上角显示的 `v<版本>·b<N>` 就知道。
      */
-    const PANEL_BUILD = 16
+    const PANEL_BUILD = 17
 
     const asJson = async (res) => {
       if (res.ok) return res.json()
@@ -945,8 +945,8 @@ window.__ModuleLoader__.load({
               h('div', { 'data-dy-title': '' }, '桌宠'),
               h('div', { 'data-dy-sub': '' },
                 (cfg.petOn
-                  ? '✅ 她在右下角飘着呢——能拖动，点一下会说话。状态跟着插件走：盯私信=捧手机，跑值班=干活，全关=睡觉（Zzz）。'
-                  : '关着。打开她就会回到右下角。'))),
+                  ? '✅ 她浮在桌面上（所有窗口的最上层）：能拖动，点一下会说话，右键她就去休息（关一次再开这个开关她才回来）。状态跟着插件走：盯私信=捧手机，跑值班=干活，全关=睡觉（Zzz）。'
+                  : '关着。打开她就会飘到屏幕右下角。'))),
             h(Switch, {
               on: cfg.petOn !== false,
               disabled: busy === 'patch',
@@ -1484,14 +1484,9 @@ window.__ModuleLoader__.load({
           { name: 'settings.section', id: 'douyin-scroll', order: 31, label: '刷抖音' },
           () => h(Boundary, null, h(Panel)),
         ))
-        // ⭐ 桌宠：挂在 shell.overlay（全屏浮层，浮在所有内容上层、不挡滚动）。
-        //    自己包 Boundary —— 她炸了不能把整个浮层拖垮；素材没装就不渲染。
-        try {
-          slots.inject('shell.overlay', () => slots.register(
-            { name: 'shell.overlay', id: 'douyin-pet', order: 99, label: '桌宠' },
-            () => h(Boundary, null, h(DeskPet)),
-          ))
-        } catch (e) { /* 挂不上就算了，别影响面板 */ }
+        // ⭐ 桌宠（2026-10-24 v2）：她搬进**桌面级置顶窗口**（tools/pet-window.ps1，
+        //    主人要求「悬浮在所有窗口上」——网页浮层出不了 DSH 窗口，GUI 内浮层撤掉，
+        //    不然会同时出现两只她）。面板开关（petOn）仍然管她：petKeeper 按开关拉起/收掉桌面窗。
       },
     }
   },

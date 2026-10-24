@@ -12,7 +12,7 @@
  * 退出码 0 = 渲染通过。
  * ============================================================================
  */
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -174,8 +174,9 @@ new Function('window', 'document', 'navigator', 'fetch', src)(
 )
 if (!mod) throw new Error('client.js 没有调用 __ModuleLoader__.load')
 
-/* ── 把注册到 settings.section / shell.overlay 的组件抓出来 ──
- *    （2026-10-24 加桌宠后有两个注册口，别让后注册的把前面的顶掉） */
+/* ── 把注册到 settings.section 的组件抓出来 ──
+ *    （2026-10-24 v2：桌宠搬进桌面级置顶窗口 pet-window.ps1 —— 主人要「悬浮所有窗口上」。
+ *    GUI 内浮层必须撤掉，不然同时出现两只她。这里守住：不许再注册 shell.overlay。） */
 let Registered = null
 let Overlay = null
 const ctx = {
@@ -191,6 +192,7 @@ const ctx = {
 }
 mod.apply(ctx)
 if (!Registered) throw new Error('apply() 没有往 settings.section 注册组件')
+if (Overlay) { console.log('  ❌ 还在往 shell.overlay 注册 —— v2 起桌宠是桌面窗口，GUI 浮层必须撤（不然两只）'); fail++ }
 
 /* ── 迷你渲染器 ── */
 const isClass = (t) => typeof t === 'function' && t.prototype && typeof t.prototype.render === 'function'
@@ -624,54 +626,30 @@ if (rLog) {
   else { console.log('  ❌ 没显示上次跑时间'); fail++ }
 }
 
-/* ── 桌宠（2026-10-24）：overlay 注册 + 渲染 + mock 状态驱动 ── */
+/* ── 桌宠（2026-10-24 v2：桌面级置顶窗口）──
+ *    她不再走 GUI 浮层（上面已断言不许注册 shell.overlay）。
+ *    这里验「桌面窗那条路」的关键件：窗口脚本存在 + keeper 写状态文件。 */
 console.log('\n【桌宠】')
 {
-  if (!Overlay) { console.log('  ❌ 没有往 shell.overlay 注册组件'); fail++ }
-  else {
-    // 渲两遍：第一遍发 fetch，第二遍才能读到异步回来的状态（替身不会自动重渲染）
-    const renderPet = async () => {
-      hookIdx = 0
-      render(React.createElement(Overlay, {}))
-      await flush()
-      hookIdx = 0
-      const t = render(React.createElement(Overlay, {}))
-      await flush()
-      return t
-    }
-    // watch 状态 + 有素材 —— 她应该渲染出身体层和手机道具
-    Object.assign(petState, { state: 'watch', asset_ok: true, pet_on: true })
-    hooks = []
-    const petTree = await renderPet()
-    const petFlat = walk(petTree)
-    const imgs = petFlat.filter((n) => n.tag === 'img')
-    const srcs = imgs.map((n) => String(n.props?.src || '')).join(' ')
-    if (imgs.length >= 15) console.log(`  ✅ 桌宠渲染出 ${imgs.length} 个层（15 层身体 + 道具）`)
-    else { console.log(`  ❌ 层数不够（${imgs.length} < 15）—— 分层没叠出来`); fail++ }
-    if (/phone\.png/.test(srcs)) console.log('  ✅ watch 状态捧着手机（phone 层在）')
-    else { console.log('  ❌ watch 状态没捧手机'); fail++ }
-    if (/eyelash/.test(srcs)) console.log('  ✅ 眨眼层在（eyelash）')
-    else { console.log('  ❌ 缺眨眼层'); fail++ }
-    // sleep 状态：应该换成 zzz、不眨眼（data-awake 没了）
-    Object.assign(petState, { state: 'sleep', chat: { on: false } })
-    hooks = []
-    const sleepTree = await renderPet()
-    const sleepFlat = walk(sleepTree)
-    const sleepSrcs = sleepFlat.filter((n) => n.tag === 'img').map((n) => String(n.props?.src || '')).join(' ')
-    if (/zzz\.png/.test(sleepSrcs)) console.log('  ✅ sleep 状态冒 Zzz')
-    else { console.log('  ❌ sleep 状态没有 Zzz'); fail++ }
-    if (/phone\.png/.test(sleepSrcs)) { console.log('  ❌ sleep 状态还捧着手机'); fail++ }
-    else console.log('  ✅ sleep 状态手机收起来了')
-    // 素材缺失 / 开关关：整只不渲染（别的机器装了不报错）
-    Object.assign(petState, { state: 'idle', asset_ok: false, pet_on: false })
-    hooks = []
-    const offTree = await renderPet()
-    const offFlat = walk(offTree)
-    if (!offFlat.length) console.log('  ✅ 没素材 / 关着 ⇒ 整只不渲染（不炸不占位）')
-    else { console.log('  ❌ 关着还在渲染东西'); fail++ }
-    // 复位，别影响后面的检查
-    Object.assign(petState, { state: 'watch', asset_ok: true, pet_on: true })
-  }
+  const idx = readFileSync(join(ROOT, 'index.js'), 'utf8')
+  const win = join(ROOT, 'tools', 'pet-window.ps1')
+  if (existsSync(win)) console.log('  ✅ 桌面窗脚本在（tools/pet-window.ps1，置顶透明窗）')
+  else { console.log('  ❌ 缺 tools/pet-window.ps1 —— 桌宠窗口本体没了'); fail++ }
+  const ps1 = existsSync(win) ? readFileSync(win, 'utf8') : ''
+  if (/Topmost\s*=\s*\$true/.test(ps1)) console.log('  ✅ 窗口置顶（Topmost，浮在所有窗口上——主人 2026-10-24 要求）')
+  else { console.log('  ❌ 窗口没置顶'); fail++ }
+  if (/AllowsTransparency/.test(ps1) && /WindowStyle.*None/.test(ps1)) console.log('  ✅ 无边框全透明（只看见她，看不见窗）')
+  else { console.log('  ❌ 不是透明无边框窗'); fail++ }
+  if (/phone\.png/.test(ps1) && /zzz\.png/.test(ps1)) console.log('  ✅ 状态驱动道具（watch=手机 / sleep=Zzz）')
+  else { console.log('  ❌ 窗口不认状态道具'); fail++ }
+  if (/pet-hide\.json/.test(ps1) && /MouseRightButtonDown/.test(ps1)) console.log('  ✅ 右键去休息（写 hide 标记后自退）')
+  else { console.log('  ❌ 没有右键退场'); fail++ }
+  if (/petKeeperTick/.test(idx) && /pet-window\.ps1/.test(idx)) console.log('  ✅ 宿主有 petKeeper（拉起/收掉桌面窗 + 15 秒写状态）')
+  else { console.log('  ❌ 没有 petKeeper —— 窗口没人管'); fail++ }
+  // 面板开关文案更新过（指向桌面窗口而不是右下角浮层）
+  const cl = readFileSync(join(ROOT, 'client.js'), 'utf8')
+  if (/所有窗口的最上层/.test(cl)) console.log('  ✅ 面板文案是桌面窗口版')
+  else { console.log('  ❌ 面板文案还是 GUI 浮层版'); fail++ }
 }
 
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')

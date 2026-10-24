@@ -2868,6 +2868,104 @@ export function apply(ctx, config) {
     ctx.effect(() => () => clearInterval(cw), 'douyin-duty: 聊天盯梢')
   } catch (e) { log(`聊天盯梢没起来：${e?.message ?? e}`) }
 
+  /* ─────────────── ⭐ 桌宠（2026-10-24 v2：桌面级置顶窗口） ───────────────
+   * 主人验收 0.4.0 后两条指令：①图裂了（素材在 layers/ 子目录 + 带空格层名，已修）；
+   * ②「悬浮在所有窗口上」——网页浮层出不了 DSH 窗口 ⇒ 桌宠搬进独立置顶小窗。
+   * 这层是**状态源**：聚合真实状态 + 写 pet-window-state.json（桌面窗轮询它）。
+   * 桌面窗本体在 tools/pet-window.py（WPF Topmost 透明窗），由 petKeeper 拉起/收掉。
+   */
+  const petSpriteDirOf = () => join(pluginDir, 'assets', 'pet', 'sprite')
+  const petManifestOf = () => readJson(join(petSpriteDirOf(), 'manifest.json'), null)
+  const petStateOf = () => {
+    const st = readJson(dutyStateFile, {})
+    const cw = readJson(join(stateDir, 'chat-watch-state.json'), {})
+    // ⚠️ 聚合口径：chat-watch-state.json 是「最后已知状态」，即使现在关了它也留着旧值
+    //    ⇒ 只有 cfg.chatWatch 开着才算 watch，否则看别的信号。
+    const watching = Boolean(cfg.chatWatch) && String(cw.lastResult || '') !== 'off'
+    const running = Boolean(st.roundActive)
+    const cwErrFresh = watching && cw.lastResult === 'error' && Date.now() - Number(cw.ts || 0) < 180_000
+    // 「她睡了」的口径：聊天模式关了、也没有任何跑的时段（noon/night/自定义全关）
+    const customs = Array.isArray(cfg.windows) ? cfg.windows : []
+    const anyWindow = Boolean(cfg.noon) || Boolean(cfg.night)
+      || customs.some((w) => /^\d{1,2}:\d{2}$/.test(String(w?.start || '')) && /^\d{1,2}:\d{2}$/.test(String(w?.end || '')))
+    let state = 'idle'
+    if (!anyWindow && !cfg.chatWatch) state = 'sleep'
+    else if (running) state = 'run'
+    else if (cwErrFresh) state = 'error'
+    else if (watching) state = 'watch'
+    return {
+      ok: true,
+      state,                                     // idle | watch | run | sleep | error
+      round_active: running,
+      chat: cfg.chatWatch ? {
+        on: true,
+        result: String(cw.lastResult || ''),
+        new_text: String(cw.lastNewText || '').slice(0, 40),
+        checked_ago: cw.lastCheckAt ? Math.round((Date.now() - cw.lastCheckAt) / 1000) : null,
+      } : { on: false },
+      asset_ok: Boolean(petManifestOf()),
+      pet_on: Boolean(cfg.petOn),
+      now: Date.now(),
+    }
+  }
+  /** 桌宠窗口状态文件：桌面窗（pet-window.py）轮询这个文件决定显示什么。
+   *  写入很轻（小 JSON）；15 秒一拍跟 GUI 内浮层时代一个节奏。 */
+  const petWinStateFile = join(stateDir, 'pet-window-state.json')
+  const petWinWrite = () => {
+    try {
+      const s = petStateOf()
+      writeFileSync(petWinStateFile, JSON.stringify({ ...s, sprite_dir: petSpriteDirOf() }, null, 1), 'utf8')
+    } catch { /* 写不进去也不能出事 */ }
+  }
+  /** petKeeper：盯 petOn 开关——开着且桌面窗没活着就拉起；关了/素材没了就收掉。
+   *  窗口本体是 PowerShell + WPF（tools/pet-window.ps1，置顶透明窗，系统自带运行时）。
+   *  右键她 = 「去休息」：窗口写 pet-hide.json 后自退 —— keeper 看见 hide 就**不再拉起**，
+   *  直到主人把面板开关关一次再开（关的时候删 hide 标记）。
+   *  🔴 定时器回调必须自己兜异常（宿主红线）。 */
+  let petWinChild = null
+  let petOnPrev = null
+  const petHideFile = () => join(stateDir, 'pet-hide.json')
+  const petKeeperTick = () => {
+    try {
+      const s = petStateOf()
+      // 开关从开→关：清掉「去休息」标记（下次打开 = 全新的她）
+      if (petOnPrev === true && !cfg.petOn) { try { rmSync(petHideFile(), { force: true }) } catch { /* 无所谓 */ } }
+      petOnPrev = Boolean(cfg.petOn)
+      const hidden = existsSync(petHideFile())
+      const want = Boolean(cfg.petOn) && s.asset_ok && !hidden
+      const alive = petWinChild && !petWinChild.killed
+      if (want && !alive) {
+        petWinWrite()
+        const ps = join(pluginDir, 'tools', 'pet-window.ps1')
+        const pwsh = process.env.ProgramFiles && existsSync(join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'))
+          ? join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe')
+          : 'powershell.exe'
+        petWinChild = spawn(pwsh, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps], {
+          windowsHide: true,   // 只藏 PowerShell 自己的控制台；她的 WPF 窗口照常显示
+          stdio: 'ignore',
+          env: pyEnv({ DOUYIN_HOME: stateDir }),
+        })
+        petWinChild.unref?.()
+        petWinChild.on('exit', () => { petWinChild = null })
+        log('桌宠窗口已拉起（置顶透明窗，右键她可让她去休息）')
+      } else if (!want && alive) {
+        try { petWinChild.kill() } catch { /* 已经没了 */ }
+        petWinChild = null
+        log('桌宠开关关了 / 素材没了 / 她在休息 —— 桌面窗已收')
+      }
+      if (want) petWinWrite()
+    } catch (e) { log(`petKeeper 这一拍出错（已兜住）：${e?.message ?? e}`) }
+  }
+  try {
+    const pk = setInterval(petKeeperTick, 15_000)
+    pk.unref?.()
+    petKeeperTick()
+    ctx.effect(() => () => {
+      clearInterval(pk)
+      try { petWinChild?.kill() } catch { /* 收摊 */ }
+    }, 'douyin-duty: 桌宠窗口守护')
+  } catch (e) { log(`petKeeper 没起来：${e?.message ?? e}`) }
+
   /* ─────────────── 健康信号 ─────────────── */
   const healthFile = join(stateDir, 'health.json')
   const writeHealth = () => {
@@ -3118,64 +3216,27 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, ...s, now: Date.now() })
     }
 
-    /* ─────────────── ⭐ 桌宠（2026-10-24）：主人要的「窗口宠」───────────────
-     * 两件事：
-     *   /pet/state  —— 把插件各处的真实状态**聚合**成一个「她现在在干嘛」：
-     *       run（值班轮跑着）> watch（聊天模式盯着）> sleep（总开关关）> error > idle
-     *     加上聊天模式详情，泡泡台词在客户端按状态现配。
-     *   /pet/asset/*  —— 服务 assets/pet/sprite/ 里的层图（MIME 按扩展名）。
-     * 素材是主人私货（豆包生成的拆层），.gitignore 已隔离，不随仓库发布；
-     * 素材没装时 /pet/state 照常工作（asset_ok:false），面板给「缺素材」提示。
+    /* ─────────────── ⭐ 桌宠（2026-10-24）───────────────
+     * /pet/state  —— 聚合真实状态（petStateOf() 在路由外定义，桌面窗的写入器共用）。
+     * /pet/asset/* —— 白名单素材服务（见下）。
      */
-    const petSpriteDir = () => join(pluginDir, 'assets', 'pet', 'sprite')
-    const petManifest = () => readJson(join(petSpriteDir(), 'manifest.json'), null)
-    const petState = () => {
-      const st = readJson(dutyStateFile, {})
-      const cw = readJson(join(stateDir, 'chat-watch-state.json'), {})
-      // ⚠️ 聚合口径：chat-watch-state.json 是「最后已知状态」，即使现在关了它也留着旧值
-      //    ⇒ 只有 cfg.chatWatch 开着才算 watch，否则看别的信号。
-      const watching = Boolean(cfg.chatWatch) && String(cw.lastResult || '') !== 'off'
-      const running = Boolean(st.roundActive)
-      const cwErrFresh = watching && cw.lastResult === 'error' && Date.now() - Number(cw.ts || 0) < 180_000
-      // 「她睡了」的口径：聊天模式关了、也没有任何跑的时段（noon/night/自定义全关）
-      //    —— 插件没有独立总开关，这就是「什么都不干」的真实状态。
-      const customs = Array.isArray(cfg.windows) ? cfg.windows : []
-      const anyWindow = Boolean(cfg.noon) || Boolean(cfg.night)
-        || customs.some((w) => /^\d{1,2}:\d{2}$/.test(String(w?.start || '')) && /^\d{1,2}:\d{2}$/.test(String(w?.end || '')))
-      let state = 'idle'
-      if (!anyWindow && !cfg.chatWatch) state = 'sleep'
-      else if (running) state = 'run'
-      else if (cwErrFresh) state = 'error'
-      else if (watching) state = 'watch'
-      return {
-        ok: true,
-        state,                                     // idle | watch | run | sleep | error
-        round_active: running,
-        chat: cfg.chatWatch ? {
-          on: true,
-          result: String(cw.lastResult || ''),
-          new_text: String(cw.lastNewText || '').slice(0, 40),
-          checked_ago: cw.lastCheckAt ? Math.round((Date.now() - cw.lastCheckAt) / 1000) : null,
-        } : { on: false },
-        asset_ok: Boolean(petManifest()),
-        pet_on: Boolean(cfg.petOn),
-        now: Date.now(),
-      }
-    }
     if (req.method === 'GET' && path === '/api/douyin-duty/pet/state') {
-      return sendJson(res, 200, petState())
+      return sendJson(res, 200, petStateOf())
     }
     if (req.method === 'GET' && path.startsWith('/api/douyin-duty/pet/asset/')) {
-      // 只放行白名单里的文件名（层名 / 道具名），别开成任意文件服务器
-      const mf = petManifest()
-      const allow = new Set([...(mf?.layers || []).map((n) => n + '.png'),
-        ...(mf?.props || []).map((n) => n + '.png')])
-      const name = path.slice('/api/douyin-duty/pet/asset/'.length)
-      if (!mf || !allow.has(name)) return sendJson(res, 404, { ok: false, error: 'no such asset' })
+      // 只放行白名单里的文件名（层名 / 道具名），别开成任意文件服务器。
+      // ⚠️ 层图在 layers/ 子目录；「back hair」这种带空格的层名：
+      //    浏览器 <img src> 会发 %20 编码，手写测试常发原样空格 —— 两种都认。
+      const mf = petManifestOf()
+      const allow = new Map()
+      for (const n of mf?.layers || []) allow.set(encodeURIComponent(n) + '.png', join('layers', n + '.png'))
+      for (const n of mf?.props || []) allow.set(encodeURIComponent(n) + '.png', n + '.png')
+      const key = path.slice('/api/douyin-duty/pet/asset/'.length)
+      const rel = allow.get(key) || allow.get(decodeURIComponent(key))
+      if (!mf || !rel) return sendJson(res, 404, { ok: false, error: 'no such asset' })
       try {
-        const buf = readFileSync(join(petSpriteDir(), name))
-        const mime = name.endsWith('.json') ? 'application/json; charset=utf-8' : 'image/png'
-        res.writeHead(200, { 'content-type': mime, 'cache-control': 'max-age=300' })
+        const buf = readFileSync(join(petSpriteDirOf(), rel))
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=300' })
         return res.end(buf)
       } catch {
         return sendJson(res, 404, { ok: false, error: 'asset read failed' })
