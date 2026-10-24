@@ -156,53 +156,70 @@ try {
   else bad('没读 unreadCount —— 面板算不出"谁可能有未读"')
 } catch (e) { bad(`读不了 tools/im-send.mjs（私信闸）：${e.message}`) }
 
-/* ── 4b-3. 纯 HTTP 读私信（im-http.mjs，2026-10-24） ──
+/* ── 4b-3. 纯 HTTP 读私信（im-http.py，2026-10-24 二版） ──
  *
  * 背景：浏览器读私信冷启动 ~10s，且"谁发的"靠头像左右猜、时间戳恒为 0。
- * 抖音 IM 实际走 imapi.douyin.com 的 protobuf（只要 Cookie，实测 ~0.7s）。
- * 这里守住三件事：
- *   ① im-http.mjs 必须是**纯只读**（出现发送代码立刻报红）
- *   ② 它必须带真实时间戳和发送者 uid（这是它相对浏览器路径的核心优势）
- *   ③ index.js 的 douyin_im_read 必须先试它、失败退回浏览器（两条路不能只留一条）
- *   ④ 信封必须是自己构造的 —— 不许把第三方 base64 常量抄进来
- *      （逆向项目公开的信封里嵌着**他们自己的会话 ID**，抄进来是脏东西）
+ * 抖音 IM 实际走 imapi.douyin.com 的 protobuf（只要 Cookie，~1s）。
+ * 这里守住五件事：
+ *   ① im-http.py 必须是**纯只读**（出现发送代码立刻报红）
+ *   ② 身份铁闸：sec_uid **当场反查**成数字 uid，与会话 peer_uid **严格相等**才算命中
+ *   ③ 🔴 防倒退：**「只有一个会话就拿来用」这类捷径不许回来**
+ *      （一版全靠这个捷径在撑，而匹配条件 sec_uid==数字uid 永远不成立 —— 0.3.1 认错人事故同款）
+ *   ④ 通道伪装：curl_cffi impersonate（TLS 指纹对齐浏览器，和 notice-read.py 一套）
+ *   ⑤ index.js：有 to_id 才走快路径、matched 才算命中；浏览器兜底必须在
  */
-console.log('\n4b-3. 纯 HTTP 读私信（im-http.mjs）')
+console.log('\n4b-3. 纯 HTTP 读私信（im-http.py）')
 try {
-  const h = readFileSync(join(here, 'tools', 'im-http.mjs'), 'utf8')
+  const h = readFileSync(join(here, 'tools', 'im-http.py'), 'utf8')
 
   // ① 只读红线（剥掉注释再查，免得注释里的说明文字自咬尾巴）
-  const hCode = h.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '').replace(/([^:'"`])\/\/[^\n]*/g, '$1')
+  const hCode = h.replace(/#[^\n]*/g, '')
   if (/message\/send|\/v1\/send|sendMsg|publish/i.test(hCode)) {
-    bad('im-http.mjs 里出现了发送代码 —— 它必须只是个只读工具，发私信只走 im-send.mjs')
-  } else ok('im-http.mjs 是纯只读（没有任何发送调用）')
-  if (h.includes('--read') && !/argv\.includes\('--write'\)|--send/.test(h)) ok('入口只认 --read 参数')
-  else bad('im-http.mjs 的参数入口不对')
+    bad('im-http.py 里出现了发送代码 —— 它必须只是个只读工具，发私信只走 im-send.mjs')
+  } else ok('im-http.py 是纯只读（没有任何发送调用）')
+  if (h.includes('--read') && !h.includes('--write') && !h.includes('--send')) ok('入口只认 --read 参数')
+  else bad('im-http.py 的参数入口不对')
 
-  // ② 数据质量：时间戳 + 发送者
-  if (/field10|at:\s*iso|毫秒时间戳/.test(h)) ok('消息带真实毫秒时间戳（iso()）')
+  // ② 身份铁闸：反查核验
+  if (/sec_user_id=/.test(h) && /c\["peer_uid"\] == wanted_uid/.test(h)) ok('sec_uid 当场反查 → uid 严格相等才算命中')
+  else bad('身份核验不完整 —— 必须反查 sec_uid 并与 peer_uid 严格比对')
+
+  // ③ 防倒退：单会话捷径必须不存在（剥注释后的真代码里）
+  if (/conversations\[0\]|convs\[0\]|length === 1/.test(hCode)) {
+    bad('「单会话就拿来用」的捷径还在 —— 那是一版认错人的根因，必须删干净')
+  } else ok('没有单会话捷径（验不明就退出，不猜）')
+  if (/"type"\] == 1/.test(hCode.replace(/\s/g, '')) || /type.*== 1/.test(hCode)) ok('只认私聊 type=1（群聊不参与按人匹配）')
+  else bad('没限定私聊 —— 群聊会话会把消息标错人')
+
+  // ④ 数据质量 + 通道伪装
+  if (/毫秒时间戳|field10/.test(h) && /def iso/.test(h)) ok('消息带真实毫秒时间戳（iso()）')
   else bad('没解时间戳 —— HTTP 路径的核心优势没了')
-  if (/发送者 uid|sender === myUid/.test(h)) ok('发送者按协议字段判（uid 比对，不靠头像猜）')
+  if (/sender == my_uid/.test(hCode)) ok('发送者按协议字段判（uid 比对，不靠头像猜）')
   else bad('没按 uid 判发送者 —— 会退回头像猜的老毛病')
-  if (/short_id:\s*String/.test(h)) ok('short_id 以字符串透传（19 位数，Number 会丢精度）')
-  else bad('short_id 走了 Number —— 会被截断')
+  if (/impersonate="chrome"/.test(hCode)) ok('走 curl_cffi 伪装 Chrome 指纹（不拿裸脚本指纹戳 IM 接口）')
+  else bad('没用 curl_cffi impersonate —— TLS 指纹是脚本特征，接口在看请求模式')
+  if (/def build_envelope/.test(h)) ok('信封是 build_envelope 自建的（没有第三方常量）')
+  else bad('找不到 build_envelope —— 信封构造没了')
+  if (/CK0CEKZOGg|_ENVELOPE_B64\s*=\s*"A-Za-z0-9/.test(h)) {
+    bad('im-http.py 里抄了第三方 base64 信封常量 —— 要自己构造（别人的信封里嵌着他们自己的会话 ID）')
+  }
 
-  // ③ index.js 双路径
+  // ⑤ index.js 双路径 + 命中条件
   const idx = readFileSync(join(here, 'index.js'), 'utf8')
-  if (/im-http\.mjs/.test(idx)) ok('douyin_im_read 先走 HTTP 快路径（im-http.mjs）')
-  else bad('index.js 没接 im-http.mjs —— 快路径丢了')
+  if (/im-http\.py/.test(idx)) ok('douyin_im_read 先走 HTTP 快路径（im-http.py）')
+  else bad('index.js 没接 im-http.py —— 快路径丢了')
+  if (/if \(toId\)/.test(idx.slice(idx.indexOf('douyin_im_read'), idx.indexOf('douyin_im_read') + 4000))) {
+    ok('有 to_id（sec_uid）才走快路径 —— 不给 sec_uid 不白付 HTTP 往返')
+  } else bad('快路径没有 to_id 前置条件 —— 读陌生人会白付一次往返')
+  if (/http\.matched/.test(idx)) ok('命中只认 matched（反查核验通过的那个），不认别的')
+  else bad('没有 matched 判定 —— 身份铁闸没接上')
   if (/im-send\.mjs/.test(idx) && /陌生人/.test(idx.slice(idx.indexOf('douyin_im_read'), idx.indexOf('douyin_im_read') + 4000))) {
     ok('读不到时退回浏览器路径（陌生人消息只有那条路能读）')
   } else bad('没有浏览器兜底 —— 陌生人的私信会读不到')
   if (/via:\s*'http'/.test(idx)) ok('返回里带 via 标明走的哪条路')
   else bad('没有 via 字段 —— 分不清这次读走的是哪条路')
-
-  // ④ 信封必须是自建的
-  if (/CK0CEKZOGg|_ENVELOPE_B64\s*=\s*"A-Za-z0-9/.test(h)) {
-    bad('im-http.mjs 里抄了第三方 base64 信封常量 —— 要自己构造（别人的信封里嵌着他们自己的会话 ID）')
-  } else if (/buildEnvelope/.test(h)) ok('信封是 buildEnvelope 自建的（没有第三方常量）')
-  else bad('找不到 buildEnvelope —— 信封构造没了')
-} catch (e) { bad(`读不了 tools/im-http.mjs：${e.message}`) }
+  if (/im-http\.mjs/.test(idx)) bad('index.js 还在调 im-http.mjs —— 旧文件已删，这是死引用')
+} catch (e) { bad(`读不了 tools/im-http.py：${e.message}`) }
 
 /* ── 4c. 「先卡片，后文字」这条规矩不能被改回去 ── */
 console.log('\n4c. 发送顺序规矩（先卡片，后文字）')

@@ -1538,8 +1538,8 @@ export function apply(ctx, config) {
 
   tool({
     name: 'douyin_im_read',
-    description: '读私信：**先走纯 HTTP 快路径**（~1 秒，不启浏览器，每条带真实时间戳和发送者），'
-      + '目标不在已建立会话里（比如陌生人）时自动退回无头 Chrome 路径。'
+    description: '读私信：**有 to_id（sec_uid）时先走纯 HTTP 快路径**（~1 秒，不启浏览器，每条带真实时间戳和发送者），'
+      + '目标按 sec_uid 反查核验、不在已建立会话里（比如陌生人）时自动退回无头 Chrome 路径。'
       + '每条都带 `from`（me / them / unknown），能分清「他刚回了什么」和「我上次说了什么」。只读，不发任何东西。'
       + '⭐ **会自动带上记忆**：返回里 `context` 是我记得的这个人（长期事实 + 之前聊过的内容），'
       + '回话之前先看它，别把聊过的事当没说过。返回里 `via` 标明这次走的哪条路。',
@@ -1555,41 +1555,35 @@ export function apply(ctx, config) {
       const limit = Math.max(1, Math.min(Number(args.limit) || 30, 60))
 
       /**
-       * ⭐ 快路径（2026-10-24）：先试纯 HTTP（tools/im-http.mjs，不碰浏览器）。
-       *    实测 ~0.7s 拿到全部已建立会话 + 每会话 20 条消息，而且**每条带真实
-       *    毫秒时间戳和发送者 uid**（浏览器路径这两样都拿不到）。
-       *    ⚠️ 它只覆盖「已建立会话」；陌生人消息不在里面。所以：
-       *      · HTTP 说 OK 且里面找得到这个人 → 直接用（不启 Chrome）
-       *      · 其余情况（接口挂 / 限流 / 这人不在已建立会话里）→ 自动退回浏览器路径
-       *    两条路返回结构对齐，调用方（值班轮/面板）不用改。
+       * ⭐ 快路径（2026-10-24，二版）：先试纯 HTTP（tools/im-http.py，curl_cffi 伪装
+       *    Chrome 指纹，不碰浏览器）。~1s 拿到全部已建立会话 + 每会话 20 条消息，
+       *    每条带真实毫秒时间戳和发送者 uid（浏览器路径这两样都拿不到）。
+       *    🔴 身份铁闸：**有 to_id（sec_uid）才走这条路**，并且必须由 im-http.py
+       *      当场把 sec_uid 反查成数字 uid、与会话 peer_uid **严格相等**才算命中；
+       *      反查失败 / 不在已建立会话里 / 没给 sec_uid ⇒ matched:null ⇒ 退浏览器。
+       *      一版在这里栽过「认错人」：拿 sec_uid 和数字 uid 直接比（永远比不中），
+       *      实际全靠「只有一个会话就拿来用」的侥幸捷径在撑 —— 已删，永不回来。
        */
       let http = null
-      try {
-        const r0 = runNodeTool('im-http.mjs', ['--read', '--limit', String(limit)], { timeout: 30_000 })
-        http = pickJson(r0.stdout)
-      } catch { http = null }
-      if (http && http.ok && Array.isArray(http.conversations)) {
-        // 在已建立会话里找目标：按 uid（conv_id 里的两个 uid，去掉自己）
-        const wantedUid = toId || ''
-        const hit = http.conversations.find((c) => c.peer_uid && c.peer_uid === wantedUid)
-          || (to && http.conversations.length === 1 ? http.conversations[0] : undefined)
-        if (hit) {
-          const allMsgs = hit.messages || []
+      if (toId) {
+        try {
+          const r0 = runPy('im-http.py', ['--read', '--peer-sec-uid', toId, '--limit', String(limit)], { timeout: 30_000 })
+          http = pickJson(r0.stdout)
+        } catch { http = null }
+        if (http && http.ok && http.matched) {
+          const allMsgs = http.matched.messages || []
           const msgs = allMsgs.slice(-limit)
           let context = null
           let memory = null
           try {
-            const secUid = String(toId || '').trim()
-            if (secUid) {
-              memory = mergeDmMemory(stateDir, secUid, to || hit.peer_uid, allMsgs)
-              context = dmContext(stateDir, secUid, { recent: 12 })
-            }
+            memory = mergeDmMemory(stateDir, toId, to || http.matched.nickname || '', allMsgs)
+            context = dmContext(stateDir, toId, { recent: 12 })
           } catch (e) { log(`读私信记忆失败（不影响这次读）：${e?.message ?? e}`) }
-          log(`im-read(HTTP) ${to || toId}: ${allMsgs.length} 条，${http.ms}ms，没启浏览器`)
+          log(`im-read(HTTP) ${http.matched.nickname || toId}: ${allMsgs.length} 条，${http.ms}ms，没启浏览器`)
           return {
             ok: true, via: 'http',
-            to, to_sec_uid: toId || undefined,
-            matched_by: 'uid(已建立会话)',
+            to: to || http.matched.nickname, to_sec_uid: toId,
+            matched_by: 'sec_uid反查→uid严格相等（已建立会话）',
             count: allMsgs.length,
             mine: allMsgs.filter((m) => m.from === 'me').length,
             them: allMsgs.filter((m) => m.from === 'them').length,
@@ -1601,7 +1595,7 @@ export function apply(ctx, config) {
             memory: memory ? { rounds: memory.rounds, total: memory.total, added: memory.added } : null,
           }
         }
-        // 找不到这个人（可能是陌生人）⇒ 落到浏览器路径，它能读陌生人
+        // matched:null（陌生人 / 反查失败 / 接口挂）⇒ 落到浏览器路径，它能读陌生人
       }
 
       const argv = ['--read']
