@@ -2765,7 +2765,22 @@ export function apply(ctx, config) {
   let chatWatchLastMs = 0            // 上次盯梢时刻（节流用）
   let chatWatchLastSeenAt = ''       // 已经提醒过的最新一条「对方消息」时间戳
   let chatWatchBusy = false
+  let chatWatchPrimed = false        // 启动后第一拍只「对表」不提醒（不把历史消息重播一遍）
   const chatWatchLog = (s) => { try { appendFileSync(join(stateDir, 'chat-watch.log'), `[${new Date().toISOString()}] ${s}\n`, 'utf8') } catch { /* 日志写不进就算了 */ } }
+  /** ⭐ 每一拍都把状态写进 chat-watch-state.json —— 面板轮询它，用户能实时看到
+   *    「几秒前看过 · 结果如何 · 通知弹没弹 · 错在哪」（2026-10-24 主人要求）。 */
+  const cwStateFile = join(stateDir, 'chat-watch-state.json')
+  const cwState = { lastCheckAt: 0, lastResult: '', lastError: '', lastNote: '', lastNewAt: '', lastNewText: '', toast: '', checks: 0, notified: 0 }
+  const cwWrite = (patch) => {
+    try {
+      Object.assign(cwState, patch)
+      writeFileSync(cwStateFile, JSON.stringify({
+        ...cwState, ts: Date.now(), on: Boolean(cfg.chatWatch),
+        sec: Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300)),
+        to: cfg.dmTo || '', via: 'http（不启浏览器）',
+      }, null, 1), 'utf8')
+    } catch { /* 状态写不进也不能出事 */ }
+  }
 
   const chatWatchTick = async () => {
     const nowMs = Date.now()
@@ -2776,32 +2791,56 @@ export function apply(ctx, config) {
     chatWatchBusy = true
     try {
       refreshCfg()
-      if (!cfg.chatWatch) return
+      if (!cfg.chatWatch) { cwWrite({ lastResult: 'off' }); return }
       const toId = String(cfg.dmToId || '').trim()
-      if (!toId) return // 没配私信对象就不盯（身份铁闸要 sec_uid）
-      if (!hasCredential(stateDir)) return
+      if (!toId) { cwWrite({ lastResult: 'skip_no_to' }); return } // 身份铁闸要 sec_uid
+      if (!hasCredential(stateDir)) { cwWrite({ lastResult: 'skip_no_login' }); return }
       const r = runPy('im-http.py', ['--read', '--peer-sec-uid', toId, '--limit', '8'], { timeout: 30_000 })
       const j = pickJson(r.stdout)
-      if (!j || !j.ok || !j.matched) return // 限流/接口挂/不在会话里：静默等下一拍，退浏览器没意义（这里不为读而启浏览器）
+      cwState.checks += 1
+      if (!j || !j.ok) {
+        // 限流 / 接口挂 / Cookie 失效：记下来给面板看，静默等下一拍
+        cwWrite({ lastCheckAt: Date.now(), lastResult: 'error', lastError: String((j && j.error) || r.stderr || '没返回可解析结果').slice(0, 160) })
+        return
+      }
+      if (!j.matched) {
+        cwWrite({ lastCheckAt: Date.now(), lastResult: 'no_match', lastNote: String(j.match_note || ''), lastError: '' })
+        return
+      }
       const msgs = Array.isArray(j.matched.messages) ? j.matched.messages : []
       // 合并进记忆（这样面板/值班轮打开就能看到，不会"刚读到却说没聊过"）
       try { mergeDmMemory(stateDir, toId, cfg.dmTo || j.matched.nickname || '', msgs) } catch { /* 记忆失败不影响盯梢 */ }
-      // 找出比上次提醒更新的「对方消息」
       const theirs = msgs.filter((m) => m.from === 'them' && m.at && m.at > chatWatchLastSeenAt)
-      if (!theirs.length) return
+      // 第一拍只「对表」：以最新一条为基准，不把历史消息重播一遍
+      if (!chatWatchPrimed) {
+        chatWatchPrimed = true
+        const newestTheirs = msgs.filter((m) => m.from === 'them' && m.at)
+        chatWatchLastSeenAt = newestTheirs.length ? newestTheirs[newestTheirs.length - 1].at : ''
+        cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_prime', lastError: '' })
+        chatWatchLog(`已接上班（基准 = ${chatWatchLastSeenAt || '无对方消息'}，之前的不重播）`)
+        return
+      }
+      if (!theirs.length) { cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok', lastError: '' }); return }
       chatWatchLastSeenAt = theirs[theirs.length - 1].at
+      cwState.notified += theirs.length
       const head = theirs[0].text.slice(0, 60)
       chatWatchLog(`新消息 ${theirs.length} 条（${cfg.dmTo || toId}）：${head}`)
       // 通知（toast / webhook 按配置；file = 只写日志不弹）
       const mode = String(cfg.notifyMode || 'toast')
+      let toastState = ''
       if (mode === 'toast' || mode === 'both') {
-        try { sendToast({ title: `${cfg.dmTo || '私信'} 来消息了`, body: theirs.slice(0, 3).map((m) => m.text.slice(0, 80)).join('\n') }) } catch { /* 通知失败不影响 */ }
+        try {
+          const tr = sendToast({ title: `${cfg.dmTo || '私信'} 来消息了`, body: theirs.slice(0, 3).map((m) => m.text.slice(0, 80)).join('\n') })
+          toastState = tr && tr.ok ? 'ok' : `fail:${String((tr && tr.error) || '未知原因').slice(0, 80)}`
+        } catch (e) { toastState = `fail:${String(e?.message ?? e).slice(0, 80)}` }
       }
       if (mode === 'webhook' || mode === 'both') {
         sendWebhook({ url: cfg.webhookUrl, preset: cfg.webhookPreset, title: `${cfg.dmTo || '私信'} 来消息了`, markdown: theirs.map((m) => `- ${m.text.slice(0, 100)}`).join('\n') }).catch(() => { /* webhook 失败不影响 */ })
       }
+      cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_new', lastError: '', lastNewAt: theirs[theirs.length - 1].at, lastNewText: theirs[theirs.length - 1].text.slice(0, 40), toast: toastState })
     } catch (e) {
       chatWatchLog(`这一拍出错（已兜住）：${e?.message ?? e}`)
+      cwWrite({ lastCheckAt: Date.now(), lastResult: 'error', lastError: String(e?.message ?? e).slice(0, 160) })
     } finally {
       chatWatchBusy = false
     }
@@ -3054,6 +3093,12 @@ export function apply(ctx, config) {
       } catch (e) {
         return sendJson(res, 200, { ok: false, logged_in: true, account: cached, error: String(e?.message ?? e) })
       }
+    }
+
+    /* ── ⭐ 聊天模式：实时状态（面板每 15 秒拉一次，显示「它现在在干嘛」） ── */
+    if (req.method === 'GET' && path === '/api/douyin-duty/chat/watch') {
+      const s = readJson(join(stateDir, 'chat-watch-state.json'), {})
+      return sendJson(res, 200, { ok: true, ...s, now: Date.now() })
     }
 
     /* ── ⭐ 收件箱：评论区 @ 我 + 谁私信我（面板「消息」用的） ──

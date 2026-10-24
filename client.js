@@ -130,6 +130,47 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * ⭐ 聊天模式的实时状态屏（2026-10-24）。
+     *    主人原话：「是不是要有一个加载过程，显示 AI 现在在干嘛，是在开浏览器还是干啥，
+     *    不然我哪知道有什么用错在哪了」——所以把盯梢循环的每一拍都亮出来：
+     *    几秒前看过 · 结果（没新消息/有新消息/出错/没接上）· 通知弹没弹 · 错误原文。
+     *    每 15 秒拉一次 /chat/watch（读状态文件，很轻）。
+     */
+    function ChatWatchStatus() {
+      const [s, setS] = React.useState(null)
+      React.useEffect(() => {
+        let alive = true
+        const pull = async () => {
+          try { const r = await jget('/chat/watch'); if (alive && r && r.ok) setS(r) } catch { /* 拉不到等下一拍 */ }
+        }
+        pull()
+        const t = setInterval(pull, 15_000)
+        return () => { alive = false; clearInterval(t) }
+      }, [])
+      if (!s) return h('div', { 'data-dy-sub': '' }, '盯着呢…（状态加载中）')
+      const ago = s.lastCheckAt ? Math.max(0, Math.round(((s.now || Date.now()) - s.lastCheckAt) / 1000)) : null
+      const RESULT = {
+        ok: ago !== null ? `${ago} 秒前看过：没新消息` : '还没看过（等第一拍）',
+        ok_prime: '已接上班：从现在起只提醒**新**来的消息（之前的不重播）',
+        ok_new: `🔔 ${ago !== null ? ago + ' 秒前' : ''}看到新消息：${s.lastNewText || ''}`,
+        error: `❌ 读取失败：${s.lastError || '未知原因'}`,
+        no_match: `⚠️ 没匹配上：${s.lastNote || '目标不在已建立会话里（陌生人走不了 HTTP 路径）'}`,
+        off: '开关已关（这条状态是旧的）',
+        skip_no_to: '⚠️ 没配私信对象（去「私信发给谁」选一个）',
+        skip_no_login: '⚠️ 还没登录（先扫码）',
+      }
+      const line = RESULT[s.lastResult] || `状态：${s.lastResult || '（还没跑过）'}`
+      const toastBit = s.lastResult === 'ok_new'
+        ? (String(s.toast || '').startsWith('ok') ? ' · 通知已弹 ✅' : ` · 通知没弹：${s.toast || '未知'}`)
+        : ''
+      return h('div', { 'data-dy-card': '', style: { background: 'transparent', border: '1px dashed var(--dsw-alias-border-l2,rgba(255,255,255,.14))', padding: '8px 10px', gap: '4px' } },
+        h('div', { 'data-dy-sub': '', style: { opacity: '.95' } },
+          `👀 ${line}${toastBit}`),
+        h('div', { 'data-dy-sub': '', style: { opacity: '.7' } },
+          `每 ${s.sec || 30} 秒看一眼「${s.to || '私信对象'}」· 走 ${s.via || 'http'} · 已看 ${s.checks || 0} 次 · 提醒过 ${s.notified || 0} 条`))
+    }
+
+    /**
      * ⭐ 关键：绝不能让组件抛错把整页搞没。
      *    用 error boundary 包住 —— 任何子组件炸了只显示一句提示 + 重试，
      *    而不是像之前那样整块空白（一个 TDZ 错误就能让面板彻底消失）。
@@ -773,9 +814,12 @@ window.__ModuleLoader__.load({
                   setCwSecDraft(null)
                 },
               }, '保存'))
-            : null),
+            : null,
+          /* ⭐ 实时状态屏（2026-10-24 主人要求：「我哪知道它有什么用、错在哪了」）：
+           *    开着聊天模式时每 15 秒拉一次后端状态，显示几秒前看过、结果、通知弹没弹。 */
+          cfg.chatWatch ? h(ChatWatchStatus, { key: 'cw-status' }) : null),
 
-        /* ── 开始使用：三步装机 + 扫码登录 ── 
+        /* ── 开始使用：三步装机 + 扫码登录 ──
          * 🔴 2026-10-22：以前这里只写一句「命令行跑 node tools/qr-login.mjs start」——
          *    对新手等于"你自己去折腾"。现在做成**点按钮 → 出二维码 → 手机扫 → 点我扫完了**。
          *    进度条按状态自己算：没环境 → 没登录 → 能用了。 */

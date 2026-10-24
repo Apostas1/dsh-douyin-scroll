@@ -921,6 +921,13 @@ try {
   // 🔴 定时器异常必须自己兜（宿主红线）
   if (/chatWatchTick[\s\S]{0,2000}?catch/.test(idx)) ok('盯梢循环兜住了异常（不会带崩宿主）')
   else bad('盯梢循环没兜异常 —— 一出错整个宿主进程没了')
+  // ⑤ 实时状态屏（2026-10-24 主人要求：「显示它现在在干嘛，不然我哪知道错在哪」）
+  if (idx.includes('/api/douyin-duty/chat/watch')) ok('后端有 /chat/watch 状态接口')
+  else bad('没有状态接口 —— 面板无从知道它在干嘛')
+  if (/ChatWatchStatus/.test(cl) && /chat\/watch/.test(cl)) ok('面板有实时状态屏（几秒前看过/结果/通知弹没弹）')
+  else bad('面板没有实时状态 —— 用户看不出它有什么用、错在哪')
+  if (/chatWatchPrimed/.test(idx)) ok('首拍只「对表」不提醒（不会把历史消息重播一遍）')
+  else bad('没有首拍对表 —— 一开机可能把旧消息全弹一遍')
 } catch (e) { bad(`消息/聊天检查失败：${e.message}`) }
 
 /* ── 4o. 自动发送总开关 + 跑一轮的失败反馈（2026-10-22 用户要求） ── */
