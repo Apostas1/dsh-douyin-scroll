@@ -152,8 +152,8 @@ $win.Topmost            = $true
 $win.ShowInTaskbar      = $false
 $win.ShowActivated      = $false
 $win.ResizeMode         = [System.Windows.ResizeMode]::NoResize
-$win.Width              = 180
-$win.Height             = 230
+$win.Width              = 200
+$win.Height             = 240
 $win.Title              = 'deskpet'
 
 try {
@@ -177,7 +177,7 @@ $win.Add_SourceInitialized({
 
 # ── 内容树：泡泡 + 聊天面板 + 身体层 ──
 $root = New-Object System.Windows.Controls.Grid
-$root.Width = 180; $root.Height = 230
+$root.Width = 200; $root.Height = 240
 
 # 泡泡（没台词整个收起）
 $bubble = New-Object System.Windows.Controls.Border
@@ -197,13 +197,16 @@ $bubble.Child = $bt
 [void]$root.Children.Add($bubble)
 
 # 聊天面板（默认隐藏）
+# 🔴 v5.1（主人验收：「文本输入框还是有问题」）：面板 240 宽 > 窗口 180 宽，
+#    右边 60px 被窗口裁掉 ⇒ 发送按钮整个在窗外点不到。缩到 172（窗口内）+
+#    窗口加宽到 200，面板完整可见可点。
 $chat = New-Object System.Windows.Controls.Border
 $chat.CornerRadius = New-Object System.Windows.CornerRadius 10
 $chat.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F0222530')
 $chat.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#66FFFFFF')
 $chat.BorderThickness = '1'
-$chat.Width = 240; $chat.Height = 180
-$chat.HorizontalAlignment = 'Left'; $chat.VerticalAlignment = 'Top'
+$chat.Width = 172; $chat.Height = 176
+$chat.HorizontalAlignment = 'Center'; $chat.VerticalAlignment = 'Top'
 $chat.Margin = '0,26,0,0'
 $chat.Visibility = [System.Windows.Visibility]::Collapsed
 $chatGrid = New-Object System.Windows.Controls.Grid
@@ -758,31 +761,11 @@ function Start-Danmaku {
     } catch {}
   })
   $script:dmWin.Show()
+  $script:dmWin.Show()
   # ── 满屏弹幕 ──
-  # 开场铺 12 条（随机轨道随机进度感），之后 0.35~0.8 秒一条——直播间密度
-  $lanes = [Math]::Max(6, [int]($wa.Height / 60))   # 轨道数按屏高算，60px 一轨
-  function New-Danmaku([double]$startX) {
-    try {
-      $list = P 'danmaku'
-      $tb = New-Object System.Windows.Controls.TextBlock
-      $tb.Text = Pick $list
-      $tb.FontSize = (Get-Random -Minimum 15 -Maximum 27)
-      $tb.FontWeight = 'Bold'
-      # 随机暖色，白底阴影保可读
-      $colors = @('#FFFFFF', '#FFE066', '#FF8FA3', '#7FE3FF', '#B7FF7F')
-      $tb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($colors[(Get-Random -Minimum 0 -Maximum $colors.Count)])
-      $tb.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect
-      $y = $wa.Top + 30 + (Get-Random -Minimum 0 -Maximum [int]($wa.Height - 110))
-      [void]$script:dmCanvas.Children.Add($tb)
-      $tb.Measure([System.Windows.Size]::new($wa.Width, 80))
-      $len = $tb.DesiredSize.Width
-      Canvas.SetLeft($tb, $startX); Canvas.SetTop($tb, $y)
-      $dur = (Get-Random -Minimum 6 -Maximum 13)
-      $anim = New-Object System.Windows.Media.Animation.DoubleAnimation($startX, $wa.Left - $len - 80, [System.Windows.Duration]::new([TimeSpan]::FromSeconds($dur)))
-      $anim.Completed.Add({ try { $script:dmCanvas.Children.Remove($tb) } catch {} })
-      $tb.BeginAnimation([System.Windows.Controls.Canvas]::LeftProperty, $anim)
-    } catch {}
-  }
+  # 🔴 v5.1（主人验收：「看不见弹幕」）：上一版 New-Danmaku 定义在 Start-Danmaku
+  #    函数体内部 —— PowerShell 函数不是闭包，定时器触发时内层函数已不在作用域
+  #    ⇒ 每次生成静默炸掉，一条都画不出来。v5.1 把生成函数提到脚本级。
   for ($i = 0; $i -lt 12; $i++) { New-Danmaku ($wa.Right - (Get-Random -Minimum 0 -Maximum [int]($wa.Width * 0.7))) }
   $script:dmTimer = New-Object System.Windows.Threading.DispatcherTimer
   $script:dmTimer.Interval = [TimeSpan]::FromMilliseconds(500)
@@ -794,6 +777,31 @@ function Start-Danmaku {
   })
   $script:dmTimer.Start()
 }
+
+# 🔴 脚本级：弹幕生成（谁都能调，不依赖 Start-Danmaku 的作用域）
+function New-Danmaku([double]$startX) {
+  try {
+    if (-not $script:dmCanvas) { return }
+    $list = P 'danmaku'
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Text = Pick $list
+    $tb.FontSize = (Get-Random -Minimum 15 -Maximum 27)
+    $tb.FontWeight = 'Bold'
+    $colors = @('#FFFFFF', '#FFE066', '#FF8FA3', '#7FE3FF', '#B7FF7F')
+    $tb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($colors[(Get-Random -Minimum 0 -Maximum $colors.Count)])
+    $tb.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect
+    $wa = [System.Windows.SystemParameters]::WorkArea
+    $y = $wa.Top + 30 + (Get-Random -Minimum 0 -Maximum [int]($wa.Height - 110))
+    [void]$script:dmCanvas.Children.Add($tb)
+    $tb.Measure([System.Windows.Size]::new($wa.Width, 80))
+    $len = $tb.DesiredSize.Width
+    Canvas.SetLeft($tb, $startX); Canvas.SetTop($tb, $y)
+    $dur = (Get-Random -Minimum 6 -Maximum 13)
+    $anim = New-Object System.Windows.Media.Animation.DoubleAnimation($startX, $wa.Left - $len - 80, [System.Windows.Duration]::new([TimeSpan]::FromSeconds($dur)))
+    $anim.Completed.Add({ try { $script:dmCanvas.Children.Remove($tb) } catch {} })
+    $tb.BeginAnimation([System.Windows.Controls.Canvas]::LeftProperty, $anim)
+  } catch {}
+}
 function Stop-Danmaku {
   try { $script:dmTimer.Stop(); $script:dmWin.Close() } catch {}
   $script:dmWin = $null; $script:dmTimer = $null; $script:dmCanvas = $null
@@ -801,6 +809,9 @@ function Stop-Danmaku {
 
 # ── 交互：拖动 vs 点击（Q弹 + 台词 + 水泡音效）──
 $win.Add_MouseLeftButtonDown({
+  # 🔴 v5.1：聊天面板开着时，点的是输入框/按钮 —— 不许触发拖窗（主人验收：
+  #    「文本输入框还是有问题」的一半根因，点面板=拖窗把面板拖着走）
+  if ($chat.Visibility -eq [System.Windows.Visibility]::Visible) { return }
   $script:dragging = $true
   $l0 = $win.Left; $t0 = $win.Top
   try { $win.DragMove() } catch {}
