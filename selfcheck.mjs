@@ -942,11 +942,10 @@ try {
   if (/chatReplyRun|chatReplyPrompt|chatReply:/.test(idx)) bad('插件里又有「现起会话回话」的代码 —— 已定稿拆掉，回话归 AI 值班')
   else ok('插件没有「现起会话回话」（回话 = AI 值班，插件只做眼睛）')
 
-  // ⑦ 桌宠状态源（2026-10-24 v3：窗口/开关全搬去独立插件 dsh-deskpet，这里只留状态）
-  if (/pet\/state/.test(idx) && /petStateOf/.test(idx)) ok('后端有 /pet/state（真实状态聚合，dsh-deskpet 经它联动）')
+  // ⑦ 桌宠 v5（2026-10-24 主人拍板「放到刷抖音面板里来」：从 dsh-deskpet 迁回）
+  if (/pet\/state/.test(idx) && /petStateOf/.test(idx)) ok('后端有 /pet/state（真实状态聚合成「她在干嘛」）')
   else bad('没有桌宠状态接口')
-  // 🔴 素材服务必须白名单（别开成任意文件读取）——
-  //    从「路由匹配那行」往后截 900 字符（注释里也提 /pet/asset，从那里截会截错段）
+  // 🔴 素材服务必须白名单（别开成任意文件读取）
   const petAssetSeg = idx.slice(idx.indexOf("path.startsWith('/api/douyin-duty/pet/asset/')"), idx.indexOf("path.startsWith('/api/douyin-duty/pet/asset/')") + 900)
   if (/allow\.get\(key\)/.test(petAssetSeg) && /readFileSync\(join\(petSpriteDirOf\(\)/.test(petAssetSeg)) ok('素材服务有白名单（只放行 manifest 里的文件名）')
   else bad('素材服务没白名单 —— 那是任意文件读取')
@@ -956,14 +955,40 @@ try {
     if (/assets\/pet\//.test(gi)) ok('.gitignore 挡住了 assets/pet/（桌宠素材是主人私货，不随仓库发布）')
     else bad('.gitignore 没挡 assets/pet/ —— 私货素材会被推上公开仓库')
   } catch { bad('读不到 .gitignore') }
-  // 🔴 v3 防倒退：窗口管理已搬去 dsh-deskpet，这里不许再养窗口/keeper/开关
-  if (/petKeeperTick|pet-window\.ps1|petWinChild/.test(idx)) bad('还在养桌宠窗口（keeper/ps1/子进程）—— 已搬去 dsh-deskpet，留在这儿会出两只她')
-  else ok('不再养桌宠窗口（已搬去 dsh-deskpet，只留状态源）')
-  if (/petOn: z\./.test(idx) || /petOn: true/.test(idx)) bad('petOn 配置还在 —— deskpet 插件有自己的开关，两个开关会打架')
-  else ok('petOn 已随桌宠迁走（开关归 dsh-deskpet）')
-  if (/slots\.inject\('shell\.overlay'/.test(cl)) bad('还在往 shell.overlay 注册桌宠')
+  // 窗口本体 v5
+  try {
+    const ps1 = existsSync(join(here, 'tools', 'pet-window.ps1')) ? readFileSync(join(here, 'tools', 'pet-window.ps1'), 'utf8') : ''
+    if (ps1) {
+      if (/Topmost\s*=\s*\$true/.test(ps1)) ok('桌面窗置顶（悬浮所有窗口之上）')
+      else bad('桌面窗没置顶')
+      if (/AllowsTransparency/.test(ps1) && /ShowInTaskbar\s*=\s*\$false/.test(ps1)) ok('透明无边框 + 不进任务栏')
+      else bad('桌面窗属性不对')
+      if (/HasDeskpetWindow/.test(ps1)) ok('单例闸（插件重载不出两只她）')
+      else bad('没有单例闸 —— 重载会双开')
+      if (/pet-cmd\.json/.test(ps1)) ok('菜单走意图文件（不被代理坑，弹幕点得动）')
+      else bad('菜单走 HTTP —— 弹幕会点不动（踩过）')
+      if (/TransformToDevice/.test(ps1) && /lastMoveAt/.test(ps1)) ok('眼动 DPI 修正 + 鼠标动了才看/停 1.2s 回中（主人验收定的）')
+      else bad('眼动没做 DPI 修正/回中 —— 追踪会不对（踩过）')
+      if (/New-Danmaku/.test(ps1) && /0\.35 -Maximum 800|350 -Maximum 800/.test(ps1)) ok('弹幕满屏（开场铺 12 条 + 0.35~0.8s 一条）')
+      else bad('弹幕密度不够 —— 主人要满屏')
+      if (/sfx-pop/.test(ps1) && /Play-Sfx/.test(ps1)) ok('点击音效（水泡啵 + 喂饭咕咚）')
+      else bad('点击没音效')
+      if (/pet-hide\.json/.test(ps1) && /退出（关掉她）/.test(ps1)) ok('右键菜单：休息 + 退出（联动面板）')
+      else bad('右键菜单缺退场项')
+    } else bad('缺 tools/pet-window.ps1')
+  } catch (e) { bad(`桌面窗检查失败：${e.message}`) }
+  if (/petKeeperTick/.test(idx) && /pet-window\.ps1/.test(idx)) ok('宿主有 petKeeper（开关拉起/收掉 + 意图文件应用）')
+  else bad('没有 petKeeper')
+  // petOn/petPersona/petDanmaku/petWalk 必须 zod + DEFAULTS 双登记（同 chatWatch 的事故口径）
+  if (/petOn: z\.boolean\(\)\.default\(true\)/.test(idx) && /petOn: true, petPersona/.test(idx)) ok('桌宠四配置双登记（zod + DEFAULTS）')
+  else bad('桌宠配置只登记一边 —— 开关点了没反应（踩过）')
+  for (const p of ['infp', 'entp', 'esfp', 'istj']) {
+    if (!existsSync(join(here, 'prompts', 'deskpet-personas', `${p}.json`))) bad(`缺人格档案 ${p}.json`)
+  }
+  ok('四份 MBTI 人格档案在（随包发布）')
+  if (/slots\.inject\('shell\.overlay'/.test(cl)) bad('还在往 shell.overlay 注册桌宠（会跟桌面窗出两只）')
   else ok('GUI 内没有桌宠浮层')
-  // 状态优先级：run > error > watch > idle；sleep = 时段全关+聊天关
+  // 状态优先级
   if (/state = 'run'/.test(idx) && /state = 'sleep'/.test(idx) && /state = 'watch'/.test(idx)) ok('状态机四态齐（run/watch/sleep + 兜底 idle）')
   else bad('状态机不完整')
 } catch (e) { bad(`消息/聊天检查失败：${e.message}`) }

@@ -141,7 +141,16 @@ export const Config = !z ? undefined : z.object({
   chatWatch: z.boolean().default(true).extra('volatile', true),
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
-  // ⚠️ 2026-10-24 petOn 已随桌宠搬到独立插件 dsh-deskpet（状态源 /pet/state 还在）。
+  /**
+   * ⭐ 桌宠（2026-10-24 v5 从 dsh-deskpet 迁回：主人拍板「放到刷抖音面板里来」）。
+   *    petOn 总开关 / petPersona MBTI 人格 / petDanmaku 弹幕 / petWalk 走动。
+   *    素材在 assets/pet/（主人私货，.gitignore 挡着）——没素材时窗口不拉起、面板提示。
+   *    🔴 DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
+   */
+  petOn: z.boolean().default(true).extra('volatile', true),
+  petPersona: z.string().default('infp').extra('volatile', true),
+  petDanmaku: z.boolean().default(false).extra('volatile', true),
+  petWalk: z.boolean().default(true).extra('volatile', true),
   /**
    * ⭐ 2026-10-24 定稿（使用者：「我要的是迁移，不是开发新功能」）：
    *    聊天模式 = 今早实测那套的「读」半边（30 秒一读 + 通知 + 状态屏）。
@@ -255,6 +264,7 @@ export function apply(ctx, config) {
     // ⭐ 聊天模式（2026-10-24 定稿：默认开启，使用者拍板；要关就整个关掉）。
     //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
     chatWatch: true, chatWatchSec: 30,
+    petOn: true, petPersona: 'infp', petDanmaku: false, petWalk: true,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
@@ -290,6 +300,7 @@ export function apply(ctx, config) {
     notifyMode: ['file', 'toast', 'webhook', 'both'],
     webhookPreset: ['custom', 'wecom', 'feishu', 'dingtalk'],
     reportLevel: ['full', 'brief', 'off'],
+    petPersona: ['infp', 'entp', 'esfp', 'istj'],
   }
   const clampPatch = (patch) => {
     // ⭐ 只认 schema 里真有的字段。
@@ -2901,10 +2912,94 @@ export function apply(ctx, config) {
       now: Date.now(),
     }
   }
-  /* ── 桌宠已搬去独立插件 dsh-deskpet（2026-10-24 主人指令 ⑦：新建桌宠项目）。
-   *    这里只留「状态源」：petStateOf() + /pet/state 供外部读；
-   *    不再拉窗口、不写 pet-window-state.json、不养 keeper —— 那些归 dsh-deskpet。
-   *    （旧的窗口守护代码已整体删除，历史见 CHANGELOG 0.4.x。） */
+  /* ── 桌宠 v5（2026-10-24 主人拍板「放到刷抖音面板里来」：从 dsh-deskpet 迁回）──
+   * petKeeper 拉起/收掉置顶窗（tools/pet-window.ps1），每 10 秒写状态文件 +
+   * 读窗口的意图文件（右键菜单 → 配置，不走 HTTP——代理会坑死请求，实测教训）。
+   * 人格档案在 prompts/deskpet-personas/（随包发布，通用文案）。
+   */
+  const petPersonaFile = (id) => join(pluginDir, 'prompts', 'deskpet-personas', `${id}.json`)
+  const petPersonaOf = (id) => {
+    const p = ENUMS.petPersona.includes(String(id)) ? String(id) : 'infp'
+    try { return JSON.parse(readFileSync(petPersonaFile(p), 'utf8')) } catch { return { id: p, name: p } }
+  }
+  const petWinStateFile = join(stateDir, 'pet-window-state.json')
+  const petWinWrite = () => {
+    try {
+      let origin = ''
+      try { origin = ctx.webServer?.getOrigin?.() || '' } catch { origin = '' }
+      writeJson(petWinStateFile, {
+        on: Boolean(cfg.petOn),
+        persona: cfg.petPersona,
+        danmaku: Boolean(cfg.petDanmaku),
+        walk: Boolean(cfg.petWalk),
+        link: { state: petStateOf().state },
+        sprite_dir: petSpriteDirOf(),
+        api: origin + '/api/douyin-duty',
+        ts: Date.now(),
+      })
+    } catch { /* 写不进也不能出事 */ }
+  }
+  let petWinChild = null
+  let petSpawningAt = 0
+  let petOnPrev = null
+  const petHideFile = () => join(stateDir, 'pet-hide.json')
+  /** 窗口意图文件：右键菜单写 pet-cmd.json，keeper 每拍应用（readJson 已剥 BOM——PS5.1 教训） */
+  const petCmdFile = () => join(stateDir, 'pet-cmd.json')
+  const petApplyCmd = () => {
+    try {
+      if (!existsSync(petCmdFile())) return
+      const c = readJson(petCmdFile(), null)
+      try { rmSync(petCmdFile(), { force: true }) } catch { /* 无所谓 */ }
+      if (!c) return
+      const age = Date.now() - Number(new Date(c.at).getTime() || 0)
+      if (!Number.isFinite(age) || age > 120_000) return   // 陈旧指令丢弃
+      const patch = {}
+      if (typeof c.danmaku === 'boolean') patch.petDanmaku = c.danmaku
+      if (typeof c.walk === 'boolean') patch.petWalk = c.walk
+      if (typeof c.petOn === 'boolean') patch.petOn = c.petOn
+      if (typeof c.petPersona === 'string' && ENUMS.petPersona.includes(c.petPersona)) patch.petPersona = c.petPersona
+      if (Object.keys(patch).length) {
+        saveCfg(patch)
+        log(`桌宠窗口指令已应用：${JSON.stringify(patch)}`)
+      }
+    } catch { /* 坏文件不致命 */ }
+  }
+  const petKeeperTick = () => {
+    try {
+      petApplyCmd()
+      if (petOnPrev === true && !cfg.petOn) { try { rmSync(petHideFile(), { force: true }) } catch { /* 无所谓 */ } }
+      petOnPrev = Boolean(cfg.petOn)
+      const hidden = existsSync(petHideFile())
+      const want = Boolean(cfg.petOn) && Boolean(petManifestOf()) && !hidden
+      const alive = petWinChild && !petWinChild.killed
+      if (want && !alive && Date.now() - petSpawningAt > 15_000) {
+        petSpawningAt = Date.now()
+        petWinWrite()
+        const pwsh = process.env.ProgramFiles && existsSync(join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'))
+          ? join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe')
+          : 'powershell.exe'
+        petWinChild = spawn(pwsh, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(pluginDir, 'tools', 'pet-window.ps1')], {
+          windowsHide: true,   // 只藏 PowerShell 控制台；她的 WPF 窗口照常显示
+          stdio: 'ignore',
+          env: pyEnv({ DOUYIN_HOME: stateDir }),
+        })
+        petWinChild.unref?.()
+        petWinChild.on('exit', () => { petWinChild = null })
+        log('桌宠窗口已拉起（置顶透明窗；右键有菜单，弹幕/喂饭/维修工都在里面）')
+      } else if (!want && alive) {
+        try { petWinChild.kill() } catch { /* 已经没了 */ }
+        petWinChild = null
+        log('桌宠已收（开关关 / 素材缺 / 她在休息）')
+      }
+      if (want) petWinWrite()
+    } catch (e) { log(`petKeeper 出错（已兜住）：${e?.message ?? e}`) }
+  }
+  try {
+    const pk = setInterval(petKeeperTick, 10_000)
+    pk.unref?.()
+    petKeeperTick()
+    ctx.effect(() => () => { clearInterval(pk); try { petWinChild?.kill() } catch { /* 收摊 */ } }, 'douyin-duty: 桌宠窗口守护')
+  } catch (e) { log(`petKeeper 没起来：${e?.message ?? e}`) }
 
   /* ─────────────── 健康信号 ─────────────── */
   const healthFile = join(stateDir, 'health.json')
@@ -3096,8 +3191,11 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of Object.keys(DEFAULTS)) if (k in body) patch[k] = body[k]
+      // 桌宠联动：面板把 petOn 打开 = 「叫她回来」——清掉休息标记（主人验收反馈的联动缺口）
+      if (patch.petOn === true) { try { rmSync(join(stateDir, 'pet-hide.json'), { force: true }) } catch { /* 无所谓 */ } }
       const { clean, host } = await persistCfg(patch)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
+      petKeeperTick()   // 桌宠开关变化立即反应（不等下一拍）
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
     /**

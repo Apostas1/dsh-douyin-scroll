@@ -626,18 +626,19 @@ if (rLog) {
   else { console.log('  ❌ 没显示上次跑时间'); fail++ }
 }
 
-/* ── 桌宠（2026-10-24 v3：窗口已搬去独立插件 dsh-deskpet）──
- *    这里只守状态源 + 防倒退（不许再养窗口）。 */
+/* ── 桌宠（2026-10-24 v5：从 dsh-deskpet 迁回，主人拍板放回面板）── */
 console.log('\n【桌宠】')
 {
   const idx = readFileSync(join(ROOT, 'index.js'), 'utf8')
   const cl = readFileSync(join(ROOT, 'client.js'), 'utf8')
-  if (/petStateOf/.test(idx) && /\/pet\/state/.test(idx)) console.log('  ✅ 状态源在（/pet/state，dsh-deskpet 经它联动）')
-  else { console.log('  ❌ 状态源没了 —— deskpet 联动会瞎'); fail++ }
-  if (/petKeeperTick|pet-window\.ps1|petWinChild/.test(idx)) { console.log('  ❌ 还在养桌宠窗口 —— 已搬去 dsh-deskpet，会出两只她'); fail++ }
-  else console.log('  ✅ 不养窗口（已搬去 dsh-deskpet）')
-  if (/桌宠/.test(cl)) { console.log('  ❌ 面板还有桌宠卡片 —— 开关会跟 deskpet 打架'); fail++ }
-  else console.log('  ✅ 面板没有桌宠卡片（开关归 dsh-deskpet）')
+  if (/petStateOf/.test(idx) && /\/pet\/state/.test(idx)) console.log('  ✅ 状态源在（/pet/state）')
+  else { console.log('  ❌ 状态源没了'); fail++ }
+  if (/petKeeperTick/.test(idx) && /pet-window\.ps1/.test(idx)) console.log('  ✅ 宿主有 petKeeper（v5 拉起/收掉 + 意图文件）')
+  else { console.log('  ❌ 没有 petKeeper'); fail++ }
+  if (/人格（MBTI）/.test(cl) && /data-dy-pcard/.test(cl)) console.log('  ✅ 面板桌宠卡回归（开关+人格四选一+弹幕+走动）')
+  else { console.log('  ❌ 面板没有桌宠卡'); fail++ }
+  if (/slots\.inject\('shell\.overlay'/.test(cl)) { console.log('  ❌ 还在往 shell.overlay 注册（会出两只她）'); fail++ }
+  else console.log('  ✅ GUI 内没有浮层（只有桌面窗一只）')
 }
 
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')

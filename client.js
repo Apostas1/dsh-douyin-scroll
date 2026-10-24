@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
      *    对一下面板右上角显示的 `v<版本>·b<N>` 就知道。
      */
-    const PANEL_BUILD = 17
+    const PANEL_BUILD = 18
 
     const asJson = async (res) => {
       if (res.ok) return res.json()
@@ -89,6 +89,14 @@ window.__ModuleLoader__.load({
 [data-dy-mini]:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.24));}
 [data-dy-mini][disabled]{opacity:.5;cursor:default;}
 [data-dy-mini][data-danger]{color:#f87171;}
+/* 桌宠人格卡（2026-10-24 v5） */
+[data-dy-personas]{display:flex;gap:8px;flex-wrap:wrap;}
+[data-dy-pcard]{flex:1;min-width:150px;padding:10px;border-radius:10px;cursor:pointer;text-align:left;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.1));color:inherit;font-family:inherit;}
+[data-dy-pcard][data-on]{border-color:#3b82f6;background:rgba(59,130,246,.14);}
+[data-dy-pcard-name]{font-size:12px;font-weight:600;}
+[data-dy-pcard-desc]{font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);margin-top:3px;line-height:15px;}
 [data-dy-wrow]{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;}
 [data-dy-sep]{font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-dy-step]{flex:none;width:20px;height:20px;border-radius:50%;font-size:11px;font-weight:600;
@@ -821,8 +829,43 @@ window.__ModuleLoader__.load({
            *    开着聊天模式时每 15 秒拉一次后端状态，显示几秒前看过、结果、通知弹没弹。 */
           cfg.chatWatch ? h(ChatWatchStatus, { key: 'cw-status' }) : null),
 
-        /* ── 桌面小宠已搬去独立插件 dsh-deskpet（2026-10-24）：
-         *    开关/人格/弹幕/走动/喂饭/维修工全在 设置 → dsh-deskpet 那页。这里不再放她的卡片。 ── */
+        /* ── 桌宠（2026-10-24 v5 从 dsh-deskpet 迁回：主人拍板放回面板）── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '桌宠'),
+              h('div', { 'data-dy-sub': '' },
+                (cfg.petOn
+                  ? '✅ 她浮在桌面上（所有窗口之上）。右键她有菜单：聊天 / 喂饭 / 维修工 / 弹幕 / 走动 / 人格 / 休息 / 退出。'
+                  : '关着。打开她就飘回来（休息中也会被叫回）。')),
+            h(Switch, {
+              on: cfg.petOn !== false,
+              disabled: busy === 'patch',
+              onChange: (v) => patch({ petOn: v }, v ? '✅ 她回来了' : '她去休息了（面板随时叫回）'),
+            }))),
+          h('div', { 'data-dy-title': '' }, '人格（MBTI）'),
+          h('div', { 'data-dy-personas': '' },
+            [
+              ['infp', 'INFP · 治愈小鱼', '温柔安静，共情力满'],
+              ['entp', 'ENTP · 毒舌本鱼', '嘴毒手勤倒反天罡（红瞳紫雾）'],
+              ['esfp', 'ESFP · 元气小鱼', '自来熟表演家，走路最多'],
+              ['istj', 'ISTJ · 维修工小鱼', '一丝不苟，引导体检'],
+            ].map(([id, name, desc]) =>
+              h('button', {
+                key: id, 'data-dy-pcard': '', 'data-on': cfg.petPersona === id ? '' : undefined,
+                disabled: busy === 'patch',
+                onClick: () => patch({ petPersona: id }, '人格已切：' + name),
+              },
+                h('div', { 'data-dy-pcard-name': '' }, name),
+                h('div', { 'data-dy-pcard-desc': '' }, desc)))),
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-sub': '' }, '弹幕模式：满屏吐槽（穿透窗不挡点击）')),
+            h(Switch, { on: cfg.petDanmaku === true, onChange: (v) => patch({ petDanmaku: v }, v ? '弹幕开火' : '弹幕关了') })),
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-sub': '' }, '走动：在桌面上溜达（眼随鼠标一直开着）')),
+            h(Switch, { on: cfg.petWalk !== false, onChange: (v) => patch({ petWalk: v }, v ? '她开始溜达' : '她定住了') }))),
 
         /* ── 开始使用：三步装机 + 扫码登录 ──
          * 🔴 2026-10-22：以前这里只写一句「命令行跑 node tools/qr-login.mjs start」——
