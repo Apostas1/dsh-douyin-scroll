@@ -1,5 +1,5 @@
-/* dsh-deskpet 网页桌宠样式（Anime2.5DRig 引擎版）
-   渲染进 WebGL canvas；本样式只管 UI 层（泡泡/菜单/聊天/弹幕） */
+/* dsh-deskpet 网页桌宠样式（Anime2.5DRig 引擎版 v2）
+   聊天改为脚下台词条（不遮人不挡拖动）；新增小动作系统 */
 * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
 html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
 
@@ -10,32 +10,30 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
 .dm { position: absolute; left: 100vw; white-space: nowrap; font-weight: bold;
   text-shadow: 0 0 4px rgba(0,0,0,.8), 0 1px 2px rgba(0,0,0,.9); will-change: transform; }
 
-/* ── 她本体容器（canvas 里的渲染是全画布的，容器只管交互热区/定位） ── */
-#pet { position: fixed; width: 200px; height: 260px; cursor: grab; z-index: 5; }
+/* ── 她本体容器 ── */
+#pet { position: fixed; width: 200px; height: 300px; cursor: grab; z-index: 5; }
 #pet:active { cursor: grabbing; }
-#pet-bubble { position: absolute; bottom: 208px; left: 50%; transform: translateX(-50%);
-  max-width: 190px; padding: 8px 11px; border-radius: 12px; font-size: 12px; line-height: 17px;
+/* 泡泡：头顶上方；逐字输出用 */
+#pet-bubble { position: absolute; bottom: 246px; left: 50%; transform: translateX(-50%);
+  max-width: 220px; min-height: 17px; padding: 8px 11px; border-radius: 12px; font-size: 12px; line-height: 17px;
   background: rgba(30,32,40,.92); color: #fff; border: 1px solid rgba(255,255,255,.16);
-  box-shadow: 0 4px 16px rgba(0,0,0,.35); white-space: nowrap;
-  animation: pop .28s ease-out; pointer-events: none; display: none; z-index: 6; }
+  box-shadow: 0 4px 16px rgba(0,0,0,.35); white-space: pre-wrap; word-break: break-all;
+  animation: pop .25s ease-out; pointer-events: none; display: none; z-index: 6; }
 #pet-bubble::after { content: ''; position: absolute; bottom: -6px; left: 26px; width: 10px; height: 10px;
   border-radius: 50%; background: inherit; border: inherit; border-top: 0; border-left: 0; }
 @keyframes pop { from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(.92); } }
-#pet-body { position: absolute; inset: 30px 25px 10px; }   /* 命中热区（她躯干范围） */
+/* 命中热区（她躯干范围；泡泡和台词条各自独立接管点击） */
+#pet-body { position: absolute; top: 46px; left: 25px; right: 25px; bottom: 60px; }
 
-/* ── 聊天面板 ── */
-#chat { position: fixed; display: none; width: 190px; background: rgba(34,37,48,.96);
-  border: 1px solid rgba(255,255,255,.2); border-radius: 10px; z-index: 20; overflow: hidden;
-  box-shadow: 0 6px 24px rgba(0,0,0,.4); }
-#chat-title { font-size: 11px; font-weight: bold; color: #fff; padding: 6px 10px 2px; }
-#chat-log { height: 108px; overflow-y: auto; font-size: 11px; line-height: 16px; color: #ddd; padding: 4px 10px; }
-#chat-log div { margin: 2px 0; word-break: break-all; }
-#chat-log .them { color: #9fc6ff; }
-#chat-log .me { color: #ffd47f; }
-#chat-row { display: flex; gap: 4px; padding: 4px 6px 6px; }
-#chat-input { flex: 1; min-width: 0; font-size: 11px; padding: 4px 6px; border-radius: 6px; border: 1px solid rgba(255,255,255,.2);
-  background: rgba(0,0,0,.3); color: #fff; outline: none; user-select: text; }
-#chat-send { font-size: 11px; padding: 3px 10px; border: 0; border-radius: 6px; cursor: pointer;
+/* ── 台词条（脚下）：聊天输入，跟着她走 ── */
+#talkbar { position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+  width: 196px; display: none; gap: 4px; z-index: 8; cursor: default; }
+#talkbar.on { display: flex; }
+#chat-input { flex: 1; min-width: 0; font-size: 11px; padding: 5px 8px; border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.22); background: rgba(30,32,40,.94); color: #fff; outline: none;
+  user-select: text; cursor: text; }
+#chat-input:focus { border-color: #3b82f6; }
+#chat-send { font-size: 12px; padding: 4px 9px; border: 0; border-radius: 8px; cursor: pointer;
   background: #3b82f6; color: #fff; }
 
 /* ── 右键菜单 ── */

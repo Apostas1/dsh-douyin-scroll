@@ -16,15 +16,10 @@
   <div id="pet">
     <div id="pet-bubble"></div>
     <div id="pet-body" title=""></div>
-  </div>
-
-  <!-- 聊天面板 -->
-  <div id="chat">
-    <div id="chat-title">跟她聊天</div>
-    <div id="chat-log"></div>
-    <div id="chat-row">
-      <input id="chat-input" type="text" placeholder="说点什么…（Enter 发送）">
-      <button id="chat-send">发</button>
+    <!-- 台词输入框：在她脚下，像对话条。她被拖动时跟着走（#pet 的子元素） -->
+    <div id="talkbar">
+      <input id="chat-input" type="text" placeholder="跟她说话…（Enter）">
+      <button id="chat-send">➤</button>
     </div>
   </div>
 
@@ -34,6 +29,7 @@
     <div class="mi" data-act="feed">🍚 喂饭（大白饭）</div>
     <div class="mi" data-act="repair">🔧 维修工模式</div>
     <div class="sep"></div>
+    <div class="mi" data-act="play">🎬 逗她（随机小动作）</div>
     <div class="mi" data-act="danmaku">📺 弹幕模式</div>
     <div class="mi" data-act="walk">🚶 走动</div>
     <div class="mi" data-act="persona">🎭 人格：下一任</div>

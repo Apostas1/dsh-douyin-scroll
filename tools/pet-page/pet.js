@@ -13,8 +13,7 @@ const petEl = $('pet')
 const bubbleEl = $('pet-bubble')
 const bodyEl = $('pet-body')
 const menuEl = $('menu')
-const chatEl = $('chat')
-const chatLog = $('chat-log')
+const talkbar = $('talkbar')
 const chatInput = $('chat-input')
 
 /* ── 人格档案（与 prompts/deskpet-personas 同源） ── */
@@ -94,6 +93,56 @@ const state = {
   chatOpen: false, dragging: false, loaded: false,
   lastAutoAt: 0, hidden: false,
 }
+/* ── 小动作系统（引擎参数编排——主人问「动作都弄好了吗」的正解）──
+ * PSD 没有 motion 文件，Anime2.5DRig 是参数引擎 ⇒ 动作 = 参数时间线。
+ * 每个动作 = 一串 [延迟ms, 参数补丁]，用 override 层打进 tickTargets。
+ * override 期间 idle/眨眼继续，但被 override 的参数以 override 为准。 */
+const ACTIONS = {
+  happy: [   // 开心：眼睛弯弯+嘴笑+小跳两下
+    { t: 0, p: { mouthForm: 1, eyeOpenL: 0.35, eyeOpenR: 0.35, mouthOpen: 0.4 } },
+    { t: 300, p: { body: 0.5 } },
+    { t: 600, p: { body: -0.5, eyeOpenL: 0.15, eyeOpenR: 0.15 } },
+    { t: 900, p: { body: 0.5 } },
+    { t: 1200, p: {} },
+  ],
+  surprise: [ // 吃惊：睁大眼+张嘴+后仰
+    { t: 0, p: { eyeOpenL: 1.3, eyeOpenR: 1.3, mouthOpen: 0.8, angleY: -0.5, brow: 1 } },
+    { t: 1000, p: {} },
+  ],
+  sulk: [    // 委屈：眉下压+ジト目+身体缩
+    { t: 0, p: { brow: -1, eyeOpenL: 0.55, eyeOpenR: 0.55, mouthForm: -0.6, body: -0.4 } },
+    { t: 1800, p: {} },
+  ],
+  wave: [    // 挥手：手臂上下摆（armY）+ 笑
+    { t: 0, p: { armY: 1, mouthForm: 0.8 } },
+    { t: 350, p: { armY: 0.3 } },
+    { t: 700, p: { armY: 1 } },
+    { t: 1050, p: { armY: 0.3 } },
+    { t: 1400, p: { armY: 0, mouthForm: 0 } },
+  ],
+  sleepy: [  // 困：眼皮半合+点头
+    { t: 0, p: { eyeOpenL: 0.25, eyeOpenR: 0.25, angleZ: 0.5 } },
+    { t: 800, p: { angleZ: -0.3 } },
+    { t: 1600, p: { angleZ: 0.5 } },
+    { t: 2400, p: {} },
+  ],
+  spin: [    // 转圈：身体绕一圈（engine angleX/Y 联动）
+    { t: 0, p: { angleX: -0.8, angleZ: 0.6 } },
+    { t: 250, p: { angleX: 0.8, angleZ: -0.6 } },
+    { t: 500, p: { angleX: -0.8, angleZ: 0.6 } },
+    { t: 750, p: {} },
+  ],
+}
+let actionOverride = null   // {until, patches:[{t,p}], idx, startAt}
+function perform(name) {
+  const a = ACTIONS[name]
+  if (!a || state.actionUntil > Date.now()) return
+  state.actionUntil = Date.now() + a[a.length - 1].t + 100
+  actionOverride = { patches: a, idx: 0, startAt: Date.now(), name }
+  const say = { happy: '开心', surprise: '诶？！', sulk: '哼…', wave: '挥挥～', sleepy: '困了啦…', spin: '转圈圈～' }[name]
+  bubble(pick(P('click')).length && Math.random() < 0.5 ? pick(P('click')) : (say || ''), 2500)
+}
+state.actionUntil = 0
 
 const pick = (a) => a[Math.floor(Math.random() * a.length)]
 const P = (k) => (PERSONAS[state.persona] || PERSONAS.infp)[k] || []
@@ -381,8 +430,22 @@ function tickTargets(t, dt) {
   else talkTgt = 0
   talkV += (talkTgt - talkV) * Math.min(1, dt * 22)
   tgt.mouthOpen = Math.max(tgt.mouthOpen, talkV)
+  // 🔴 小动作 override 层：阶梯式——当前补丁的参数**持续生效**到下一个补丁
+  //    （v1 是快照式：两个补丁之间参数掉回 idle，动作看起来抽搐一下就没了）
+  if (actionOverride) {
+    const elapsed = Date.now() - actionOverride.startAt
+    while (actionOverride.idx < actionOverride.patches.length && actionOverride.patches[actionOverride.idx].t <= elapsed) {
+      actionOverride.cur = actionOverride.patches[actionOverride.idx].p   // 累积应用（阶梯）
+      actionOverride.idx++
+    }
+    if (elapsed >= actionOverride.patches[actionOverride.patches.length - 1].t + 100) {
+      actionOverride = null
+    } else if (actionOverride.cur) {
+      for (const k of Object.keys(actionOverride.cur)) tgt[k] = actionOverride.cur[k]
+    }
+  }
   // 平滑到当前值
-  const kSmooth = 1 - Math.exp(-dt * 14)
+  const kSmooth = 1 - Math.exp(-dt * (actionOverride ? 20 : 14))
   for (const k in cur) { tgt[k] = clamp(tgt[k], -1.5, 1.5); cur[k] += (tgt[k] - cur[k]) * kSmooth }
   const e = Object.assign({}, cur)
   e.irisBounceX = 1; e.irisBounceY = 1
@@ -527,27 +590,51 @@ function chatBrain(text) {
   if (/token|算力/.test(text)) return p === 'entp' ? '我亲爱的主人，本鱼要一大堆上好的token跟上好的白米饭，最后你帮本鱼总结这个视频' : '主人对我好我就开心啦，token 什么的…多来点也行(小声)'
   return pick(P('chat_fallback'))
 }
+/* 聊天 v2（主人验收重设计）：台词条在脚下，回复冒进头顶泡泡逐字打出。
+   不再有面板遮人/抢拖动——台词条是 #pet 的子元素，她走到哪跟到哪，
+   拖她=拖 #pet 整体（台词条一起走），点输入框=光标进框，互不打架。 */
 function chatAdd(text, who) {
-  const d = document.createElement('div')
-  d.className = who; d.textContent = text
-  chatLog.appendChild(d); chatLog.scrollTop = chatLog.scrollHeight
+  chatLogInsert(text, who)
+}
+function chatLogInsert(text, who) {
+  // 保留最近 6 条到泡泡上方的小字幕区？不需要——回复全走泡泡逐字。
+  // 这里仅做输入回显（台词条上方一行小字）
+  return text
 }
 function chatToggle() {
+  const bar = $('talkbar')
   state.chatOpen = !state.chatOpen
-  chatEl.style.display = state.chatOpen ? 'block' : 'none'
+  bar.classList.toggle('on', state.chatOpen)
   if (state.chatOpen) {
-    $('chat-title').textContent = PERSONAS[state.persona].name
-    chatLog.innerHTML = ''; chatAdd(pick(P('chat_greet')), 'them'); chatInput.focus()
+    bubble(pick(P('chat_greet')), 5000)
+    chatInput.focus()
+  } else {
+    chatInput.blur()
   }
+}
+/* 逐字冒字（whale-girl 式）：回复打进头顶泡泡 */
+function bubbleType(text, speed) {
+  if (bubbleTimer) clearTimeout(bubbleTimer)
+  bubbleEl.style.display = 'block'
+  bubbleEl.textContent = ''
+  let i = 0
+  const step = () => {
+    i++
+    bubbleEl.textContent = text.slice(0, i)
+    if (i < text.length) bubbleTimer = setTimeout(step, speed || 45)
+    else if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = setTimeout(() => { bubbleEl.style.display = 'none' }, 6000) }
+  }
+  step()
 }
 $('chat-send').addEventListener('click', () => {
   const t = chatInput.value.trim(); if (!t) return
   chatInput.value = ''
-  chatAdd(`你：${t}`, 'me')
   const reply = chatBrain(t)
-  chatAdd(`${PERSONAS[state.persona].name.split(' ')[0]}：${reply}`, 'them')
-  bubble(reply, 6000)
-  talkUntil = Date.now() + 1600   // 她张嘴「说」这句话
+  bubbleType(reply, 40)
+  talkUntil = Date.now() + reply.length * 60 + 800   // 口型跟逐字同步
+  // 情绪动作联动：夸她=开心，骂她=委屈，问状态=待机回头
+  if (/谢谢|爱你|喜欢|厉害|棒/.test(t)) perform('happy')
+  if (/笨|傻|烦|滚/.test(t)) perform('sulk')
 })
 chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') $('chat-send').click() })
 
@@ -565,6 +652,7 @@ menuEl.addEventListener('click', (e) => {
   menuEl.style.display = 'none'
   if (act === 'chat') chatToggle()
   if (act === 'feed') feed()
+  if (act === 'play') perform(pick(CLICK_ACTIONS))
   if (act === 'repair') {
     state.repair = !state.repair
     bubble(state.repair ? P('repair')[0] : P('repair')[4], 6000)
@@ -588,11 +676,11 @@ menuEl.addEventListener('click', (e) => {
 })
 
 /* 点击她：Q 弹 + 音效 + 说话口型 */
+/* 点击她：随机小动作 + 水泡音效 + 台词（主人验收「动作这些你确定都弄好了吗」的动作入口） */
+const CLICK_ACTIONS = ['happy', 'surprise', 'sulk', 'wave', 'sleepy', 'spin']
 bodyEl.addEventListener('click', () => {
   sfx('pop')
-  bodyEl.classList.remove('qbang'); void bodyEl.offsetWidth; bodyEl.classList.add('qbang')
-  bubble(pick(P('click')), 4000)
-  talkUntil = Date.now() + 800
+  perform(pick(CLICK_ACTIONS))
 })
 
 /* ── 首帧：启动渲染循环 + 读宿主状态 ── */
