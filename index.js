@@ -2962,6 +2962,35 @@ export function apply(ctx, config) {
         saveCfg(patch)
         log(`桌宠窗口指令已应用：${JSON.stringify(patch)}`)
       }
+      // 🔴 v5.4 维修工真体检：窗口右键「维修工模式」开 ⇒ 后台跑 doctor.mjs（不堵宿主），
+      //    结果落 pet-doctor.json，窗口 poll 读到逐条播报
+      if (c.repair === true) {
+        try {
+          log('桌宠维修工：开始环境体检（doctor.mjs，后台）')
+          const cp = spawn(process.execPath, [join(pluginDir, 'tools', 'doctor.mjs'), '--json'], {
+            windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+            env: pyEnv({ DOUYIN_HOME: stateDir }),
+          })
+          let out = ''
+          cp.stdout?.on('data', (d) => { out += String(d) })
+          const t = setTimeout(() => { try { cp.kill() } catch { /* 超时兜底 */ } }, 100_000)
+          cp.on('exit', () => {
+            clearTimeout(t)
+            try {
+              const start = out.indexOf('{')
+              const end = out.lastIndexOf('}')
+              if (start >= 0 && end > start) {
+                const j = JSON.parse(out.slice(start, end + 1))
+                writeJson(join(stateDir, 'pet-doctor.json'), j)
+                const bad = (j.items || []).filter((it) => it.state !== 'ok').length
+                log(`桌宠维修工：体检完成，${(j.items || []).length} 项里 ${bad} 项要修（已落 pet-doctor.json）`)
+              } else {
+                log('桌宠维修工：体检脚本没输出 JSON，跳过')
+              }
+            } catch (e) { log(`桌宠维修工：结果解析失败（${e?.message ?? e}）`) }
+          })
+        } catch (e) { log(`桌宠维修工：体检起不来（${e?.message ?? e}）`) }
+      }
     } catch { /* 坏文件不致命 */ }
   }
   const petKeeperTick = () => {
