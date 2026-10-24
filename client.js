@@ -130,14 +130,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * ⭐ 聊天模式的实时状态屏（2026-10-24）。
-     *    主人原话：「是不是要有一个加载过程，显示 AI 现在在干嘛，是在开浏览器还是干啥，
-     *    不然我哪知道有什么用错在哪了」——所以把盯梢循环的每一拍都亮出来：
-     *    几秒前看过 · 结果（没新消息/有新消息/出错/没接上）· 通知弹没弹 · 错误原文。
+     * ⭐ 聊天模式的实时状态屏（2026-10-24，主人两轮反馈打磨成拟人版）。
+     *    主人原话：「显示 AI 现在在干嘛」→「要拟人，小鱼在干啥干啥，
+     *    最后是小鱼抱着手机等着你发消息呢，还有正在发送之类的」。
+     *    设计：一条**小鱼的动作**（emoji + 一句话）+ 一行小字（技术参数，给排障用）。
      *    每 15 秒拉一次 /chat/watch（读状态文件，很轻）。
      */
     function ChatWatchStatus() {
       const [s, setS] = React.useState(null)
+      const [tick, setTick] = React.useState(0) // 本地 1 秒一跳：让"下次还有 X 秒"活起来
       React.useEffect(() => {
         let alive = true
         const pull = async () => {
@@ -145,29 +146,29 @@ window.__ModuleLoader__.load({
         }
         pull()
         const t = setInterval(pull, 15_000)
-        return () => { alive = false; clearInterval(t) }
+        const t2 = setInterval(() => setTick((x) => x + 1), 1000)
+        return () => { alive = false; clearInterval(t); clearInterval(t2) }
       }, [])
-      if (!s) return h('div', { 'data-dy-sub': '' }, '盯着呢…（状态加载中）')
-      const ago = s.lastCheckAt ? Math.max(0, Math.round(((s.now || Date.now()) - s.lastCheckAt) / 1000)) : null
-      const RESULT = {
-        ok: ago !== null ? `${ago} 秒前看过：没新消息` : '还没看过（等第一拍）',
-        ok_prime: '已接上班：从现在起只提醒**新**来的消息（之前的不重播）',
-        ok_new: `🔔 ${ago !== null ? ago + ' 秒前' : ''}看到新消息：${s.lastNewText || ''}`,
-        error: `❌ 读取失败：${s.lastError || '未知原因'}`,
-        no_match: `⚠️ 没匹配上：${s.lastNote || '目标不在已建立会话里（陌生人走不了 HTTP 路径）'}`,
-        off: '开关已关（这条状态是旧的）',
-        skip_no_to: '⚠️ 没配私信对象（去「私信发给谁」选一个）',
-        skip_no_login: '⚠️ 还没登录（先扫码）',
+      if (!s) return h('div', { 'data-dy-sub': '' }, '🐟 小鱼正在游过来…（状态加载中）')
+      void tick // tick 只用于触发重渲染，不直接读
+      const ago = s.lastCheckAt ? Math.max(0, Math.round((Date.now() - s.lastCheckAt) / 1000)) : null
+      const sec = Number(s.sec || 30)
+      const nextIn = s.lastCheckAt ? Math.max(0, sec - ago) : sec
+      const FISH = {
+        ok: `🐟 小鱼抱着手机趴在缸边等着呢——刚看过（${ago} 秒前），还没有新消息。下次去看还有 ${nextIn} 秒`,
+        ok_prime: `🐳 小鱼刚接班，正在把聊天记录翻到最新一页（之前的不重播，从现在起只等新的）`,
+        ok_new: `🔔 小鱼看到新消息了！挥着尾巴去弹通知：「${s.lastNewText || ''}」${String(s.toast || '').startsWith('ok') ? '——已经弹到你屏幕上了' : '（通知没弹成：' + (s.toast || '未知') + '）'}`,
+        error: `😵 小鱼撞缸了：${s.lastError || '未知原因'}。歇一拍再试，不用管它`,
+        no_match: `🤔 小鱼在已建立会话里没找到「${s.to || '这个人'}」：${s.lastNote || '陌生人消息走不了这条路'}`,
+        off: `😴 开关关了，小鱼在缸底睡觉（这条是旧状态）`,
+        skip_no_to: `🫥 小鱼不知道该盯谁——还没选私信对象（去下面「私信发给谁」选一个）`,
+        skip_no_login: `🫥 小鱼进不去抖音——还没登录（先扫码）`,
       }
-      const line = RESULT[s.lastResult] || `状态：${s.lastResult || '（还没跑过）'}`
-      const toastBit = s.lastResult === 'ok_new'
-        ? (String(s.toast || '').startsWith('ok') ? ' · 通知已弹 ✅' : ` · 通知没弹：${s.toast || '未知'}`)
-        : ''
+      const line = FISH[s.lastResult] || `🐟 小鱼状态：${s.lastResult || '刚下水，还没跑第一拍'}`
       return h('div', { 'data-dy-card': '', style: { background: 'transparent', border: '1px dashed var(--dsw-alias-border-l2,rgba(255,255,255,.14))', padding: '8px 10px', gap: '4px' } },
-        h('div', { 'data-dy-sub': '', style: { opacity: '.95' } },
-          `👀 ${line}${toastBit}`),
+        h('div', { 'data-dy-sub': '', style: { opacity: '.95' } }, line),
         h('div', { 'data-dy-sub': '', style: { opacity: '.7' } },
-          `每 ${s.sec || 30} 秒看一眼「${s.to || '私信对象'}」· 走 ${s.via || 'http'} · 已看 ${s.checks || 0} 次 · 提醒过 ${s.notified || 0} 条`))
+          `每 ${sec} 秒看一眼「${s.to || '私信对象'}」· 走 ${s.via || 'http'} · 已看 ${s.checks || 0} 次 · 提醒过 ${s.notified || 0} 条`))
     }
 
     /**
