@@ -1,10 +1,10 @@
-﻿# pet-window.ps1 —— 桌宠桌面窗口（WPF 置顶透明窗，2026-10-24 v2）
+﻿# pet-window.ps1 —— 桌宠桌面窗口（WPF 置顶透明窗，2026-10-24 v3）
 # ============================================================================
-# 主人指令：「桌宠模式是悬浮在所有窗口上的」——网页浮层出不了 DSH 窗口，
-# 所以她是独立进程的置顶小窗：Topmost + 无边框 + 全透明 + 不进任务栏/Alt-Tab。
-# 插件（index.js 的 petKeeper）拉起本脚本，每 15 秒写 pet-window-state.json；
-# 这里 2 秒一读，状态变了就换道具/泡泡。右键 = 她去休息（写 pet-hide.json，
-# 面板重新打开开关她才回来）。状态文件 90 秒没更新（宿主没了）自己也退，不赖着。
+# 主人指令：「悬浮在所有窗口上」+ 验收反馈「她没动作」「头上一直悬空对话框」。
+# v3 动画层：呼吸浮动 + 绕脚底左右轻摆 + 随机眨眼 + 点击 Q 弹（squash&stretch）
+#           + 状态节奏（run 快 / sleep 慢而深）+ 空台词时泡泡整个隐藏。
+# 右键 = 去休息（pet-hide.json，面板开关关一次再开她才回来）。
+# 状态文件 90 秒没更新（宿主没了）自己退，不赖着。
 # ============================================================================
 param()
 
@@ -15,7 +15,6 @@ $stateFile = Join-Path $home_ 'pet-window-state.json'
 $posFile   = Join-Path $home_ 'pet-window-pos.json'
 $hideFile  = Join-Path $home_ 'pet-hide.json'
 
-# ── 泡泡台词（跟人格走的部分以后从状态文件读；先内置默认版）──
 $bubbles = @{
   idle  = @('在呢在呢～', '发呆中…', '今天吃什么好呢', '摸鱼…啊不，巡逻中')
   watch = @('盯着私信呢…', '手机抱着，消息一来就知道', '嘘——在看消息')
@@ -24,9 +23,10 @@ $bubbles = @{
   error = @('呜…刚才那下出错了', '撞到什么了，下一拍再试')
 }
 
+function Now-Unix { ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds }
+
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-# ── 窗口 ──
 $win = New-Object System.Windows.Window
 $win.AllowsTransparency = $true
 $win.WindowStyle        = [System.Windows.WindowStyle]::None
@@ -39,7 +39,6 @@ $win.Width              = 180
 $win.Height             = 230
 $win.Title              = 'deskpet'
 
-# 默认位置：主屏右下角
 try {
   $pos = Get-Content $posFile -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($pos.X -is [double] -and $pos.Y -is [double]) { $win.Left = $pos.X; $win.Top = $pos.Y }
@@ -50,10 +49,8 @@ try {
   $win.Top  = $wa.Bottom - $win.Height - 16
 }
 
-# 不进 Alt-Tab：加 WS_EX_TOOLWINDOW
 $win.Add_SourceInitialized({
   try {
-    $src = [System.Windows.PresentationSource]::FromVisual($win)
     Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -67,7 +64,7 @@ public class Win32Pet {
   } catch {}
 })
 
-# ── 内容：泡泡（上）+ 身体层（下）──
+# ── 内容：泡泡（上）+ 身体（下）──
 $root = New-Object System.Windows.Controls.Grid
 $root.VerticalAlignment = 'Bottom'
 $root.HorizontalAlignment = 'Center'
@@ -84,6 +81,8 @@ $bubble.HorizontalAlignment = 'Center'
 $bubble.VerticalAlignment = 'Top'
 $bubble.Margin = '0,0,30,0'
 $bubble.MaxWidth = 170
+# 🔴 没台词就整个藏起来 —— 不许再悬一个空框在头上（主人 2026-10-24 抓的）
+$bubble.Visibility = [System.Windows.Visibility]::Collapsed
 $bt = New-Object System.Windows.Controls.TextBlock
 $bt.Text = ''
 $bt.FontSize = 11
@@ -96,13 +95,20 @@ $body = New-Object System.Windows.Controls.Grid
 $body.Width = 140
 $body.Height = 140
 $body.VerticalAlignment = 'Bottom'
-$float = New-Object System.Windows.Media.TranslateTransform
-$body.RenderTransform = $float
+# 变换组：float（呼吸上下）+ sway（绕脚底左右摆）+ squash（点击 Q 弹）
+$float  = New-Object System.Windows.Media.TranslateTransform
+$sway   = New-Object System.Windows.Media.RotateTransform
+$squash = New-Object System.Windows.Media.ScaleTransform
+$tg = New-Object System.Windows.Media.TransformGroup
+[void]$tg.Children.Add($float)
+[void]$tg.Children.Add($sway)
+[void]$tg.Children.Add($squash)
+$body.RenderTransform = $tg
+$body.RenderTransformOrigin = '0.5,0.9'   # 绕脚底摆，像在水里晃
 [void]$root.Children.Add($body)
 
 $win.Content = $root
 
-# ── 状态文件读取 ──
 function Read-State {
   try {
     $j = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -110,12 +116,6 @@ function Read-State {
   } catch {}
   return $null
 }
-
-$script:layerImgs = @{}
-$script:propImg = $null
-$script:lastProp = ''
-$script:lastBubble = ''
-$script:lastAutoAt = 0
 
 function Build-Bitmap($path) {
   $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
@@ -127,9 +127,67 @@ function Build-Bitmap($path) {
   return $bmp
 }
 
+# 统一的泡泡写法：有字 → 显示；没字 → 整个收起
+function Set-Bubble([string]$text) {
+  if ($text) {
+    $bt.Text = $text
+    $bubble.Visibility = [System.Windows.Visibility]::Visible
+  } else {
+    $bt.Text = ''
+    $bubble.Visibility = [System.Windows.Visibility]::Collapsed
+  }
+}
+
+# ── 动画：按状态定节奏（先清旧动画再开新的，别叠加）──
+function Set-Motion([string]$state) {
+  # float：上下呼吸 amp(px) / period(s)
+  $f = @{ idle = @(5, 2.4); watch = @(3, 2.0); run = @(4, 1.1); sleep = @(7, 3.4); error = @(3, 1.6) }[$state]
+  if (-not $f) { $f = @(5, 2.4) }
+  $float.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null)
+  $up = New-Object System.Windows.Media.Animation.DoubleAnimation(0, -$f[0], [System.Windows.Duration]::new([TimeSpan]::FromSeconds($f[1])))
+  $up.AutoReverse = $true
+  $up.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $up.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
+  $float.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $up)
+  # sway：左右轻摆 deg / period(s)
+  $s = @{ idle = @(1.8, 3.2); watch = @(1.2, 2.6); run = @(2.6, 1.3); sleep = @(0.8, 5.0); error = @(1.0, 2.0) }[$state]
+  if (-not $s) { $s = @(1.8, 3.2) }
+  $sway.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
+  $rl = New-Object System.Windows.Media.Animation.DoubleAnimation(-$s[0], $s[0], [System.Windows.Duration]::new([TimeSpan]::FromSeconds($s[1])))
+  $rl.AutoReverse = $true
+  $rl.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $rl.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
+  $sway.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $rl)
+}
+
+$script:layerImgs = @{}
+$script:propImg = $null
+$script:lastProp = ''
+$script:lastState = ''
+$script:lastAutoAt = 0
+
+# ── 眨眼：随机 2.8–5.2 秒眨一次（一次性动画，播完靠 timer 再触发）──
+$lashScale = New-Object System.Windows.Media.ScaleTransform
+$blinkTimer = New-Object System.Windows.Threading.DispatcherTimer
+$blinkTimer.Add_Tick({
+  try {
+    $blinkTimer.Interval = [TimeSpan]::FromMilliseconds((Get-Random -Minimum 2800 -Maximum 5200))
+    $blink = New-Object System.Windows.Media.Animation.DoubleAnimation(1, 0.06, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(90)))
+    $blink.AutoReverse = $true
+    $blink.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
+    $lashScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $blink)
+  } catch {}
+})
+# 睡觉不眨眼（闭着眼呢）——timer 在 Apply-State 里按状态开关
+
 function Apply-State($j) {
   $state = if ($j.state) { [string]$j.state } else { 'idle' }
-  # 身体层：第一次加载，之后不动（层图不变）
+  if (-not $bubbles.ContainsKey($state)) { $state = 'idle' }
+  if ($state -ne $script:lastState) {
+    Set-Motion $state
+    if ($state -eq 'sleep') { $blinkTimer.Stop() } else { $blinkTimer.Start() }
+    $script:lastState = $state
+  }
   if (-not $script:layerImgs.Count) {
     foreach ($n in @('back hair','tail','legwear','footwear','neck','topwear','handwear','headwear','face','eyebrow','eyewhite','irides','eyelash','mouth','front hair')) {
       $img = New-Object System.Windows.Controls.Image
@@ -138,20 +196,11 @@ function Apply-State($j) {
       [void]$body.Children.Add($img)
       $script:layerImgs[$n] = $img
     }
-    # 眨眼动画：eyelash 压扁再弹回（RenderTransformOrigin 对准眼睛中心）
+    # 眨眼只动 eyelash 层（origin 对准眼睛）
     $lash = $script:layerImgs['eyelash']
     $lash.RenderTransformOrigin = '0.5,0.42'
-    $st = New-Object System.Windows.Media.ScaleTransform
-    $lash.RenderTransform = $st
-    $blink = New-Object System.Windows.Media.Animation.DoubleAnimation(1, 0.08, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(90)))
-    $blink.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::new([TimeSpan]::FromSeconds(4.6))
-    $st.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $blink)
-    # 呼吸浮动：整只身体 ±5px
-    $up = New-Object System.Windows.Media.Animation.DoubleAnimation(0, -5, [System.Windows.Duration]::new([TimeSpan]::FromSeconds(1.6)))
-    $up.AutoReverse = $true
-    $up.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-    $up.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
-    $float.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $up)
+    $lash.RenderTransform = $lashScale
+    $blinkTimer.Start()
   }
   # 道具：watch=phone / sleep=zzz / 其它=收起
   $prop = if ($state -eq 'watch') { 'phone.png' } elseif ($state -eq 'sleep') { 'zzz.png' } else { '' }
@@ -162,37 +211,54 @@ function Apply-State($j) {
       $script:propImg = New-Object System.Windows.Controls.Image
       $script:propImg.Stretch = 'Uniform'
       $script:propImg.Source = Build-Bitmap (Join-Path $j.sprite_dir $prop)
+      # 道具自己轻轻上下飘（拿着手机晃 / Zzz 上浮）
+      $pf = New-Object System.Windows.Media.TranslateTransform
+      $script:propImg.RenderTransform = $pf
+      $pu = New-Object System.Windows.Media.Animation.DoubleAnimation(0, -3, [System.Windows.Duration]::new([TimeSpan]::FromSeconds(1.8)))
+      $pu.AutoReverse = $true
+      $pu.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+      $pu.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
+      $pf.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $pu)
       [void]$body.Children.Add($script:propImg)
     }
     $script:lastProp = $prop
   }
-  # 泡泡：run/watch/error 自动轮换一句（30 秒换）；idle/sleep 只在点击时冒
+  # 泡泡：run/watch/error 每 30 秒轮换一句；idle/sleep 不自动冒（点击才说话）
   $auto = ($state -eq 'run' -or $state -eq 'watch' -or $state -eq 'error')
-  if ($auto -and ((Get-Date).ToUniversalTime().Subtract([DateTime]::new(1970,1,1)).TotalSeconds - $script:lastAutoAt) -ge 30) {
+  if ($auto -and ((Now-Unix) - $script:lastAutoAt) -ge 30) {
     $list = $bubbles[$state]
-    $bt.Text = $list[(Get-Random -Minimum 0 -Maximum $list.Count)]
-    $script:lastAutoAt = (Get-Date).ToUniversalTime().Subtract([DateTime]::new(1970,1,1)).TotalSeconds
+    Set-Bubble $list[(Get-Random -Minimum 0 -Maximum $list.Count)]
+    $script:lastAutoAt = Now-Unix
   } elseif (-not $auto -and $bt.Text) {
-    $bt.Text = ''
+    Set-Bubble ''
   }
 }
 
 # ── 交互 ──
-# 左键：DragMove；没拖动（位置没变）算点击 → 冒一句
 $win.Add_MouseLeftButtonDown({
   $l0 = $win.Left; $t0 = $win.Top
   try { $win.DragMove() } catch {}
   if ([Math]::Abs($win.Left - $l0) -lt 1 -and [Math]::Abs($win.Top - $t0) -lt 1) {
+    # 点击：Q 弹一下 + 冒一句
+    try {
+      $sx = New-Object System.Windows.Media.Animation.DoubleAnimation(1, 0.9, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(80)))
+      $sx.AutoReverse = $true
+      $sx.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
+      $squash.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $sx)
+      $sy = New-Object System.Windows.Media.Animation.DoubleAnimation(1, 1.07, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(80)))
+      $sy.AutoReverse = $true
+      $sy.EasingFunction = [System.Windows.Media.Animation.SineEase]::new()
+      $squash.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $sy)
+    } catch {}
     $j = Read-State
     $state = if ($j -and $j.state) { [string]$j.state } else { 'idle' }
     if (-not $bubbles.ContainsKey($state)) { $state = 'idle' }
     $list = $bubbles[$state]
-    $bt.Text = $list[(Get-Random -Minimum 0 -Maximum $list.Count)]
+    Set-Bubble $list[(Get-Random -Minimum 0 -Maximum $list.Count)]
   } else {
     try { @{ X = $win.Left; Y = $win.Top } | ConvertTo-Json -Compress | Set-Content $posFile -Encoding UTF8 } catch {}
   }
 })
-# 右键：去休息（面板重新打开桌宠开关她才回来）
 $win.Add_MouseRightButtonDown({
   try { Set-Content $hideFile -Value ([DateTime]::UtcNow.ToString('o')) -Encoding UTF8 } catch {}
   $win.Close()
@@ -217,7 +283,7 @@ $top.Interval = [TimeSpan]::FromSeconds(15)
 $top.Add_Tick({ try { $win.Topmost = $false; $win.Topmost = $true } catch {} })
 $top.Start()
 
-$win.Add_Closed({ $poll.Stop(); $top.Stop() })
+$win.Add_Closed({ $poll.Stop(); $top.Stop(); $blinkTimer.Stop() })
 
 [void]$win.Show()
 [System.Windows.Threading.Dispatcher]::Run()
