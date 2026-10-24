@@ -81,14 +81,30 @@
 ## 装
 
 ```bash
-# 先跑预检（不用装 DSH）
-node D:\aiagent\deepseek\dsh-douyin-scroll\selfcheck.mjs     # 应该 59 通过 / 0 失败
+# 先跑预检（不用装 DSH；克隆下来后在本目录跑）
+git clone https://github.com/NEWJO123/dsh-douyin-scroll.git
+cd dsh-douyin-scroll
+node selfcheck.mjs     # 全部通过再装
 
-# 本地目录链接安装（开发/自用）
+# 安装（本地目录链接，开发/自用）
 dsh plugin --profile web add link:D:\aiagent\deepseek\dsh-douyin-scroll
 ```
 
 ⚠️ 装完**必须重启一次 dsh**（bundle 层要重启才组装）。然后进 **设置 → 刷抖音**。
+
+### 已经装过的，怎么升级到新版本
+
+```bash
+cd dsh-douyin-scroll
+git pull                      # 拉最新
+node selfcheck.mjs            # 确认预检全过
+dsh plugin --profile web add link:<本目录绝对路径>   # 重新指一次（幂等）
+```
+
+然后**重启一次 dsh**，设置页里「关于」那行版本号变了就是升上了。
+配置和聊天记忆都放在插件家目录（不随仓库走），升级不动它们。
+
+> 0.3.x 各版本的变化看 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
