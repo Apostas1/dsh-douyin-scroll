@@ -64,6 +64,8 @@ globalThis.document = {
  *    再切成"已登录"渲染一遍 —— 两条路都得能画出来。
  */
 const state = { loggedIn: false, venvReady: false }
+// 桌宠状态 mock（【桌宠】段里会改它再重渲染）
+const petState = { ok: true, state: 'watch', round_active: false, asset_ok: true, pet_on: true, chat: { on: true, result: 'ok', new_text: '', checked_ago: 5 } }
 const MOCK = {
   '/api/douyin-duty/status': () => ({
     ok: true, version: '9.9.9', home: 'H:/dy', loggedIn: state.loggedIn, venvReady: state.venvReady,
@@ -126,6 +128,7 @@ const MOCK = {
     context: { who: { nick: '测试好友' }, facts: ['喜欢猫', '在杭州'], recent: [], total_remembered: 11 },
   }),
   '/api/douyin-duty/chat/send': () => ({ ok: true, sent: true, to: '测试好友', len: 5 }),
+  '/api/douyin-duty/pet/state': () => petState,
   '/api/douyin-duty/log': () => ({
     ok: true, tail: '[示例日志]\n证据包已备好：12 条\n刷抖音开跑（manual）…',
     lastRunAt: '2026-10-22T09:27:07.645Z', lastWhy: 'manual',
@@ -171,13 +174,19 @@ new Function('window', 'document', 'navigator', 'fetch', src)(
 )
 if (!mod) throw new Error('client.js 没有调用 __ModuleLoader__.load')
 
-/* ── 把注册到 settings.section 的组件抓出来 ── */
+/* ── 把注册到 settings.section / shell.overlay 的组件抓出来 ──
+ *    （2026-10-24 加桌宠后有两个注册口，别让后注册的把前面的顶掉） */
 let Registered = null
+let Overlay = null
 const ctx = {
   effect: (fn) => { try { fn() } catch { /* 清理函数 */ } },
   get: (k) => (k === 'slots' ? {
     inject: (slot, fn) => fn(),
-    register: (_meta, comp) => { Registered = comp; return () => {} },
+    register: (meta, comp) => {
+      if (meta?.name === 'settings.section') Registered = comp
+      else if (meta?.name === 'shell.overlay') Overlay = comp
+      return () => {}
+    },
   } : undefined),
 }
 mod.apply(ctx)
@@ -615,5 +624,57 @@ if (rLog) {
   else { console.log('  ❌ 没显示上次跑时间'); fail++ }
 }
 
+/* ── 桌宠（2026-10-24）：overlay 注册 + 渲染 + mock 状态驱动 ── */
+console.log('\n【桌宠】')
+{
+  if (!Overlay) { console.log('  ❌ 没有往 shell.overlay 注册组件'); fail++ }
+  else {
+    // 渲两遍：第一遍发 fetch，第二遍才能读到异步回来的状态（替身不会自动重渲染）
+    const renderPet = async () => {
+      hookIdx = 0
+      render(React.createElement(Overlay, {}))
+      await flush()
+      hookIdx = 0
+      const t = render(React.createElement(Overlay, {}))
+      await flush()
+      return t
+    }
+    // watch 状态 + 有素材 —— 她应该渲染出身体层和手机道具
+    Object.assign(petState, { state: 'watch', asset_ok: true, pet_on: true })
+    hooks = []
+    const petTree = await renderPet()
+    const petFlat = walk(petTree)
+    const imgs = petFlat.filter((n) => n.tag === 'img')
+    const srcs = imgs.map((n) => String(n.props?.src || '')).join(' ')
+    if (imgs.length >= 15) console.log(`  ✅ 桌宠渲染出 ${imgs.length} 个层（15 层身体 + 道具）`)
+    else { console.log(`  ❌ 层数不够（${imgs.length} < 15）—— 分层没叠出来`); fail++ }
+    if (/phone\.png/.test(srcs)) console.log('  ✅ watch 状态捧着手机（phone 层在）')
+    else { console.log('  ❌ watch 状态没捧手机'); fail++ }
+    if (/eyelash/.test(srcs)) console.log('  ✅ 眨眼层在（eyelash）')
+    else { console.log('  ❌ 缺眨眼层'); fail++ }
+    // sleep 状态：应该换成 zzz、不眨眼（data-awake 没了）
+    Object.assign(petState, { state: 'sleep', chat: { on: false } })
+    hooks = []
+    const sleepTree = await renderPet()
+    const sleepFlat = walk(sleepTree)
+    const sleepSrcs = sleepFlat.filter((n) => n.tag === 'img').map((n) => String(n.props?.src || '')).join(' ')
+    if (/zzz\.png/.test(sleepSrcs)) console.log('  ✅ sleep 状态冒 Zzz')
+    else { console.log('  ❌ sleep 状态没有 Zzz'); fail++ }
+    if (/phone\.png/.test(sleepSrcs)) { console.log('  ❌ sleep 状态还捧着手机'); fail++ }
+    else console.log('  ✅ sleep 状态手机收起来了')
+    // 素材缺失 / 开关关：整只不渲染（别的机器装了不报错）
+    Object.assign(petState, { state: 'idle', asset_ok: false, pet_on: false })
+    hooks = []
+    const offTree = await renderPet()
+    const offFlat = walk(offTree)
+    if (!offFlat.length) console.log('  ✅ 没素材 / 关着 ⇒ 整只不渲染（不炸不占位）')
+    else { console.log('  ❌ 关着还在渲染东西'); fail++ }
+    // 复位，别影响后面的检查
+    Object.assign(petState, { state: 'watch', asset_ok: true, pet_on: true })
+  }
+}
+
 console.log(fail ? `\n渲染检查：${fail} 项失败` : '\n渲染检查：全部通过')
-process.exitCode = fail ? 1 : 0
+// ⚠️ 组件里的 setInterval（桌宠/状态屏轮询）没有清理替身会执行 —— 进程会挂着不退，
+//    selfcheck 的 spawnSync 有 timeout 但每次都拖满 120 秒。显式退出。
+process.exit(fail ? 1 : 0)

@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
      *    对一下面板右上角显示的 `v<版本>·b<N>` 就知道。
      */
-    const PANEL_BUILD = 15
+    const PANEL_BUILD = 16
 
     const asJson = async (res) => {
       if (res.ok) return res.json()
@@ -119,6 +119,30 @@ window.__ModuleLoader__.load({
 [data-dy-bubble][data-mine]{align-self:flex-end;background:rgba(59,130,246,.22);}
 [data-dy-bubble][data-them]{align-self:flex-start;background:rgba(128,128,128,.24);}
 [data-dy-bubble-text]{white-space:pre-wrap;word-break:break-word;}
+
+/* ── 桌宠（2026-10-24）：浮在 shell.overlay 上的窗口宠 ── */
+[data-dy-pet]{position:fixed;z-index:9999;width:120px;height:150px;cursor:grab;user-select:none;
+  display:flex;align-items:flex-end;justify-content:center;}
+[data-dy-pet]:active{cursor:grabbing;}
+[data-dy-pet][data-hidden]{display:none;}
+[data-dy-pet-body]{position:relative;width:120px;height:120px;animation:dy-pet-float 3.2s ease-in-out infinite;}
+[data-dy-pet-body] img{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;
+  -webkit-user-drag:none;user-select:none;}
+/* 眨眼：eyelash 层 0→压扁→0，只在非 sleep 时动 */
+[data-dy-pet-body][data-awake] img[data-layer="eyelash"]{animation:dy-pet-blink 4.6s infinite;}
+@keyframes dy-pet-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+@keyframes dy-pet-blink{0%,92%,100%{transform:scaleY(1)}95%{transform:scaleY(.08)}98%{transform:scaleY(1)}}
+/* 泡泡：思考云，台词随状态/人格换，点击她也可以冒一句 */
+[data-dy-pet-bubble]{position:absolute;bottom:118px;left:50%;transform:translateX(-50%);
+  max-width:190px;padding:8px 11px;border-radius:12px;font-size:12px;line-height:17px;white-space:nowrap;
+  background:var(--dsw-alias-bg-overlay,rgba(30,32,40,.92));color:#fff;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));
+  box-shadow:0 4px 16px rgba(0,0,0,.3);animation:dy-pet-pop .28s ease-out;pointer-events:none;}
+[data-dy-pet-bubble]::after{content:'';position:absolute;bottom:-6px;left:26px;width:10px;height:10px;
+  border-radius:50%;background:inherit;border:inherit;border-top:0;border-left:0;}
+@keyframes dy-pet-pop{from{opacity:0;transform:translateX(-50%) translateY(6px) scale(.92)}to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+[data-dy-pet-tap]{font-size:10px;opacity:.55;margin-top:2px;text-align:center;height:12px;}
+[data-dy-pet-nopet]{font-size:11px;opacity:.6;padding:4px 8px;}
 `
 
     function Switch({ on, onChange, disabled }) {
@@ -169,6 +193,100 @@ window.__ModuleLoader__.load({
         h('div', { 'data-dy-sub': '', style: { opacity: '.95' } }, line),
         h('div', { 'data-dy-sub': '', style: { opacity: '.7' } },
           `每 ${sec} 秒看一眼「${s.to || '私信对象'}」· 走 ${s.via || 'http'} · 已看 ${s.checks || 0} 次 · 提醒过 ${s.notified || 0} 条`))
+    }
+
+    /**
+     * ⭐ 桌宠（2026-10-24）：浮在 shell.overlay 的「窗口宠」。
+     *    身体 = assets/pet/sprite/layers/ 的 15 层 PNG 叠加（主人豆包生成的鲸鱼娘拆层）；
+     *    状态 = /pet/state 聚合（run/watch/sleep/error/idle），道具=手机/Zzz 按状态叠；
+     *    泡泡 = 按状态现配台词（人格化台词 v2 再接）；可拖动，位置存 localStorage。
+     *    素材没装（asset_ok:false）就整只不显示——别的机器装了插件不会报错，只是没她。
+     */
+    const PET_LAYERS = ['back hair', 'tail', 'legwear', 'footwear', 'neck', 'topwear',
+      'handwear', 'headwear', 'face', 'eyebrow', 'eyewhite', 'irides', 'eyelash', 'mouth', 'front hair']
+    const PET_BUBBLES = {
+      idle: ['在呢在呢～', '发呆中…', '今天吃什么好呢', '摸鱼…啊不，巡逻中'],
+      watch: ['盯着私信呢…', '手机抱着，消息一来就知道', '嘘——在看消息'],
+      run: ['刷抖音中，别吵！', '挑好玩的呢，稍等', '这一轮快跑完了…'],
+      sleep: ['Zzz…（时段和聊天模式都关了）', '睡着了，到点会自己醒'],
+      error: ['呜…刚才那下出错了', '撞到什么了，下一拍再试'],
+    }
+
+    function DeskPet() {
+      const [s, setS] = React.useState(null)
+      const [pos, setPos] = React.useState(null)          // {x,y} 左上角
+      const [chat, setChat] = React.useState('')          // 手动点击时冒的一句
+      const [chatAt, setChatAt] = React.useState(0)
+      const drag = React.useRef(null)
+
+      // 拉状态：15 秒一拍（和 ChatWatchStatus 一个节奏，别打太勤）
+      React.useEffect(() => {
+        let alive = true
+        const pull = async () => {
+          try { const r = await jget('/pet/state'); if (alive && r && r.ok) setS(r) } catch { /* 等下一拍 */ }
+        }
+        pull()
+        const t = setInterval(pull, 15_000)
+        return () => { alive = false; clearInterval(t) }
+      }, [])
+
+      // 初始位置：右下角（第一次 mount 时算一次，别每拍都跳回去）
+      React.useEffect(() => {
+        try {
+          const saved = JSON.parse(localStorage.getItem('dy-pet-pos') || 'null')
+          if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) { setPos(saved); return }
+        } catch { /* 存坏了就当没有 */ }
+        const vw = window.innerWidth, vh = window.innerHeight
+        setPos({ x: vw - 150, y: vh - 180 })
+      }, [])
+
+      // 拖动（pointer 事件，鼠标触摸都吃）
+      const onPointerDown = (e) => {
+        drag.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y, moved: false }
+        e.currentTarget.setPointerCapture(e.pointerId)
+      }
+      const onPointerMove = (e) => {
+        const d = drag.current
+        if (!d) return
+        const dx = e.clientX - d.sx, dy = e.clientY - d.sy
+        if (Math.abs(dx) + Math.abs(dy) > 4) d.moved = true
+        setPos({ x: d.ox + dx, y: d.oy + dy })
+      }
+      const onPointerUp = () => {
+        const d = drag.current
+        drag.current = null
+        if (d && !d.moved) {
+          // 点击（没拖动）：冒一句当前状态的台词
+          const list = (s && PET_BUBBLES[s.state]) || PET_BUBBLES.idle
+          setChat(list[Math.floor(Math.random() * list.length)])
+          setChatAt(Date.now())
+        } else if (d) {
+          try { localStorage.setItem('dy-pet-pos', JSON.stringify(pos)) } catch { /* 存不进就算了 */ }
+        }
+      }
+
+      if (!s || !s.asset_ok || s.pet_on === false) return null
+      const state = s.state || 'idle'
+      const showProp = state === 'watch' ? 'phone' : state === 'sleep' ? 'zzz' : ''
+      // 泡泡：手动点的那句 6 秒内优先；否则按状态轮换一句（每 2 拍换一次，别闪太快）
+      const autoLine = ((PET_BUBBLES[state] || PET_BUBBLES.idle)[Math.floor(Date.now() / 30_000) % (PET_BUBBLES[state] || PET_BUBBLES.idle).length])
+      const bubble = (chat && Date.now() - chatAt < 6000) ? chat
+        : (state === 'run' || state === 'watch' || state === 'error') ? autoLine : ''
+      const A = (n) => API + '/pet/asset/' + encodeURIComponent(n)
+
+      return h('div', {
+        'data-dy-pet': '', style: pos ? { left: pos.x + 'px', top: pos.y + 'px' } : undefined,
+        onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp,
+      },
+        bubble ? h('div', { 'data-dy-pet-bubble': '', key: bubble }, bubble) : null,
+        h('div', { 'data-dy-pet-body': '', 'data-awake': state !== 'sleep' ? '' : undefined },
+          PET_LAYERS.map((n) => h('img', {
+            key: n, src: A(n + '.png'), alt: '', 'data-layer': n,
+            draggable: false, loading: 'lazy',
+          })),
+          showProp ? h('img', { key: showProp, src: A(showProp + '.png'), alt: '', draggable: false }) : null,
+        ),
+      )
     }
 
     /**
@@ -820,6 +938,21 @@ window.__ModuleLoader__.load({
            *    开着聊天模式时每 15 秒拉一次后端状态，显示几秒前看过、结果、通知弹没弹。 */
           cfg.chatWatch ? h(ChatWatchStatus, { key: 'cw-status' }) : null),
 
+        /* ── 桌宠（2026-10-24）：右下角的她 ── */
+        h('div', { 'data-dy-card': '' },
+          h('div', { 'data-dy-row': '' },
+            h('div', { 'data-dy-grow': '' },
+              h('div', { 'data-dy-title': '' }, '桌宠'),
+              h('div', { 'data-dy-sub': '' },
+                (cfg.petOn
+                  ? '✅ 她在右下角飘着呢——能拖动，点一下会说话。状态跟着插件走：盯私信=捧手机，跑值班=干活，全关=睡觉（Zzz）。'
+                  : '关着。打开她就会回到右下角。'))),
+            h(Switch, {
+              on: cfg.petOn !== false,
+              disabled: busy === 'patch',
+              onChange: (v) => patch({ petOn: v }, v ? '✅ 她回来了' : '她先躲起来了'),
+            }))),
+
         /* ── 开始使用：三步装机 + 扫码登录 ──
          * 🔴 2026-10-22：以前这里只写一句「命令行跑 node tools/qr-login.mjs start」——
          *    对新手等于"你自己去折腾"。现在做成**点按钮 → 出二维码 → 手机扫 → 点我扫完了**。
@@ -1351,6 +1484,14 @@ window.__ModuleLoader__.load({
           { name: 'settings.section', id: 'douyin-scroll', order: 31, label: '刷抖音' },
           () => h(Boundary, null, h(Panel)),
         ))
+        // ⭐ 桌宠：挂在 shell.overlay（全屏浮层，浮在所有内容上层、不挡滚动）。
+        //    自己包 Boundary —— 她炸了不能把整个浮层拖垮；素材没装就不渲染。
+        try {
+          slots.inject('shell.overlay', () => slots.register(
+            { name: 'shell.overlay', id: 'douyin-pet', order: 99, label: '桌宠' },
+            () => h(Boundary, null, h(DeskPet)),
+          ))
+        } catch (e) { /* 挂不上就算了，别影响面板 */ }
       },
     }
   },

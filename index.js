@@ -142,6 +142,12 @@ export const Config = !z ? undefined : z.object({
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
   /**
+   * ⭐ 桌宠（2026-10-24）：右下角的「窗口宠」开关。
+   *    素材在 assets/pet/（主人本地私货，.gitignore 已隔离，不随仓库发布）——
+   *    别的机器装了没有素材时，开着也不会显示（/pet/state 的 asset_ok 会挡）。
+   */
+  petOn: z.boolean().default(true).extra('volatile', true),
+  /**
    * ⭐ 2026-10-24 定稿（使用者：「我要的是迁移，不是开发新功能」）：
    *    聊天模式 = 今早实测那套的「读」半边（30 秒一读 + 通知 + 状态屏）。
    *    「回话」半边**不做在插件里**——今早的 12 秒来自**已活着的 AI 直接回**；
@@ -254,6 +260,7 @@ export function apply(ctx, config) {
     // ⭐ 聊天模式（2026-10-24 定稿：默认开启，使用者拍板；要关就整个关掉）。
     //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
     chatWatch: true, chatWatchSec: 30,
+    petOn: true,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
@@ -3109,6 +3116,70 @@ export function apply(ctx, config) {
     if (req.method === 'GET' && path === '/api/douyin-duty/chat/watch') {
       const s = readJson(join(stateDir, 'chat-watch-state.json'), {})
       return sendJson(res, 200, { ok: true, ...s, now: Date.now() })
+    }
+
+    /* ─────────────── ⭐ 桌宠（2026-10-24）：主人要的「窗口宠」───────────────
+     * 两件事：
+     *   /pet/state  —— 把插件各处的真实状态**聚合**成一个「她现在在干嘛」：
+     *       run（值班轮跑着）> watch（聊天模式盯着）> sleep（总开关关）> error > idle
+     *     加上聊天模式详情，泡泡台词在客户端按状态现配。
+     *   /pet/asset/*  —— 服务 assets/pet/sprite/ 里的层图（MIME 按扩展名）。
+     * 素材是主人私货（豆包生成的拆层），.gitignore 已隔离，不随仓库发布；
+     * 素材没装时 /pet/state 照常工作（asset_ok:false），面板给「缺素材」提示。
+     */
+    const petSpriteDir = () => join(pluginDir, 'assets', 'pet', 'sprite')
+    const petManifest = () => readJson(join(petSpriteDir(), 'manifest.json'), null)
+    const petState = () => {
+      const st = readJson(dutyStateFile, {})
+      const cw = readJson(join(stateDir, 'chat-watch-state.json'), {})
+      // ⚠️ 聚合口径：chat-watch-state.json 是「最后已知状态」，即使现在关了它也留着旧值
+      //    ⇒ 只有 cfg.chatWatch 开着才算 watch，否则看别的信号。
+      const watching = Boolean(cfg.chatWatch) && String(cw.lastResult || '') !== 'off'
+      const running = Boolean(st.roundActive)
+      const cwErrFresh = watching && cw.lastResult === 'error' && Date.now() - Number(cw.ts || 0) < 180_000
+      // 「她睡了」的口径：聊天模式关了、也没有任何跑的时段（noon/night/自定义全关）
+      //    —— 插件没有独立总开关，这就是「什么都不干」的真实状态。
+      const customs = Array.isArray(cfg.windows) ? cfg.windows : []
+      const anyWindow = Boolean(cfg.noon) || Boolean(cfg.night)
+        || customs.some((w) => /^\d{1,2}:\d{2}$/.test(String(w?.start || '')) && /^\d{1,2}:\d{2}$/.test(String(w?.end || '')))
+      let state = 'idle'
+      if (!anyWindow && !cfg.chatWatch) state = 'sleep'
+      else if (running) state = 'run'
+      else if (cwErrFresh) state = 'error'
+      else if (watching) state = 'watch'
+      return {
+        ok: true,
+        state,                                     // idle | watch | run | sleep | error
+        round_active: running,
+        chat: cfg.chatWatch ? {
+          on: true,
+          result: String(cw.lastResult || ''),
+          new_text: String(cw.lastNewText || '').slice(0, 40),
+          checked_ago: cw.lastCheckAt ? Math.round((Date.now() - cw.lastCheckAt) / 1000) : null,
+        } : { on: false },
+        asset_ok: Boolean(petManifest()),
+        pet_on: Boolean(cfg.petOn),
+        now: Date.now(),
+      }
+    }
+    if (req.method === 'GET' && path === '/api/douyin-duty/pet/state') {
+      return sendJson(res, 200, petState())
+    }
+    if (req.method === 'GET' && path.startsWith('/api/douyin-duty/pet/asset/')) {
+      // 只放行白名单里的文件名（层名 / 道具名），别开成任意文件服务器
+      const mf = petManifest()
+      const allow = new Set([...(mf?.layers || []).map((n) => n + '.png'),
+        ...(mf?.props || []).map((n) => n + '.png')])
+      const name = path.slice('/api/douyin-duty/pet/asset/'.length)
+      if (!mf || !allow.has(name)) return sendJson(res, 404, { ok: false, error: 'no such asset' })
+      try {
+        const buf = readFileSync(join(petSpriteDir(), name))
+        const mime = name.endsWith('.json') ? 'application/json; charset=utf-8' : 'image/png'
+        res.writeHead(200, { 'content-type': mime, 'cache-control': 'max-age=300' })
+        return res.end(buf)
+      } catch {
+        return sendJson(res, 404, { ok: false, error: 'asset read failed' })
+      }
     }
 
     /* ── ⭐ 收件箱：评论区 @ 我 + 谁私信我（面板「消息」用的） ──

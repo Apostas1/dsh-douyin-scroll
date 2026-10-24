@@ -567,6 +567,8 @@ try {
   const r = spawnSync(process.execPath, [join(here, 'tools', 'panel-render-check.mjs')], {
     encoding: 'utf8', timeout: 120_000,
   })
+  // ⭐ 2026-10-24 起检查脚本以 process.exit 收尾（组件里的轮询定时器会挂住进程）——
+  //    输出里「桌宠」段失败也会走非零退出，这里照旧归到 4j 的红项。
   if (r.status === 0) {
     const n = (String(r.stdout || '').match(/元素树 (\d+) 个节点/) || [])[1]
     ok(`设置页能渲染（${n || '?'} 个节点，所有卡片都在）`)
@@ -939,6 +941,32 @@ try {
   //    今早实测 12 秒来自已活着的 AI，插件里「每条消息现起一个会话」实测 73 秒+吞消息，已拆。
   if (/chatReplyRun|chatReplyPrompt|chatReply:/.test(idx)) bad('插件里又有「现起会话回话」的代码 —— 已定稿拆掉，回话归 AI 值班')
   else ok('插件没有「现起会话回话」（回话 = AI 值班，插件只做眼睛）')
+
+  // ⑦ 桌宠（2026-10-24 主人要的「窗口宠」）：状态聚合 + 素材服务 + overlay 注册
+  if (/pet\/state/.test(idx) && /petState/.test(idx)) ok('后端有 /pet/state（真实状态聚合成「她在干嘛」）')
+  else bad('没有桌宠状态接口')
+  // 🔴 素材服务必须白名单（别开成任意文件读取）——
+  //    从「路由匹配那行」往后截 900 字符（注释里也提 /pet/asset，从那里截会截错段）
+  const petAssetSeg = idx.slice(idx.indexOf("path.startsWith('/api/douyin-duty/pet/asset/')"), idx.indexOf("path.startsWith('/api/douyin-duty/pet/asset/')") + 900)
+  if (/allow\.has\(name\)/.test(petAssetSeg) && /readFileSync\(join\(petSpriteDir\(\)/.test(petAssetSeg)) ok('素材服务有白名单（只放行 manifest 里的文件名）')
+  else bad('素材服务没白名单 —— 那是任意文件读取')
+  // 🔴 素材是主人私货：.gitignore 必须挡住 assets/pet/
+  try {
+    const gi = readFileSync(join(here, '.gitignore'), 'utf8')
+    if (/assets\/pet\//.test(gi)) ok('.gitignore 挡住了 assets/pet/（桌宠素材是主人私货，不随仓库发布）')
+    else bad('.gitignore 没挡 assets/pet/ —— 私货素材会被推上公开仓库')
+  } catch { bad('读不到 .gitignore') }
+  if (/shell\.overlay/.test(cl) && /DeskPet/.test(cl)) ok('客户端把桌宠挂到 shell.overlay（全屏浮层）')
+  else bad('桌宠没挂 shell.overlay')
+  // petOn 必须 zod + DEFAULTS 双登记（同 chatWatch 的事故口径）
+  if (/petOn: z\.boolean\(\)\.default\(true\)/.test(idx) && /DEFAULTS = \{[\s\S]{0,1000}?petOn: true/.test(idx)) ok('petOn 双登记（zod + DEFAULTS 都有，默认开）')
+  else bad('petOn 只登记了一边 —— 开关会点了没反应')
+  // 状态优先级：run > error > watch > idle；sleep = 时段全关+聊天关
+  if (/state = 'run'/.test(idx) && /state = 'sleep'/.test(idx) && /state = 'watch'/.test(idx)) ok('状态机四态齐（run/watch/sleep + 兜底 idle）')
+  else bad('状态机不完整')
+  // 拖动位置存 localStorage（刷新不丢）
+  if (/localStorage\.setItem\('dy-pet-pos'/.test(cl)) ok('拖动位置会存（localStorage，刷新不丢）')
+  else bad('拖完一刷新位置就丢')
 } catch (e) { bad(`消息/聊天检查失败：${e.message}`) }
 
 /* ── 4o. 自动发送总开关 + 跑一轮的失败反馈（2026-10-22 用户要求） ── */
