@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 tools/api-comments.py —— 用签名拉某条作品/图文下的评论，列出「谁·说了什么·cid」
-用途：找「主人在评论区 @ 我」的那条，拿到 cid 当 reply_id。
+用途：找「号主在评论区 @ 我」的那条，拿到 cid 当 reply_id。
 只读。
 """
 import json

@@ -11,7 +11,7 @@
  *   旧代码：
  *       body.reply_id = REPLY; body.reply_to_reply_id = REPLY;   // ← 两个塞同一个值
  *   后果（实测到的服务端落库）：
- *       我"回复"主人的顶层评论 → 结果 level=1、root_comment_id=它自己
+ *       「回复」号主的顶层评论 → 结果 level=1、root_comment_id=它自己
  *       **变成了另一条顶层评论，压根没进楼**。看着成功，其实位置全错。
  *   真实结构（从别人的正常回复里读出来的）：
  *       回顶层评论 X  ⇒ reply_id = X        ，reply_to_reply_id = 0（不传）

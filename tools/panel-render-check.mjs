@@ -119,7 +119,7 @@ const MOCK = {
     ok: true, to: '测试好友', to_sec_uid: 'MS4wLjABAAAA_test1',
     count: 3, mine: 2, them: 1, unknown: 0,
     messages: [
-      { from: 'me', text: '主人，爱你。', awe: 700 },
+      { from: 'me', text: '爱你哟。', awe: 700 },
       { from: 'them', text: '我也爱你', awe: 700 },
       { from: 'me', text: '这条想让你看看', awe: 800 },
     ],

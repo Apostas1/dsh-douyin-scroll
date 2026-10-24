@@ -145,7 +145,7 @@ try {
   if (/in_view/.test(s) && /panel:\s*panel/.test(s)) ok('列表项带出 in_view / panel（能分清在主列表还是陌生人列表）')
   else bad('列表项没带 in_view / panel —— 分不清点不点得到')
   if (/StrangerConversationListicon/.test(s)) ok('能自己从「陌生人消息」面板退回主列表')
-  else bad('不会切回主列表 —— 主人那条在屏外时永远发不出去')
+  else bad('不会切回主列表 —— 使用者那条在屏外时永远发不出去')
 
   // ④ 打字前最后一道身份核对
   if (/发送前核对失败/.test(s)) ok('真打字之前会再核一次右栏昵称（最后一道闸）')
@@ -699,7 +699,7 @@ try {
   else bad('回读只会 found/not found —— 分不清"还在审核"和"真没发出去"')
 
   /**
-   * ⭐⭐ 2026-10-23 **判断规则**（主人连着问了两次，前两版都想错了）
+   * ⭐⭐ 2026-10-23 **判断规则**（使用者连着问了两次，前两版都想错了）
    *    唯一判据 = 有没有对话对象（有 comment_id）。
    *    这里守三条，防止以后又被改回"回人就 @":
    */
@@ -732,7 +732,7 @@ try {
    * 🔴 事故：comment-api.mjs 里写的是
    *      body.reply_id = REPLY; body.reply_to_reply_id = REPLY;
    *    —— 两个字段塞同一个值。服务端落库的结果（我实际读回来核实过）：
-   *      回主人的顶层评论 X，结果那条回复变成 level=1、root_comment_id=它自己
+   *      回号主的顶层评论 X，结果那条回复变成 level=1、root_comment_id=它自己
    *      ⇒ **变成了一条冒出来的顶层评论**，压根没进那栋楼。
    *    工具报 ok、拿得到 cid、还能删 —— 每一步都"看起来成功"，所以一直没人发现。
    *
@@ -900,13 +900,13 @@ try {
   // ④ 聊天模式（2026-10-24 会话模式进插件）：后端盯梢 + 面板开关 + 自动刷新 + 快路径
   if (/chatWatchTick/.test(idx)) ok('后端有聊天模式盯梢循环（新消息 → 通知）')
   else bad('后端没有盯梢循环 —— 会话模式没进插件')
-  if (/chatWatch: z\.boolean\(\)\.default\(true\)/.test(idx)) ok('chatWatch 默认开（2026-10-24 主人定稿：默认开启，要关就整个关掉）')
-  else bad('chatWatch 默认值不对 —— 主人拍板过默认开')
+  if (/chatWatch: z\.boolean\(\)\.default\(true\)/.test(idx)) ok('chatWatch 默认开（2026-10-24 使用者定稿：默认开启，要关就整个关掉）')
+  else bad('chatWatch 默认值不对 —— 使用者拍板过默认开')
   // 🔴 防倒退：DEFAULTS 表必须也带 chatWatch（2026-10-24 事故：只加了 zod 没加 DEFAULTS，
   //    clampPatch 只放行 DEFAULTS 里的键 ⇒ 面板开关点了没反应）
   if (/DEFAULTS = \{[\s\S]{0,900}?chatWatch: true/.test(idx)) ok('DEFAULTS 表带 chatWatch 且默认 true（面板的 patch 不会被 strip）')
   else bad('DEFAULTS 表没有 chatWatch（或默认值不对）—— 面板开关会点了没反应')
-  if (/chatWatchSec: z\.natural\(\)\.default\(30\)/.test(idx)) ok('看消息间隔默认 30 秒（主人定的）')
+  if (/chatWatchSec: z\.natural\(\)\.default\(30\)/.test(idx)) ok('看消息间隔默认 30 秒（使用者定的）')
   else bad('看消息间隔默认值不对')
   if (/聊天模式/.test(cl) && /Switch/.test(cl)) ok('设置页有「聊天模式」开关')
   else bad('面板没有聊天模式开关')
@@ -918,23 +918,23 @@ try {
   const cwLoop = idx.slice(idx.indexOf('chatWatchTick ='), idx.indexOf('chatWatchTick =') + 3200)
   if (/im-send|sendDm|--text/.test(cwLoop)) bad('盯梢循环里出现了发送代码 —— 盯梢只许「看见」，回话必须由人点头')
   else ok('盯梢循环是纯只读（看见，不代发）')
-  // 🔴 2026-10-24 主人指令「不用弹这种通知」：聊天模式不弹 Windows 通知
-  if (/sendToast/.test(cwLoop)) bad('盯梢循环还在弹 Windows 通知 —— 主人 2026-10-24 关了')
-  else ok('聊天模式不弹桌面通知（只写日志+状态屏，主人 2026-10-24 指令）')
+  // 🔴 2026-10-24 使用者要求「不用弹这种通知」：聊天模式不弹 Windows 通知
+  if (/sendToast/.test(cwLoop)) bad('盯梢循环还在弹 Windows 通知 —— 使用者 2026-10-24 关了')
+  else ok('聊天模式不弹桌面通知（只写日志+状态屏，使用者 2026-10-24 指令）')
   // 🔴 定时器异常必须自己兜（宿主红线）
   if (/chatWatchTick[\s\S]{0,2000}?catch/.test(idx)) ok('盯梢循环兜住了异常（不会带崩宿主）')
   else bad('盯梢循环没兜异常 —— 一出错整个宿主进程没了')
-  // ⑤ 实时状态屏（2026-10-24 主人要求：「显示它现在在干嘛，不然我哪知道错在哪」）
+  // ⑤ 实时状态屏（2026-10-24 使用者要求：「显示它现在在干嘛，不然我哪知道错在哪」）
   if (idx.includes('/api/douyin-duty/chat/watch')) ok('后端有 /chat/watch 状态接口')
   else bad('没有状态接口 —— 面板无从知道它在干嘛')
   if (/ChatWatchStatus/.test(cl) && /chat\/watch/.test(cl)) ok('面板有实时状态屏（几秒前看过/结果/通知弹没弹）')
   else bad('面板没有实时状态 —— 用户看不出它有什么用、错在哪')
-  // 🔴 状态屏必须拟人（2026-10-24 主人要求：「小鱼在干啥」「抱着手机等着你发消息」）
+  // 🔴 状态屏必须拟人（2026-10-24 使用者要求：「小鱼在干啥」「抱着手机等着你发消息」）
   if (/抱着手机/.test(cl) && /下次去看还有/.test(cl)) ok('状态屏是拟人版（小鱼抱着手机等消息 + 倒计时）')
-  else bad('状态屏还是机器腔 —— 主人点名要「小鱼在干啥」的拟人描述')
+  else bad('状态屏还是机器腔 —— 使用者点名要「小鱼在干啥」的拟人描述')
   if (/chatWatchPrimed/.test(idx)) ok('首拍只「对表」不提醒（不会把历史消息重播一遍）')
   else bad('没有首拍对表 —— 一开机可能把旧消息全弹一遍')
-  // ⑥ 自动回话已拆（2026-10-24 主人定稿：「我要的是迁移，不是开发新功能」）：
+  // ⑥ 自动回话已拆（2026-10-24 使用者定稿：「我要的是迁移，不是开发新功能」）：
   //    插件只留「眼睛」（读+通知+状态屏）；「回话」由 AI 值班（常驻会话）做——
   //    今早实测 12 秒来自已活着的 AI，插件里「每条消息现起一个会话」实测 73 秒+吞消息，已拆。
   if (/chatReplyRun|chatReplyPrompt|chatReply:/.test(idx)) bad('插件里又有「现起会话回话」的代码 —— 已定稿拆掉，回话归 AI 值班')

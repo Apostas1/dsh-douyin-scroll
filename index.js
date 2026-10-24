@@ -131,10 +131,10 @@ export const Config = !z ? undefined : z.object({
   /** http 执行器的地址 */
   httpCommentUrl: z.string().default('').extra('volatile', true),
   /** ⭐⭐ 聊天盯梢（2026-10-24）：后台每 N 秒读一次私信对象的会话，有新消息就通知。
-   *  来源：主人当天实测的「会话模式」——30 秒一读、看见就回（实测响应 ~12 秒）。
+   *  来源：使用者当天实测的「会话模式」——30 秒一读、看见就回（实测响应 ~12 秒）。
    *  间隔默认 30 秒；读取走 HTTP 快路径（im-http.py，~1.1 秒/次、不启浏览器、身份铁闸）。 */
   /**
-   * ⭐ 聊天模式总开关（2026-10-24 定稿：主人拍板「默认开启，要关就整个关掉」）。
+   * ⭐ 聊天模式总开关（2026-10-24 定稿：使用者拍板「默认开启，要关就整个关掉」）。
    *    一个开关管全部：30 秒一读 + 新消息通知 + 状态屏。不再有单独的「自动回话」——
    *    回话由 AI 值班做（已活着的会话，~12 秒），插件只做眼睛。
    */
@@ -142,7 +142,7 @@ export const Config = !z ? undefined : z.object({
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
   /**
-   * ⭐ 2026-10-24 定稿（主人：「我要的是迁移，不是开发新功能」）：
+   * ⭐ 2026-10-24 定稿（使用者：「我要的是迁移，不是开发新功能」）：
    *    聊天模式 = 今早实测那套的「读」半边（30 秒一读 + 通知 + 状态屏）。
    *    「回话」半边**不做在插件里**——今早的 12 秒来自**已活着的 AI 直接回**；
    *    插件里曾做过「每条消息现起一个会话」，实测 73 秒、还吞消息，已拆掉。
@@ -251,7 +251,7 @@ export function apply(ctx, config) {
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
     updateUrl: '',
     dmTo: '', dmToId: '',
-    // ⭐ 聊天模式（2026-10-24 定稿：默认开启，主人拍板；要关就整个关掉）。
+    // ⭐ 聊天模式（2026-10-24 定稿：默认开启，使用者拍板；要关就整个关掉）。
     //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
     chatWatch: true, chatWatchSec: 30,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
@@ -597,7 +597,7 @@ export function apply(ctx, config) {
 
   /**
    * ⭐⭐ 2026-10-23 新增：**发送闸 / 限流退避 / 三态回读**
-   *    起因：主人问「回评论用什么方案比较快」，一量才发现三个真问题 ——
+   *    起因：使用者问「回评论用什么方案比较快」，一量才发现三个真问题 ——
    *    ① 连发 3 条评论后 API 直接 **403**（抖音限流），原来代码只会把 403 当普通失败返回，
    *       调用方一看失败就重试 ⇒ 越重试封得越久。
    *    ② 发完看不见：**不是"进审核"**（2026-10-23 实测推翻了这个说法）——
@@ -1152,7 +1152,7 @@ export function apply(ctx, config) {
   tool({
     name: 'douyin_comment_reply',
     /**
-     * ⭐⭐ 2026-10-23 **重新设计**（主人：「回评论好像还有问题，要不要重新设计一下」）
+     * ⭐⭐ 2026-10-23 **重新设计**（使用者：「回评论好像还有问题，要不要重新设计一下」）
      *
      * 老设计的三个坑（全部实测过）：
      *   ① 一个工具两副面孔：传了 mention_* 就偷偷走 UI 点选，不传就走 API ——
@@ -1170,7 +1170,7 @@ export function apply(ctx, config) {
      *                     因为顶层不需要先找到任何评论 —— 这样彻底躲开"找不到评论"的死锁。
      *                     慢（20-40 秒），要 Chrome。
      *
-     * ⭐⭐ 2026-10-23 **判断规则定稿**（主人连着问了两次，我前两版都想错了）：
+     * ⭐⭐ 2026-10-23 **判断规则定稿**（使用者连着问了两次，我前两版都想错了）：
      *
      *   唯一判据 = **有没有"对话对象"**（对方留下过一条具体评论、我拿得到它的 cid）
      *
@@ -2275,7 +2275,7 @@ export function apply(ctx, config) {
            *    这一轮挑到值得看的视频后，去那个视频的评论区发一条 @ 使用者本人的评论。
            *    前提：autoSend 开着 + commentAtMe 开着 + 知道要 @ 谁。
            *
-           * ⭐ 2026-10-23 判断规则定稿（主人连着问了两次，前两版都想错了）：
+           * ⭐ 2026-10-23 判断规则定稿（使用者连着问了两次，前两版都想错了）：
            *    这个功能是**主动推东西**给使用者 —— 那个视频下面**没有他的评论可回**
            *    ⇒ 属于"没有对话对象"，所以用 @ 顶层是**正确的**。
            *    但「有人 @ 我，回他」是另一回事：有 comment_id ⇒ 必须**直接回复**，不许用 @。
@@ -2768,7 +2768,7 @@ export function apply(ctx, config) {
     ctx.effect(() => () => clearInterval(timer), 'douyin-duty: 谷时定时器')
   } catch (e) { log(`定时器没起来：${e?.message ?? e}`) }
 
-  /* ─────────────── 聊天盯梢（2026-10-24，主人实测的「会话模式」进插件） ───────────────
+  /* ─────────────── 聊天盯梢（2026-10-24，使用者实测的「会话模式」进插件） ───────────────
    * 每 chatWatchSec 秒读一次私信对象（dmToId）的会话——走 HTTP 快路径（im-http.py），
    * 不启浏览器。发现「对方新说的话」⇒ Windows 通知 + 写 chat-watch.log + 合并进记忆。
    * 回复仍由人（或值班轮）来：这一层只负责「看见 + 提醒」。
@@ -2780,7 +2780,7 @@ export function apply(ctx, config) {
   let chatWatchPrimed = false        // 启动后第一拍只「对表」不提醒（不把历史消息重播一遍）
   const chatWatchLog = (s) => { try { appendFileSync(join(stateDir, 'chat-watch.log'), `[${new Date().toISOString()}] ${s}\n`, 'utf8') } catch { /* 日志写不进就算了 */ } }
   /** ⭐ 每一拍都把状态写进 chat-watch-state.json —— 面板轮询它，用户能实时看到
-   *    「几秒前看过 · 结果如何 · 通知弹没弹 · 错在哪」（2026-10-24 主人要求）。 */
+   *    「几秒前看过 · 结果如何 · 通知弹没弹 · 错在哪」（2026-10-24 使用者要求）。 */
   const cwStateFile = join(stateDir, 'chat-watch-state.json')
   const cwState = { lastCheckAt: 0, lastResult: '', lastError: '', lastNote: '', lastNewAt: '', lastNewText: '', toast: '', checks: 0, notified: 0 }
   const cwWrite = (patch) => {
@@ -2839,10 +2839,10 @@ export function apply(ctx, config) {
       cwState.notified += theirs.length
       const head = theirs[0].text.slice(0, 60)
       chatWatchLog(`新消息 ${theirs.length} 条（${cfg.dmTo || toId}）：${head}`)
-      // 通知：2026-10-24 主人指令「不用弹这种通知」⇒ 聊天模式**不弹** Windows 通知，
+      // 通知：2026-10-24 使用者要求「不用弹这种通知」⇒ 聊天模式**不弹** Windows 通知，
       //    只写日志 + 状态屏（回话由 AI 值班做，本来也不需要桌面通知提醒人）。
       //    webhook 仍按配置走（有人拿它接手机推送，不在这条指令范围内）。
-      let toastState = 'off（主人 2026-10-24 关的：聊天模式不弹通知）'
+      let toastState = 'off（使用者 2026-10-24 关的：聊天模式不弹通知）'
       const mode = String(cfg.notifyMode || 'toast')
       if (mode === 'webhook' || mode === 'both') {
         sendWebhook({ url: cfg.webhookUrl, preset: cfg.webhookPreset, title: `${cfg.dmTo || '私信'} 来消息了`, markdown: theirs.map((m) => `- ${m.text.slice(0, 100)}`).join('\n') }).catch(() => { /* webhook 失败不影响 */ })
