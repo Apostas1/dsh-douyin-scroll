@@ -273,7 +273,6 @@ $script:iridesT = $null
 $script:lastLink = ''
 $script:lastPropSet = ''
 $script:fedAt = 0
-$script:fedCount = 0
 $script:repairOn = $false
 $script:danmakuIntentUntil = 0   # 右键弹幕的「待确认窗口期」截止时刻（unix 秒）
 $script:holdUntil = 0            # 泡泡保活：台词/打字回复在保活期内不许被待机清扫抹掉
@@ -556,13 +555,31 @@ $quip.Add_Tick({
 $quip.Start()
 
 # ── 喂饭（动画：饭碗升起→咀嚼弹跳→台词；30 分钟冷却）──
+# 🔴 v5.4.1（主人抓的「喂了三次重启面板计数清零」）：记账进 pet-feed.json ——
+#    按日期存当天碗数，重启不清、跨天自动归零（每天 3 碗额度）。
+$script:feedFile = Join-Path $home_ 'pet-feed.json'
+function Read-Feed {
+  try {
+    $j = Get-Content $script:feedFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $today = (Get-Date).ToString('yyyy-MM-dd')
+    if ([string]$j.date -eq $today) { return @{ date = $today; count = [int]$j.count } }
+  } catch {}
+  return @{ date = (Get-Date).ToString('yyyy-MM-dd'); count = 0 }
+}
+function Write-Feed($rec) {
+  try { @{ date = $rec.date; count = $rec.count } | ConvertTo-Json -Compress | Set-Content $script:feedFile -Encoding UTF8 } catch {}
+}
+$script:fedAt = 0
 function Feed {
   $nowSec = ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds
+  $rec = Read-Feed
   if ($nowSec - $script:fedAt -lt 30) { Set-Bubble (Pick (P 'feed_full')); return }
-  if ($script:fedCount -ge 3) { Set-Bubble (Pick (P 'feed_full')); return }
-  $script:fedAt = $nowSec; $script:fedCount++
+  if ($rec.count -ge 3) { Set-Bubble (Pick (P 'feed_full')); return }
+  $script:fedAt = $nowSec
+  $rec.count++
+  Write-Feed $rec
   Set-Prop 'ricebowl'
-  Set-Bubble (Pick (P 'feed'))
+  Set-Bubble ((Pick (P 'feed')) + '（今天第 ' + $rec.count + ' 碗）')
   Init-Sfx; Play-Sfx 'gulp'   # 🔴 咕咚——喂饭音效
   # 咀嚼：Q 弹三连
   1..3 | ForEach-Object {
