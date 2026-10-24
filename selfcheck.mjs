@@ -931,6 +931,19 @@ try {
   else bad('状态屏还是机器腔 —— 主人点名要「小鱼在干啥」的拟人描述')
   if (/chatWatchPrimed/.test(idx)) ok('首拍只「对表」不提醒（不会把历史消息重播一遍）')
   else bad('没有首拍对表 —— 一开机可能把旧消息全弹一遍')
+  // ⑥ 自动回话（2026-10-24 主人拍板）：默认关 + DEFAULTS 同步 + 提示词红线
+  if (/chatReply: z\.boolean\(\)\.default\(false\)/.test(idx)) ok('chatReply 配置项在（默认关，用户自己开）')
+  else bad('没有 chatReply 配置项')
+  if (/DEFAULTS = \{[\s\S]{0,950}?chatReply: false/.test(idx)) ok('DEFAULTS 表带 chatReply（2026-10-24 点不开事故的教训）')
+  else bad('DEFAULTS 表没有 chatReply —— 开关会点了没反应')
+  if (/chatReplyPrompt/.test(idx) && /不许干别的/.test(idx)) ok('回话提示词有红线（只回私信，不刷视频不写日报）')
+  else bad('回话提示词没有任务边界 —— 那个会话可能跑去干别的')
+  if (/chatReplyPrompt[\s\S]{0,2500}?douyin_im_read/.test(idx)) ok('回话前先读记忆上下文（接得上聊天）')
+  else bad('回话不读上下文 —— 会把聊过的事当没说过')
+  if (/chatReplyRunning/.test(idx) && /chatReplyRun[\s\S]{0,700}?watchdog/.test(idx)) ok('自动回话有防双开 + 5 分钟看门狗')
+  else bad('自动回话没锁/没看门狗 —— 可能连开好几个会话')
+  if (/replyState/.test(cl) && /正游过去回消息/.test(cl)) ok('状态屏有回话拟人态（正在回/刚回完/没回成）')
+  else bad('状态屏没有回话状态 —— 回没回、回成没回成用户看不见')
 } catch (e) { bad(`消息/聊天检查失败：${e.message}`) }
 
 /* ── 4o. 自动发送总开关 + 跑一轮的失败反馈（2026-10-22 用户要求） ── */

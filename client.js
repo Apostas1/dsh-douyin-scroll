@@ -165,8 +165,17 @@ window.__ModuleLoader__.load({
         skip_no_login: `🫥 小鱼进不去抖音——还没登录（先扫码）`,
       }
       const line = FISH[s.lastResult] || `🐟 小鱼状态：${s.lastResult || '刚下水，还没跑第一拍'}`
+      // ⭐ 自动回话的拟人态（2026-10-24 主人要求的「正在发送之类的」）：正在回 / 刚回完 / 没回成
+      const replyAgo = s.replyAt ? Math.max(0, Math.round((Date.now() - s.replyAt) / 1000)) : null
+      const REPLY = {
+        running: `💬 小鱼正游过去回消息呢（想词、打字、发送大概要一两分钟，发送那下要 15-30 秒，别催它）…`,
+        done: `💬 小鱼刚回完话（${replyAgo} 秒前）：「${s.replyText || ''}」`,
+        fail: `😥 小鱼想回话但没回成（去 chat-watch.log 看原因）`,
+      }
+      const replyLine = REPLY[s.replyState] || ''
       return h('div', { 'data-dy-card': '', style: { background: 'transparent', border: '1px dashed var(--dsw-alias-border-l2,rgba(255,255,255,.14))', padding: '8px 10px', gap: '4px' } },
         h('div', { 'data-dy-sub': '', style: { opacity: '.95' } }, line),
+        replyLine ? h('div', { 'data-dy-sub': '', style: { opacity: '.95' } }, replyLine) : null,
         h('div', { 'data-dy-sub': '', style: { opacity: '.7' } },
           `每 ${sec} 秒看一眼「${s.to || '私信对象'}」· 走 ${s.via || 'http'} · 已看 ${s.checks || 0} 次 · 提醒过 ${s.notified || 0} 条`))
     }
@@ -815,6 +824,23 @@ window.__ModuleLoader__.load({
                   setCwSecDraft(null)
                 },
               }, '保存'))
+            : null,
+          /* ⭐⭐ 自动回话（2026-10-24 主人拍板）：盯到新消息，起一个会话（带人设+记忆）替你回。 */
+          cfg.chatWatch
+            ? h('div', { 'data-dy-row': '', style: { marginTop: '6px' } },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, '自动回话'),
+                h('div', { 'data-dy-sub': '' },
+                  (cfg.chatReply
+                    ? '✅ 开着：他来新消息，小鱼会自己起一个会话（带你的人设+聊天记忆）拟回复并发出去，全程不用你管。'
+                    : '关着：只提醒不代回。开了它，来消息就有人接话（回复质量和值班轮同一个脑子）。'))),
+              h(Switch, {
+                on: Boolean(cfg.chatReply),
+                disabled: busy === 'patch',
+                onChange: (v) => patch({ chatReply: v }, v
+                  ? '✅ 已打开自动回话（来消息自己回）'
+                  : '已关闭自动回话（只提醒不代回）'),
+              }))
             : null,
           /* ⭐ 实时状态屏（2026-10-24 主人要求：「我哪知道它有什么用、错在哪了」）：
            *    开着聊天模式时每 15 秒拉一次后端状态，显示几秒前看过、结果、通知弹没弹。 */
