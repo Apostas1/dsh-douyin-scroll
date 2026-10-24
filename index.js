@@ -239,6 +239,9 @@ export function apply(ctx, config) {
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
     updateUrl: '',
     dmTo: '', dmToId: '',
+    // ⭐ 聊天模式（2026-10-24）：⚠️ 这里漏加过 ⇒ clampPatch 把面板的 patch 整个 strip 掉，
+    //    开关点了没反应。DEFAULTS / zod schema 两处必须同步。
+    chatWatch: false, chatWatchSec: 30,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
