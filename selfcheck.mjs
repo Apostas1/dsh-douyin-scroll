@@ -916,8 +916,11 @@ try {
   else bad('/chat/read 没接快路径 —— 面板每刷一次冷启一次浏览器')
   // 🔴 盯梢只许读不许发：盯梢循环里出现 im-send/send 就报红
   const cwLoop = idx.slice(idx.indexOf('chatWatchTick ='), idx.indexOf('chatWatchTick =') + 3200)
-  if (/im-send|sendDm|--text/.test(cwLoop)) bad('盯梢循环里出现了发送代码 —— 盯梢只许「看见+提醒」，回话必须由人点头')
-  else ok('盯梢循环是纯只读（看见+提醒，不代发）')
+  if (/im-send|sendDm|--text/.test(cwLoop)) bad('盯梢循环里出现了发送代码 —— 盯梢只许「看见」，回话必须由人点头')
+  else ok('盯梢循环是纯只读（看见，不代发）')
+  // 🔴 2026-10-24 主人指令「不用弹这种通知」：聊天模式不弹 Windows 通知
+  if (/sendToast/.test(cwLoop)) bad('盯梢循环还在弹 Windows 通知 —— 主人 2026-10-24 关了')
+  else ok('聊天模式不弹桌面通知（只写日志+状态屏，主人 2026-10-24 指令）')
   // 🔴 定时器异常必须自己兜（宿主红线）
   if (/chatWatchTick[\s\S]{0,2000}?catch/.test(idx)) ok('盯梢循环兜住了异常（不会带崩宿主）')
   else bad('盯梢循环没兜异常 —— 一出错整个宿主进程没了')

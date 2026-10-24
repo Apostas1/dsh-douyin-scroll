@@ -157,7 +157,7 @@ window.__ModuleLoader__.load({
       const FISH = {
         ok: `🐟 小鱼抱着手机趴在缸边等着呢——刚看过（${ago} 秒前），还没有新消息。下次去看还有 ${nextIn} 秒`,
         ok_prime: `🐳 小鱼刚接班，正在把聊天记录翻到最新一页（之前的不重播，从现在起只等新的）`,
-        ok_new: `🔔 小鱼看到新消息了！挥着尾巴去弹通知：「${s.lastNewText || ''}」${String(s.toast || '').startsWith('ok') ? '——已经弹到你屏幕上了' : '（通知没弹成：' + (s.toast || '未知') + '）'}`,
+        ok_new: `🔔 小鱼看到新消息了：「${s.lastNewText || ''}」（不弹桌面通知——值班的小鱼会直接接话）`,
         error: `😵 小鱼撞缸了：${s.lastError || '未知原因'}。歇一拍再试，不用管它`,
         no_match: `🤔 小鱼在已建立会话里没找到「${s.to || '这个人'}」：${s.lastNote || '陌生人消息走不了这条路'}`,
         off: `😴 开关关了，小鱼在缸底睡觉（这条是旧状态）`,
@@ -784,13 +784,13 @@ window.__ModuleLoader__.load({
               h('div', { 'data-dy-title': '' }, '聊天模式'),
               h('div', { 'data-dy-sub': '' },
                 (cfg.chatWatch
-                  ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息，有就弹通知。不起浏览器，很轻。`
-                  : '关着（默认是开的）。人不在电脑前想知道他找没找你，就再打开。'))),
+                  ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息（不弹桌面通知，状态屏和值班回话就是反馈）。不起浏览器，很轻。`
+                  : '关着（默认是开的）。想恢复再打开。'))),
             h(Switch, {
               on: Boolean(cfg.chatWatch),
               disabled: !cfg.dmToId || busy === 'patch',
               onChange: (v) => patch({ chatWatch: v }, v
-                ? '✅ 已打开聊天模式（有新消息弹通知）'
+                ? '✅ 已打开聊天模式（静默盯消息）'
                 : '已关闭聊天模式'),
             })),
           busy === 'patch'

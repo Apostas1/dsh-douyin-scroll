@@ -2839,15 +2839,11 @@ export function apply(ctx, config) {
       cwState.notified += theirs.length
       const head = theirs[0].text.slice(0, 60)
       chatWatchLog(`新消息 ${theirs.length} 条（${cfg.dmTo || toId}）：${head}`)
-      // 通知（toast / webhook 按配置；file = 只写日志不弹）
+      // 通知：2026-10-24 主人指令「不用弹这种通知」⇒ 聊天模式**不弹** Windows 通知，
+      //    只写日志 + 状态屏（回话由 AI 值班做，本来也不需要桌面通知提醒人）。
+      //    webhook 仍按配置走（有人拿它接手机推送，不在这条指令范围内）。
+      let toastState = 'off（主人 2026-10-24 关的：聊天模式不弹通知）'
       const mode = String(cfg.notifyMode || 'toast')
-      let toastState = ''
-      if (mode === 'toast' || mode === 'both') {
-        try {
-          const tr = sendToast({ title: `${cfg.dmTo || '私信'} 来消息了`, body: theirs.slice(0, 3).map((m) => m.text.slice(0, 80)).join('\n') })
-          toastState = tr && tr.ok ? 'ok' : `fail:${String((tr && tr.error) || '未知原因').slice(0, 80)}`
-        } catch (e) { toastState = `fail:${String(e?.message ?? e).slice(0, 80)}` }
-      }
       if (mode === 'webhook' || mode === 'both') {
         sendWebhook({ url: cfg.webhookUrl, preset: cfg.webhookPreset, title: `${cfg.dmTo || '私信'} 来消息了`, markdown: theirs.map((m) => `- ${m.text.slice(0, 100)}`).join('\n') }).catch(() => { /* webhook 失败不影响 */ })
       }
