@@ -1212,8 +1212,14 @@ try {
     const idxNoComment = idxM.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
     if (/z\.enum\(/.test(idxNoComment)) bad('index.js 里出现 z.enum —— 宿主 schemastery 没有这个方法，整个插件会 import 失败')
     else ok('没有 z.enum（宿主不支持，踩过整个插件加载失败）')
-    if (/DUTY_SESSION_ID = 'douyin-duty-fish-v1'/.test(idxM) && /agents\.create\(/.test(idxM) && /agents\.resume\(/.test(idxM)) ok('值班会话走官方正路（agents.get → resume → create，绝不重复 create 同一 id）')
+    if (/DUTY_SESSION_ID = 'douyin-duty-fish-v\d+'/.test(idxM) && /agents\.create\(/.test(idxM) && /agents\.resume\(/.test(idxM)) ok('值班会话走官方正路（agents.get → resume → create，绝不重复 create 同一 id）')
     else bad('值班会话没走 agents.create/resume 官方通道')
+    // 🔴 主人 2026-10-25 深夜纠正：「我要的就是后台 headless 常驻回复」——
+    //    值班会话**必须不进工作区**（侧栏不许露脸）。机制：create 时带
+    //    parentAgent + meta.parentSession/origin:'subagent'（照 dsh-subagent 的 childSessionMeta）。
+    //    少了这组参数，它会变成一个顶层会话，侧栏「未分组」里就多一个。
+    if (/parentAgent/.test(idxM) && /origin: 'subagent'/.test(idxM) && /delegationDepth: 1/.test(idxM)) ok('值班会话带 parentAgent + origin:subagent（不进工作区、侧栏不露脸）')
+    else bad('值班会话没带 parentAgent/origin —— 会在侧栏「未分组」里多出一个会话')
     if (/ownerCtx|生命周期挂在|插件重载不杀它/.test(idxM) || /照 headless runner 的用法/.test(idxM)) ok('值班会话生命周期说明在案（挂宿主根，不随插件重载而死）')
     else warn('值班会话生命周期说明缺失 —— 排障时容易误判')
     if (/TEAM_LEAD_REQUIRED|Agent Teams 队友 ✗|插件不是 Lead/.test(idxM)) ok('记录了为什么不用 Agent Teams（TEAM_LEAD_REQUIRED，roster 挂 Lead 会话名下）')

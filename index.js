@@ -162,7 +162,7 @@ export const Config = !z ? undefined : z.object({
   /**
    * ⭐ 私信投递目标（2026-10-25 深夜，主人令「探明呗」后实测可行）：
    *   'lead' = 投进当前前台会话（原行为；回话延迟 = 等当前轮跑完）
-   *   'duty' = 投给常驻值班鱼（插件自有会话 douyin-duty-fish-v1：私聊不占前台上下文，
+   *   'duty' = 投给常驻值班鱼（插件自有会话 douyin-duty-fish-v2：私聊不占前台上下文，
    *            它自动醒来跑一轮、跑完待命，跨重启 resume 拉回）
    *   值班会话不在（拉不起来/投递失败）⇒ 自动退回前台 + 日志记一笔，绝不丢消息。
    *
@@ -3090,7 +3090,7 @@ export function apply(ctx, config) {
       }
       if (wake && wake.ok) {
         // ⚠️ 文案必须能一眼看出「走的哪条路」，别把"回退"和"值班会话 id"混在一句里
-        //    （2026-10-25 深夜踩过：状态屏写成「已叫醒前台（值班鱼缺席回退）（douyin-duty-fish-v1）」
+        //    （2026-10-25 深夜踩过：状态屏写成「已叫醒前台（值班鱼缺席回退）（douyin-duty-fish-v2）」
         //     前后自相矛盾，排障时以为值班鱼已经接住了）
         const who = wake.sessionId || wake.target || '?'
         const when = wake.runningNow ? '在跑，排队下一轮' : '下一轮就读'
@@ -3352,7 +3352,7 @@ export function apply(ctx, config) {
    * 人设：setup 里往**它私有作用域**的 systemPrompt 塞小鱼人设
    * （README.md:218：只有编程式 create/resume 支持 per-agent persona）。
    */
-  const DUTY_SESSION_ID = 'douyin-duty-fish-v1'
+  const DUTY_SESSION_ID = 'douyin-duty-fish-v2'
   const DUTY_CWD = stateDir
   /** 值班会话的 handle（{ agent, dispose }）；null = 还没拉起 */
   let _dutyHandle = null
@@ -3401,6 +3401,30 @@ export function apply(ctx, config) {
         provider = sel?.provider
         model = sel?.model
       } catch { /* 拿不到就用宿主默认（create 里可不带 agentOptions） */ }
+      /**
+       * ⭐⭐ 关键（2026-10-25 深夜主人纠正）：「我要的就是后台 headless 常驻回复」
+       *    —— 值班会话**必须不进工作区**（侧栏不许露脸），要像 subagent 那样藏起来。
+       *
+       *    机制（读 dsh-subagent 源码得的）：子会话之所以不显示，是因为 create 时带了
+       *      `parentAgent` + meta 里的 `parentSession / origin:'subagent' / delegationDepth`。
+       *      dsh-subagent lib:471-479 的 childSessionMeta() 就是干这个的。
+       *
+       *    这里插件没有"自己的 agent"，就从 agents.roots() 借最新那条当 parent
+       *    （跟 tryDeliverToSession 挑会话同源）。借不到就不带 parentAgent ——
+       *    那样会退化成顶层会话（侧栏会看到），所以借不到时**记一笔日志**别闷着。
+       */
+      const parentAgent = (() => {
+        try {
+          const roots = typeof agents.roots === 'function' ? (agents.roots() || []).filter(Boolean) : []
+          return roots[roots.length - 1] || null
+        } catch { return null }
+      })()
+      const parentId = (() => {
+        try { return parentAgent?.session?.header?.id || parentAgent?.id || '' } catch { return '' }
+      })()
+      if (!parentAgent) {
+        log('值班会话：借不到 parent agent —— 这次建出来会出现在侧栏（不是致命，但不理想）')
+      }
       // ③ resume（跨重启恢复历史）；SessionNotFound 才 create
       const mkSetup = (agentCtx) => {
         // 值班鱼私有作用域的人设 section（只在它的会话里生效，不碰前台）
@@ -3415,10 +3439,23 @@ export function apply(ctx, config) {
           }
         } catch { /* 人设装不上不挡值班 */ }
       }
-      const baseOpts = { meta: { cwd: DUTY_CWD }, ...(provider && model ? { agentOptions: { provider, model } } : {}) }
+      // meta 里带上 parentSession/origin/delegationDepth ⇒ 宿主认它是子会话 ⇒ 不进工作区
+      const dutyMeta = {
+        cwd: DUTY_CWD,
+        ...(parentId ? { parentSession: parentId, origin: 'subagent', delegationDepth: 1 } : {}),
+      }
+      const baseOpts = {
+        meta: dutyMeta,
+        ...(parentAgent ? { parentAgent } : {}),
+        ...(provider && model ? { agentOptions: { provider, model } } : {}),
+      }
       if (typeof agents.resume === 'function') {
         try {
-          _dutyHandle = await agents.resume({ resumeSessionId: DUTY_SESSION_ID, ...baseOpts, setup: mkSetup })
+          // ⚠️ resume **不传 meta**（宿主 resume 签名只收 resumeSessionId/parentAgent/
+          //    agentOptions/setup；多塞 meta 属于赌它容错，不赌）
+          const { meta: _m, ...resumeOpts } = baseOpts
+          void _m
+          _dutyHandle = await agents.resume({ resumeSessionId: DUTY_SESSION_ID, ...resumeOpts, setup: mkSetup })
           log(`值班会话：已从磁盘恢复 ${DUTY_SESSION_ID}（历史还在）`)
           return _dutyHandle
         } catch (e) {
@@ -3432,7 +3469,7 @@ export function apply(ctx, config) {
       try {
         _dutyHandle = await agents.create({ sessionId: DUTY_SESSION_ID, ...baseOpts, setup: mkSetup })
         _dutyBriefed = false
-        log(`值班会话：新拉起 ${DUTY_SESSION_ID}（cwd=${DUTY_CWD}，provider=${provider || '默认'}）`)
+        log(`值班会话：新拉起 ${DUTY_SESSION_ID}（cwd=${DUTY_CWD}，provider=${provider || '默认'}${parentId ? '，带 parent=' + parentId.slice(0, 20) + '（不进工作区）' : '，⚠️ 无 parent（会进侧栏）'}）`)
         return _dutyHandle
       } catch (e) {
         const msg = String(e?.message ?? e)
@@ -3481,7 +3518,20 @@ export function apply(ctx, config) {
    */
   const deliverToDutyFish = async (text) => {
     try {
-      const handle = await dutySessionEnsure()
+      // ⚠️ 2026-10-25 深夜实测的竞态：新建值班会话是异步的（要落盘 + 装人设），
+      //    而私信那一拍同时到达 ⇒ 第一拍必然"还没拉起来" ⇒ 白回退一次前台。
+      //    实测：15:37:31 日志里 create 和"回退前台"同一毫秒（v2 建成了，
+      //    消息却已经跑进前台）。修法：**等它建完再投**，最多等 8 秒；
+      //    等不到才回退（真起不来时不该让消息一直吊着）。
+      let handle = await dutySessionEnsure()
+      if (!handle?.agent && _dutyBooting) {
+        const t0 = Date.now()
+        while (!handle?.agent && _dutyBooting && Date.now() - t0 < 8000) {
+          await new Promise((r) => setTimeout(r, 250))
+          handle = _dutyHandle?.agent ? _dutyHandle : (await dutySessionEnsure())
+        }
+        if (handle?.agent) log(`私信[投值班鱼]：等了 ${Math.round((Date.now() - t0) / 100) / 10} 秒，会话建好了`)
+      }
       if (!handle?.agent) return { ok: false, reason: '值班会话没拉起来（agents.create/resume 不可用或失败）' }
       void dutySessionBrief(handle)
       const mk = await loadLlmCreateUserMessage()
