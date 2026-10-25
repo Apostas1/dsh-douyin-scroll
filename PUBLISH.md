@@ -31,7 +31,7 @@ git config --global user.email "你的邮箱"
 ## 2. 本地建仓库
 
 ```powershell
-cd D:\aiagent\deepseek\dsh-douyin-scroll
+cd <本目录>
 git init -b main
 git add -A
 git status --short          # ⭐ 这一步必须眼看一遍（见第 5 步）
@@ -80,7 +80,7 @@ git push
 ## 5. ⭐ 推之前自查（每次都要跑）
 
 ```powershell
-cd D:\aiagent\deepseek\dsh-douyin-scroll
+cd <本目录>
 
 # ① 暂存区里有没有"数据文件"被误 add
 git diff --cached --name-only |
@@ -174,7 +174,7 @@ node selfcheck.mjs      # 应该 264 通过 / 0 失败
 `dsh plugin add` 装的是 npm 包，所以想让人一条命令装上，就发 npm：
 
 ```powershell
-cd D:\aiagent\deepseek\dsh-douyin-scroll
+cd <本目录>
 npm pack --dry-run     # ⭐ 先眼看一遍文件清单：没有 pyc、没有 persona.md、没有 cookie/日志
 npm publish --access public
 ```

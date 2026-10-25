@@ -6,7 +6,7 @@ from psd_tools import PSDImage
 from PIL import Image, ImageDraw
 
 PSD = r"D:\Downloads\宠物\鲸鱼娘拆解.psd"
-OUT = r"D:\aiagent\deepseek\dsh-douyin-scroll\assets\pet\psd"
+OUT = r"<本目录>\assets\pet\psd"
 os.makedirs(OUT, exist_ok=True)
 
 psd = PSDImage.open(PSD)

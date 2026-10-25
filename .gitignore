@@ -92,3 +92,7 @@ tools/pet-host/*-udf-*/
 tools/pet-host/comp-probe/
 tools/pet-host/v7-test/
 tools/pet-host/dll-2903-bak/
+
+# 临时提交信息文件（2026-10-26 误提交过一次）
+_cm.txt
+

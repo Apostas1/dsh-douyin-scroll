@@ -152,11 +152,18 @@ export const Config = !z ? undefined : z.object({
    *  来源：使用者当天实测的「会话模式」——30 秒一读、看见就回（实测响应 ~12 秒）。
    *  间隔默认 30 秒；读取走 HTTP 快路径（im-http.py，~1.1 秒/次、不启浏览器、身份铁闸）。 */
   /**
-   * ⭐ 聊天模式总开关（2026-10-24 定稿：使用者拍板「默认开启，要关就整个关掉」）。
-   *    一个开关管全部：30 秒一读 + 新消息通知 + 状态屏。不再有单独的「自动回话」——
-   *    回话由 AI 值班做（已活着的会话，~12 秒），插件只做眼睛。
+   * ⭐ 聊天模式总开关。
+   *
+   * 🔴 2026-10-26 主人改口：**默认关闭**（原话「聊天模式默认关闭为什么」）。
+   *    原因（我们复盘的）：默认开着意味着**一装上就开始读别人的私信 + 自动回话**，
+   *    这对没读说明书的人是意外行为；而聊天模式还会拉起一条常驻会话、消耗额度。
+   *    所以改成：默认**关**，用户明确点开才工作。
+   *
+   *    ⚠️ 与 DEFAULTS 表必须同步（漏改过 ⇒ 面板开关点了没反应，2026-10-24 事故）。
+   *    ⚠️ 老用户不受影响：他们的值已经在 config.json 里，且 intent 文件会记住
+   *       「上次是开着的」，挂载自愈会把它恢复回来。
    */
-  chatWatch: z.boolean().default(true).extra('volatile', true),
+  chatWatch: z.boolean().default(false).extra('volatile', true),
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
   /**
@@ -308,10 +315,12 @@ export function apply(ctx, config) {
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
     updateUrl: '',
     dmTo: '', dmToId: '',
-    // ⭐ 聊天模式（2026-10-24 定稿：默认开启，使用者拍板；要关就整个关掉）。
-    //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
-    chatWatch: true, chatWatchSec: 30, chatWatchTarget: 'lead',
+    // ⭐ 聊天模式（2026-10-26 主人改口：**默认关闭**，用户明确点开才工作）。
+    //    ⚠️ DEFAULTS / zod 必须同步（漏改过 ⇒ 开关点了没反应）。
+    chatWatch: false, chatWatchSec: 30, chatWatchTarget: 'lead',
     // ⭐ 2026-10-25 拆分：7 个 pet* 字段全部搬去 dsh-deskpet 了，这里只留"要不要喂状态给它"
+    //    🔴 2026-10-26 主人：「联动桌宠选项暂时不要出现」⇒ 默认还是 true（不影响老用户），
+    //       但**面板上先不显示这个开关**（见 client.js 的 HIDE_PET_LINK）。
     petLinkTo: true,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
@@ -2297,9 +2306,9 @@ export function apply(ctx, config) {
     }
     /**
      * 🔴 2026-10-20 实测（本机必现，不修就永远写不出报告）：
-     *    headless 那一轮的沙箱默认把**工作区**当成唯一可写目录（本机是 `D:\aiagent\deepseek`），
+     *    headless 那一轮的沙箱默认把**工作区**当成唯一可写目录（本机是 `<工作区>`），
      *    而报告要写到插件家（`<DSH_HOME>/douyin-duty/out/`）——**在插件家外面** ⇒ 被拒：
-     *      「该路径在工作区 D:\aiagent\deepseek 之外，workspace-write 模式下拒绝访问」
+     *      「该路径在工作区 <工作区> 之外，workspace-write 模式下拒绝访问」
      *    ⇒ 模型明明把 `douyin_prescreen` 调通了、也写出了正文，**最后一步落盘失败**，
      *      报告为空。而且它可能会**自作主张写到别处**或放弃。
      *    ✅ 修法：把这一轮的 sandbox 工作区**改成插件家**（仍然受限，不是 danger-full-access）：
@@ -2309,7 +2318,7 @@ export function apply(ctx, config) {
     yml.push(
       // ⭐ 让那一轮**的工作目录 = 插件家**（这是 bili-scroll 那条"cwd=插件家"的设计真正落地的地方）：
       //    `working-directory.defaultDirectory` 决定会话工作区，而 sandbox 的 workspaceRoot 默认跟着它走。
-      //    只设 sandbox-policy 不够 —— 实测模型仍然把报告写到了 D:\aiagent\deepseek（宿主当前工作区）。
+      //    只设 sandbox-policy 不够 —— 实测模型仍然把报告写到了 <工作区>（宿主当前工作区）。
       '- id: working-directory',
       '  config:',
       `    defaultDirectory: '${posix(stateDir)}'`,
@@ -4844,6 +4853,15 @@ export function apply(ctx, config) {
     /* ── 人设：读 / 写使用者自己那份（$DOUYIN_HOME/persona.md）──
      * 优先级：使用者自己那份 > 插件自带 > 默认中性。
      * 这里只让写使用者那份 —— 插件包里那两份是随包发布的，不该被页面改。
+     *
+     * 🔴 2026-10-26 主人：「人设默认的是不是有问题」
+     *    查出来是真问题（不是显示 bug，是**面板在说谎**）：
+     *      实际生效的是 ②（插件自带那份，16970 字节的完整人设），
+     *      但面板只读 ①（$DOUYIN_HOME/persona.md，不存在），
+     *      于是提示写「还没写自己的 —— 现在用的是插件自带 / 默认人设」，
+     *      文本框还是空的 —— 用户看到的就是"我的人设没了/是默认的"。
+     *    修法：接口把**当前真正生效的那一份**也读出来（effective/effective_from），
+     *      面板直接展示它，并在标题上写清"现在用的是哪一份"。
      */
     if (req.method === 'GET' && path === '/api/douyin-duty/persona') {
       const mine = join(stateDir, 'persona.md')
@@ -4852,10 +4870,30 @@ export function apply(ctx, config) {
       try { if (has) text = readFileSync(mine, 'utf8') } catch { text = '' }
       let defText = ''
       try { defText = readFileSync(join(pluginDir, 'prompts', 'persona.default.md'), 'utf8') } catch { defText = '' }
+      // ② 插件自带那份（本地私有，随包不发）
+      let bundled = ''
+      try {
+        const f = join(pluginDir, 'prompts', 'persona.md')
+        if (existsSync(f)) bundled = readFileSync(f, 'utf8')
+      } catch { /* 没有就算了 */ }
+      // 真正生效的那份 + 它的来源（跟 runDuty 的读取顺序保持一致）
+      const effectiveFrom = has ? 'mine' : (bundled ? 'bundled' : 'default')
+      const effective = has ? text : (bundled || defText)
+      const FROM_LABEL = {
+        mine: '你自己写的那份（$DOUYIN_HOME/persona.md）',
+        bundled: '插件自带的那份（作者随插件带的）',
+        default: '中性默认（谁装了都能用）',
+      }
       return sendJson(res, 200, {
         ok: true, custom: has, text, default_text: defText,
         file: mine,
-        hint: has ? '正在用你这份' : '还没写自己的 —— 现在用的是插件自带 / 默认人设',
+        effective, effective_from: effectiveFrom,
+        effective_label: FROM_LABEL[effectiveFrom],
+        hint: has
+          ? '正在用你这份'
+          : (bundled
+            ? '你没写自己的 —— 现在用的是**插件自带**的那份（下面显示的就是它）'
+            : '还没写自己的 —— 现在用的是中性默认'),
       })
     }
     if (req.method === 'POST' && path === '/api/douyin-duty/persona') {

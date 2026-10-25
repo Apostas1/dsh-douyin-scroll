@@ -175,7 +175,7 @@ new Function('window', 'document', 'navigator', 'fetch', src)(
 if (!mod) throw new Error('client.js 没有调用 __ModuleLoader__.load')
 
 /* ── 把注册到 settings.section 的组件抓出来 ──
- *    （2026-10-24 v2：桌宠搬进桌面级置顶窗口 pet-window.ps1 —— 主人要「悬浮所有窗口上」。
+ *    （2026-10-24 v2：桌宠搬进桌面级置顶窗口（独立的桌面窗进程）—— 主人要「悬浮所有窗口上」。
  *    GUI 内浮层必须撤掉，不然同时出现两只她。这里守住：不许再注册 shell.overlay。） */
 let Registered = null
 let Overlay = null
@@ -373,12 +373,19 @@ console.log('\n【折叠组 · 点开之后】')
     ['卡③自动发送（含私信对象 / 评论区@你 / 聊天模式）', /自动发送[\s\S]*私信发给谁|私信发给谁/],
     ['卡④出问题了？', /出问题了？/],
     ['卡⑤刷抖音的策略', /刷抖音的策略/],
-    ['卡⑥桌宠联动（宠物本体在独立插件里）', /联动桌宠/],
+    /* 🔴 2026-10-26 主人：「补充人设那一栏只要一个标题就行了，就叫做人设」
+     *    ⇒ 卡片标题 = 「人设」；里面**不再重复**一个「补充人设」小标题
+     *      （主人明确说"不要有两个"），所以这里断言卡片标题是「人设」，
+     *      并反向断言旧的那个重复标题不许回来。 */
+    ['卡⑥人设（联动桌宠开关已隐藏）', /人设/],
     ['卡⑦消息与记忆', /消息与记忆/],
   ]) {
     if (re.test(allText)) console.log(`  ✅ ${label}`)
     else { console.log(`  ❌ ${label} 不在展开后的面板里`); fail++ }
   }
+  // 反向断言：被主人点掉的那个开关不许重新冒出来
+  if (/联动桌宠/.test(allText)) { console.log('  ❌ 「联动桌宠」开关又出现在面板上了 —— 主人 2026-10-26 要求暂时不要出现'); fail++ }
+  else console.log('  ✅ 「联动桌宠」开关按主人要求暂时隐藏（HIDE_PET_LINK）')
 }
 
 console.log('\n【没登录时】—— 新手看到的第一屏')
@@ -624,17 +631,23 @@ const selects = flatAll.filter((n) => n.tag === 'select')
 if (selects.length >= 2) console.log(`  ✅ ${selects.length} 个下拉框`)
 else { console.log(`  ❌ 下拉框只有 ${selects.length} 个`); fail++ }
 
-/* ── 补充人设：能写、能存 ──
-   🔴 2026-10-25：主人说「插件面板人设跟人格重合了」，
-   这里原来叫「我的人设」（和人格卡看着像同一个东西），现在改名「补充人设（可选）」、
-   按钮也从「写人设」变成「展开」。断言跟着改。 */
-console.log('\n【补充人设】')
+/* ── 我的人设：能写、能存，而且**要说清现在用的是哪一份** ──
+   历程（别改回去）：
+     · 2026-10-25 主人说「插件面板人设跟人格重合了」→ 曾改名「补充人设（可选）」
+     · 2026-10-26 主人说「只要一个标题，就叫做人设」→ 去掉重复小标题
+     · 2026-10-26 主人说「人设是不是该改成我的人设」+「默认的是不是有问题」
+       ⇒ 标题定型为「我的人设」；并且后端开始返回 effective/effective_label，
+         面板必须**明确说出当前生效的是哪一份**（自己写 / 插件自带 / 中性默认）。
+       原因：以前只读自己那份，没写就空框 + 提示"用的是默认"，
+       而实际生效的是插件自带那份 16970 字节的完整人设 —— 面板在说谎。 */
+console.log('\n【我的人设】')
 const rPersona = await clickAndRender('展开')
 if (rPersona) {
   const ta = rPersona.flat.find((n) => n.tag === 'textarea')
   if (ta) console.log('  ✅ 人设文本框出来了')
   else { console.log('  ❌ 人设文本框没出来'); fail++ }
-  if (/默认人设|还没写自己的|正在用你写的/.test(rPersona.text)) console.log('  ✅ 说明了当前用的是哪份')
+  // 三种来源说法都要被识别（后端 effective_label 给的就是这些词）
+  if (/正在用你写的|插件自带的那份|中性默认/.test(rPersona.text)) console.log('  ✅ 说明了当前用的是哪一份（自己写/插件自带/中性默认）')
   else { console.log('  ❌ 没说当前用哪份'); fail++ }
 }
 
@@ -774,8 +787,13 @@ console.log('\n【桌宠联动】')
   else console.log('  ✅ 抖音侧不写窗口状态文件（归 dsh-deskpet）')
   if (/spawn\(hostExe|PetHost\.exe/.test(idxCode)) { console.log('  ❌ 抖音侧还在拉起窗口进程 —— 会跟桌宠抢实例'); fail++ }
   else console.log('  ✅ 抖音侧不拉窗口（窗口归 dsh-deskpet）')
-  if (/联动桌宠/.test(cl) && /petLinkTo/.test(cl)) console.log('  ✅ 面板有「联动桌宠」开关（petLinkTo）')
-  else { console.log('  ❌ 面板没有联动开关'); fail++ }
+  /* 🔴 2026-10-26 主人：「联动桌宠选项暂时不要出现」
+   *   代码还在（HIDE_PET_LINK 控制），但界面上不许出现这个开关。
+   *   所以要断言的是「源码里有 petLinkTo」「界面上没有联动桌宠」。 */
+  if (/petLinkTo/.test(cl)) console.log('  ✅ 联动能力仍在源码里（petLinkTo，HIDE_PET_LINK 可恢复）')
+  else { console.log('  ❌ 连 petLinkTo 都没了 —— 恢复时得重写'); fail++ }
+  if (/HIDE_PET_LINK\s*=\s*true/.test(cl)) console.log('  ✅ 「联动桌宠」开关按主人要求隐藏（HIDE_PET_LINK=true）')
+  else { console.log('  ❌ HIDE_PET_LINK 不在 —— 那个开关会冒出来'); fail++ }
   if (/slots\.inject\('shell\.overlay'/.test(cl)) { console.log('  ❌ 还在往 shell.overlay 注册（会出两只她）'); fail++ }
   else console.log('  ✅ GUI 内没有浮层（只有桌面窗一只）')
 }

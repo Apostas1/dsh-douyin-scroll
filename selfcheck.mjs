@@ -95,8 +95,8 @@ try {
  * 起因：这三处全是"工具报成功、实际发错人"的静默错误。
  *   ① already-open 判断用整个 bodyText ⇒ 左侧列表里任何人都在里面，
  *      只要界面开着**任何**一个会话，就会把当前那个人的 id 当成目标返回。
- *      实测：界面开着「枫眠」+ 发给「某帅气用户」（只给昵称）
- *            ⇒ ok:true, to:"某帅气用户", to_sec_uid:枫眠的 id。
+ *      实测：界面开着「枫眠」+ 发给「示例好友」（只给昵称）
+ *            ⇒ ok:true, to:"示例好友", to_sec_uid:枫眠的 id。
  *   ② 昵称用 text.includes 匹配 ⇒「大肥鱼」（没有任何人叫这个）命中 3 个人。
  *   ③ 会话项被平移到屏外（left<0）时，点击**毫无反应也不报错**，
  *      然后拿旧会话的 id 去校验 ⇒ 假装切换成功。
@@ -841,12 +841,21 @@ try {
     ['每天挑几条', /每天挑几条/],
     ['日报详细程度', /日报写多细/],
     ['通知方式', /通知：/],
-    ['人设编辑', /我的人设/],
+    // 🔴 2026-10-26 主人：「人设是不是该改成我的人设」⇒ 标题定为「我的人设」
+    ['人设编辑', /'我的人设'/],
   ]
   for (const [name, re] of mustHave) {
     if (re.test(cl)) ok(`面板有「${name}」`)
     else bad(`面板缺「${name}」—— 功能又少了一块`)
   }
+  /* 🔴 2026-10-26 主人：「人设默认的是不是有问题」—— 查出来是**面板在说谎**：
+   *   实际生效的是插件自带那份（16970 字节完整人设），
+   *   但面板只读 $DOUYIN_HOME/persona.md（不存在）⇒ 空框 + 提示"用的是默认"。
+   *   现在后端必须返回 effective / effective_label，面板必须展示它。 */
+  if (/effective_from/.test(idx) && /effective_label/.test(idx)) ok('人设接口返回「当前真正生效的那份 + 来源」')
+  else bad('人设接口只返回自己那份 —— 没写自己的用户会看到空框，以为人设丢了')
+  if (/persona\.effective/.test(cl) || /effectiveLabel/.test(cl)) ok('面板会展示当前生效的人设内容（不再是空框）')
+  else bad('面板不展示生效内容 —— 用户会以为人设是空的')
   if (idx.includes('/api/douyin-duty/persona')) ok('后端有 /persona（人设读写）')
   else bad('后端缺 /persona')
 } catch (e) { bad(`新手流程检查失败：${e.message}`) }
@@ -1093,14 +1102,18 @@ try {
   if (/chat\/send'[\s\S]{0,1500}?noteSent\(stateDir/.test(idx)) ok('聊天发出去的消息会进记忆')
   else bad('聊天发送不写记忆')
 
-  // ④ 聊天模式（2026-10-24 会话模式进插件）：后端盯梢 + 面板开关 + 自动刷新 + 快路径
+  // ④ 聊天模式：后端盯梢 + 面板开关 + 自动刷新 + 快路径
   if (/chatWatchTick/.test(idx)) ok('后端有聊天模式盯梢循环（新消息 → 通知）')
   else bad('后端没有盯梢循环 —— 会话模式没进插件')
-  if (/chatWatch: z\.boolean\(\)\.default\(true\)/.test(idx)) ok('chatWatch 默认开（2026-10-24 使用者定稿：默认开启，要关就整个关掉）')
-  else bad('chatWatch 默认值不对 —— 使用者拍板过默认开')
+  /* 🔴 2026-10-26 主人改口：「聊天模式默认关闭为什么」⇒ 默认必须是 **关**。
+   *   理由：默认开 = 一装上就开始读别人私信 + 自动回话 + 拉常驻会话烧额度，
+   *   对没读说明书的人是意外行为。用户明确点开才工作。
+   *   老用户不受影响（值已在 config.json + intent 自愈会恢复）。 */
+  if (/chatWatch: z\.boolean\(\)\.default\(false\)/.test(idx)) ok('chatWatch 默认关（2026-10-26 主人定：用户点开才工作）')
+  else bad('chatWatch 默认值不对 —— 现在必须是 false（默认开会让没读说明书的人被动收到自动回话）')
   // 🔴 防倒退：DEFAULTS 表必须也带 chatWatch（2026-10-24 事故：只加了 zod 没加 DEFAULTS，
   //    clampPatch 只放行 DEFAULTS 里的键 ⇒ 面板开关点了没反应）
-  if (/DEFAULTS = \{[\s\S]{0,900}?chatWatch: true/.test(idx)) ok('DEFAULTS 表带 chatWatch 且默认 true（面板的 patch 不会被 strip）')
+  if (/DEFAULTS = \{[\s\S]{0,1200}?chatWatch: false/.test(idx)) ok('DEFAULTS 表带 chatWatch 且默认 false（面板的 patch 不会被 strip）')
   else bad('DEFAULTS 表没有 chatWatch（或默认值不对）—— 面板开关会点了没反应')
   if (/chatWatchSec: z\.natural\(\)\.default\(30\)/.test(idx)) ok('看消息间隔默认 30 秒（使用者定的）')
   else bad('看消息间隔默认值不对')
@@ -1271,7 +1284,7 @@ try {
   } catch (e) { bad(`4m 检查跑不起来：${e.message}`) }
 
   /* ═══ 2026-10-25 拆分守卫（原来这里是一大段桌宠检查）═══
-   *  桌宠整体搬去 dsh-deskpet 了：pet-window.ps1 / PetHost / 人格档案 / pet* 配置
+   *  桌宠整体搬去 dsh-deskpet 了：窗口脚本 / PetHost / 人格档案 / pet* 配置
    *  都不在抖音仓库里了。这里改成守"拆分必须成立"的几条硬规矩：
    *    ① 抖音仓库里不许再有桌宠文件（搬走了就是搬走了，别留一半）
    *    ② 抖音侧不写 pet-window-state.json、不拉 PetHost（两个都干会互相覆盖）

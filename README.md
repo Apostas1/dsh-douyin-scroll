@@ -87,7 +87,7 @@ cd dsh-douyin-scroll
 node selfcheck.mjs     # 全部通过再装
 
 # 安装（本地目录链接，开发/自用）
-dsh plugin --profile web add link:D:\aiagent\deepseek\dsh-douyin-scroll
+dsh plugin --profile web add link:<本目录>
 ```
 
 ⚠️ 装完**必须重启一次 dsh**（bundle 层要重启才组装）。然后进 **设置 → 刷抖音**。

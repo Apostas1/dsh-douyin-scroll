@@ -25,7 +25,7 @@ import urllib.parse
 import httpx
 
 HOME = home_str()
-PLUGIN = r"D:\aiagent\deepseek\dsh-douyin-scroll"
+PLUGIN = r"<本目录>"
 NODE = r"C:\Program Files\nodejs\node.exe"
 SIGNER = os.path.join(PLUGIN, "tools", "dy-signer.mjs")
 VENVPY = os.path.join(HOME, ".venv", "Scripts", "python.exe")

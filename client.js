@@ -631,7 +631,15 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
         finally { setBusy('') }
       }
 
-      /** 读人设（使用者自己那份；没写就用插件自带/默认） */      const loadPersona = async () => {
+      /**
+       * 读人设。
+       * ⭐ 2026-10-26：后端现在会多给三样，面板要靠它们说真话：
+       *    effective       = **真正生效的那份内容**（自己写 → 插件自带 → 中性默认）
+       *    effective_label = 那一份叫什么（给用户看的来源说明）
+       *    default_text    = 中性默认（「填入中性默认」按钮用）
+       * 以前只读 text（= 自己那份），没写就空框 ⇒ 用户以为人设丢了。
+       */
+      const loadPersona = async () => {
         if (persona !== null) { setPersona(null); return }
         setBusy('persona')
         try {
@@ -639,7 +647,9 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
           setPersona({
             text: String((r && r.text) || ''),
             custom: Boolean(r && r.custom),
-            defText: String((r && r.default_text) || ''),
+            effective: String((r && r.effective) || ''),
+            effectiveLabel: String((r && r.effective_label) || ''),
+            defaultText: String((r && r.default_text) || ''),
             hint: (r && r.hint) || '',
           })
         } catch (e) { say('读人设失败：' + String((e && e.message) || e), 'warn') }
@@ -1431,67 +1441,85 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
             )
           : null,
 
-        /* ── 卡 ⑥ 桌宠联动：一个开关（宠物本体在独立插件 dsh-deskpet 里）+ 补充人设 ── */
+        /* ── 卡 ⑥ 我的人设（桌宠联动开关 2026-10-26 按主人要求隐藏） ──
+         *   主人：「人设是不是该改成我的人设」⇒ 对，这份是**你的**那份，
+         *   不是泛称的"人设"。标题就叫「我的人设」。 */
         foldCfg
           ? h('div', { 'data-dy-card': '' },
-              h('div', { 'data-dy-title': '' }, '桌宠联动'),
-              h('div', { 'data-dy-sub': '' },
-                '桌宠是独立插件（设置 → 桌宠）。这里只有一个决定：刷抖音的状态要不要喂给她。下面「补充人设」是刷抖音写日报用的，跟桌宠无关。'),
+              h('div', { 'data-dy-title': '' }, '我的人设'),
       /* ⭐⭐ 2026-10-25 拆分：卡⑥从「桌宠控制台」变成「联动桌宠」一个开关。
        *   为什么缩水：桌宠独立成插件了（dsh-deskpet），她的开关 / 人格 / 弹幕三态 /
        *   语音 / 按钮条全在**设置 → 桌宠**那边。在这里控制它们就是跨插件伸手，
        *   两份配置互相覆盖的坑我们踩过一次（dmTo 被清空那次就是这么来的）。
-       *   这里只回答一个问题：**刷抖音的状态要不要喂给她**。 */
-              h('div', { 'data-dy-subblock': '' },
-                h('div', { 'data-dy-row': '' },
-                  h('div', { 'data-dy-grow': '' },
-                    h('div', { 'data-dy-title': '' }, '联动桌宠'),
-                    h('div', { 'data-dy-sub': '' },
-                      (cfg.petLinkTo !== false
-                        ? '✅ 开着：刷抖音的状态会喂给桌宠 —— 她在气泡里说「正一条条看视频文案」这种话，就是从这里来的。'
-                        : '关着：桌宠不知道你在刷抖音，她自己待着（这不是故障）。'))),
-                  h(Switch, {
-                    on: cfg.petLinkTo !== false,
-                    disabled: busy === 'patch',
-                    onChange: (v) => patch({ petLinkTo: v },
-                      v ? '✅ 联动开了：她知道你在刷抖音了' : '联动关了：她不再知道抖音的状态'),
-                  }))),
+       *   这里只回答一个问题：**刷抖音的状态要不要喂给她**。
+       *
+       * 🔴 2026-10-26 主人：「联动桌宠选项暂时不要出现」⇒ 用 HIDE_PET_LINK 关掉。
+       *   为什么用常量而不是删代码：
+       *     · 删了以后要恢复就得重写一遍（这块逻辑+文案不短）
+       *     · 后端 petLinkTo 还在工作（默认 true，状态源照常注册），
+       *       只是**面板不让人看见/改它** —— 主人要的是"别出现在界面上"，
+       *       不是"断掉联动"。
+       *   要恢复：把下面的 HIDE_PET_LINK 改成 false 即可，别改别的。 */
+              (() => {
+                const HIDE_PET_LINK = true
+                if (HIDE_PET_LINK) return null
+                return h('div', { 'data-dy-subblock': '' },
+                  h('div', { 'data-dy-row': '' },
+                    h('div', { 'data-dy-grow': '' },
+                      h('div', { 'data-dy-title': '' }, '联动桌宠'),
+                      h('div', { 'data-dy-sub': '' },
+                        (cfg.petLinkTo !== false
+                          ? '✅ 开着：刷抖音的状态会喂给桌宠 —— 她在气泡里说「正一条条看视频文案」这种话，就是从这里来的。'
+                          : '关着：桌宠不知道你在刷抖音，她自己待着（这不是故障）。'))),
+                    h(Switch, {
+                      on: cfg.petLinkTo !== false,
+                      disabled: busy === 'patch',
+                      onChange: (v) => patch({ petLinkTo: v },
+                        v ? '✅ 联动开了：她知道你在刷抖音了' : '联动关了：她不再知道抖音的状态'),
+                    })))
+              })(),
                 /* ⚠️ 2026-10-25 主人：「走动模式去掉，不生效也没动画」⇒ 这块直接删掉。 */
-      /* ── 我的人设（补充文字） ──
-                 🔴 2026-10-25 主人：「插件面板人设跟人格重合了」
-                 查下来两者分工其实是：
-                   · 人格（MBTI）  = 她的**性格档位**，决定口吻/弹幕台词/小动作（面板里 4 张卡）
-                   · 我的人设      = 附加在人格之上的**补充文字**（你额外想让她遵守的话）
-                 以前两块的标题和描述都像"定义她是谁"，看着就是一个功能。
-                 现在把这里改名成「补充人设（可选）」并说明分工，不再跟人格抢位置。 */
+      /* ── 我的人设
+       *   🔴 2026-10-26 主人：「人设默认的是不是有问题，人设是不是该改成我的人设」
+       *      两件事一起改：
+       *        ① 叫法 —— 卡片标题「人设」→「我的人设」（这是**你的**那份，不是泛称）
+       *        ② 默认有真问题 —— 面板原来只读 $DOUYIN_HOME/persona.md，
+       *           而实际生效的是**插件自带那份**（16970 字节完整人设），
+       *           于是文本框空着、提示写"用的是默认"，看着就像人设丢了。
+       *           现在后端会返回 effective（真正生效的内容）+ effective_label（哪一份），
+       *           面板直接展示它，并在上面写清"现在用的是哪一份"。
+       */
               h('div', { 'data-dy-subblock': '' },
                 h('div', { 'data-dy-row': '' },
                   h('div', { 'data-dy-grow': '' },
-                    h('div', { 'data-dy-title': '' }, '补充人设（可选）'),
                     h('div', { 'data-dy-sub': '' },
-                      '人格选好性格，这里再补几句你额外想让她遵守的话（写日报时也用这份）。不写也行。')),
+                      '人格是性格档位，这里补几句你额外想让她遵守的话（写日报时也用这份）。')),
                   h('button', { 'data-dy-mini': '', disabled: busy === 'persona', onClick: loadPersona },
                     persona === null ? '展开' : '收起')),
                 persona !== null
                   ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
-                    h('div', { 'data-dy-sub': '' },
-                      persona.custom ? '正在用你写的这份' : (persona.hint || '还没写自己的 —— 现在用的是默认人设')),
+                    // ⭐ 说清"现在生效的是哪一份"（别再让用户以为自己的人设丢了）
+                    h('div', { 'data-dy-sub': '', style: { fontWeight: '500' } },
+                      persona.custom
+                        ? '✅ 正在用你写的这份'
+                        : `ℹ️ 你没写自己的 —— 现在用的是「${persona.effective_label || '插件自带的那份'}」，内容就在下面`),
                     h('textarea', {
                       'data-dy-input': '', rows: 8,
-                      value: persona.text || '',
+                      // 没有自己那份时，把**真正生效的内容**显示出来（而不是空框）
+                      value: persona.text || (persona.custom ? '' : (persona.effective || '')),
                       placeholder: '比如：\n- 说话软一点、别腻\n- 简短，别写成客服\n- 不透露任何私人信息',
                       onChange: (e) => setPersona({ ...persona, text: e.target.value }),
                     }),
                     h('div', { 'data-dy-row': '' },
                       h('button', {
                         'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: savePersona,
-                      }, '保存'),
+                      }, persona.custom ? '保存' : '保存为我的人设'),
                       h('button', {
                         'data-dy-mini': '', disabled: Boolean(busy),
-                        onClick: () => setPersona({ ...persona, text: persona.defText || '' }),
-                      }, '填入默认那份看看'),
+                        onClick: () => setPersona({ ...persona, text: persona.defaultText || '' }),
+                      }, '填入中性默认'),
                       h('div', { 'data-dy-grow': '' }),
-                      h('span', { 'data-dy-sub': '' }, '留空保存 = 退回默认')))
+                      h('span', { 'data-dy-sub': '' }, '留空保存 = 退回上一份（自己写 → 插件自带 → 中性默认）')))
                   : null),
             )
           : null,

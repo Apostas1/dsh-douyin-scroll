@@ -39,7 +39,7 @@
 ```
 
 **`DOUYIN_HOME` 填什么？**
-默认是 `<DSH_HOME>/douyin-duty`（Windows 上通常是 `D:\DeepSeek\dsh-data\douyin-duty`）。
+默认是 `<DSH_HOME>/douyin-duty`（Windows 上通常是 `<DSH_HOME>\douyin-duty`）。
 这个目录里存着你的登录 Cookie、配置、报告 —— **它跟 DSH 里的插件共用同一份**，
 所以 DSH 里登录过了，这里不用再登。
 

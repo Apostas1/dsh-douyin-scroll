@@ -700,8 +700,8 @@ else if (who && t.includes(who)) return { status: 'already-open', matched: { sec
 后果：只要界面上有**任何一个**会话开着（上次读过谁就是谁），再发给另一个人时，
 工具会直接返回"已打开"，并把**当前那个人的 sec_uid** 当成目标。
 
-实测：界面开着「枫眠」→ `--to 某帅气用户`（只给昵称）
-⇒ 返回 `ok:true, to:"某帅气用户", to_sec_uid: <枫眠的 id>`。
+实测：界面开着「枫眠」→ `--to 示例好友`（只给昵称）
+⇒ 返回 `ok:true, to:"示例好友", to_sec_uid: <枫眠的 id>`。
 
 **改法**：只认**右栏头部**（`[class*="componentsRightPanel"]` 第一行）作判据，且必须**精确相等**；
 对不上就老老实实去列表里点。
