@@ -12,35 +12,45 @@
 「探明呗」（探什么：能不能把私信投给一条**独立的后台会话**，不占前台窗口）
 「后台聊天模式想查询这个窗口刷了几条视频怎么做？」
 
-### 探明了什么（全部一手证据）
+### 探明了什么（全部一手证据，两轮探查）
 
-- **常驻后台会话可行**：宿主的 Agent Teams 服务（`agentTeams`）就是干这个的——
-  队友是独立会话、收信自动醒来跑一轮、跑完待命、登记在 Lead 会话日志里跨重启可唤醒。
-- **实测通过**：拉起队友 `dm-duty-fish`（读 `prompts/persona.md` 的人设）→
-  转一条模拟私信 → 它自动醒来、按人设回话、`douyin_dm` 发出（`sent:true`+回读核实）。
-- **插件侧通道**：`ctx.get('agentTeams').sendMessage(leadAgent, {target, content})`
-  （cordis inspect 探明的宿主公开契约，与 send_message 工具同一条路）。
+- **第一轮（Agent Teams）**：`agentTeams.spawnTeammate` 确实存在且实测能回话，
+  但源码里有硬校验 `TEAM_LEAD_REQUIRED`（只有 Team Lead 角色能拉队友），
+  且 roster 挂在 Lead 会话名下——会话一关鱼就不在册。**不是正路**。
+- **第二轮（官方正路）**：`ctx.agents.create() / resume()` —— dsh-agent-loop
+  README 原话 "Plugins and hosts create agents through ctx.agents.create()"；
+  GUI 开新窗口、headless 跑轮（`douyin_run` 的底层）用的就是它。
+  生命周期挂在**宿主根 ctx**：插件重载不杀它，活到宿主退出——才是真常驻。
+- **自动续跑机制**：followup 持久 inbox → 唤醒驱动 → 跑到队列空 → idle 待命 →
+  再唤醒再跑；inbox 是持久化事件，崩溃后重放恢复（优雅关机会清空未消费的
+  排队——插件侧已用「投完即跑」缓解）。
+- **实测通过**：拉起会话 → 转模拟私信 → 按人设回话 → `douyin_dm` 发出
+  （`sent:true`+回读核实）。
 
 ### 加了什么
 
 - 配置 `chatWatchTarget`（zod enum + DEFAULTS 双登记）：
   - `lead` = 原行为，私信排队进前台会话（回话延迟 = 等当前轮跑完）；
   - `duty` = 投给值班小鱼，独立会话秒醒，**前台刷视频完全不受打扰**。
-- **缺席回退**：值班鱼不在册 / Teams 服务不在 / 发送失败 ⇒ 自动退回前台投递 +
-  日志与状态屏写明「值班鱼不在（原因）—— 退回前台会话」。消息绝不没人接。
+- **值班会话 = 插件自有**（`douyin-duty-fish-v1`）：拉起顺序 get → resume → create
+  （绝不重复 create 同一 id）；人设装在它私有作用域（编程式 per-agent persona）；
+  投递消息带 id/source/clientTimeZone 三件套（宿主校验要求）。
+- **缺席回退**：值班会话拉不起来 / 投递失败 ⇒ 自动退回前台投递 + 日志与状态屏
+  写明原因。消息绝不没人接。
 - 面板「消息投给」切换（前台会话 / 值班小鱼），带说明文案。
 - 「后台查前台进度」零开发成立：进度全在磁盘（`douyin_status` / `state.json` /
   `out/<日期>.md` / `seen.md`），任何会话都能查同一份真相。
 
 ### 边界（诚实说明）
 
-- 值班小鱼由 Lead 会话拉起；**Lead 会话没了她也就不在了**（roster 随会话存续）。
-  面板选 duty 而她不在时走回退，不会丢消息。
+- 值班会话活到宿主退出；**DSH 重启后历史还在磁盘上**，插件下一拍 resume 拉回
+  （跟主人续聊不用从头教）。优雅关机瞬间未消费的排队消息会丢（崩溃反而不丢）
+  ——插件投完即跑，窗口极小。
 - 值班鱼的私聊记忆在她的会话里，与前台各自独立（这是特性：私聊不污染工作上下文）。
 
 ### 自检
 
-335 → 340（+双登记、值班鱼投递、缺席回退、Agent Teams 通道、面板切换 5 条守卫）。
+335 → 342（+双登记、官方通道 get/resume/create、缺席回退、clientTimeZone、面板切换等守卫）。
 
 ---
 
