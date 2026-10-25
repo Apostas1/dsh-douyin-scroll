@@ -1702,6 +1702,29 @@ public class PetHostApp
         return sb.Append("\"").ToString();
     }
 
+    // ── 排障通道的安全阀 ──────────────────────────────────────────────────
+    // 🔴🔴 2026-10-25 真实事故（这次是我自己造成的）：
+    //    pet-test.txt 里留了一段测试 JS，内容是
+    //      fetch('/pet/chat', {text:'接手验证：桌宠对话链路'})
+    //    PollOnce 每 500ms 跑一次、读到文件就执行。原来的删除方式是
+    //      File.ReadAllText → File.Delete
+    //    两个**独立**步骤。只要 Delete 失败一次（antivirus 短暂锁、另一进程也在读、
+    //    或者上一次执行的 JS 自己又写了回来），下一拍就会再读到同一个文件、再执行一遍。
+    //    实测后果：**每 2 秒往会话里塞一条**，堆了 149 条同一句话在 next-turn，
+    //    每轮上下文被刷满。
+    //
+    //    正确做法（本段）：**先原子重命名再读**。
+    //      File.Move(src → src.running) 是原子操作，成功就意味着"我拿到了这个文件"，
+    //      别人（包括下一拍的我）再也读不到它。失败就跳过这一拍，绝不清读。
+    //    再加两道保险：① 一分钟最多执行 3 条排障脚本 ② 同一条内容连续出现直接丢弃。
+    static string LastTestCmd = null;
+    static int LastTestMinute = -1;
+    static int TestRunsThisMinute = 0;
+    static long LastClaimFailLogTicks = 0;
+    const int TEST_MAX_PER_MINUTE = 3;
+
+    static int TestMinuteOf(DateTime t) { return t.Hour * 60 + t.Minute; }
+
     static void PollOnce()
     {
         PushState();
@@ -1713,15 +1736,76 @@ public class PetHostApp
         //      走和真人点菜单**完全相同**的 SendAct() 路径 —— 这样「她的日记」这种
         //      **宿主侧原生动作**（不开页面窗、宿主自己开日记本）也能被实测，
         //      而不是只能靠手点。理由：日记窗一直没人验证过它到底能不能开。
+        //    ⚠️ 安全阀见上面 TEST_MAX_PER_MINUTE 那段注释（曾经每 2 秒重发、堆了 149 条）。
         try
         {
             string testFile = Path.Combine(Home, "pet-test.txt");
             if (File.Exists(testFile))
             {
-                string js = File.ReadAllText(testFile, Encoding.UTF8).Trim();
+                // ① 认领：用 **独占文件句柄**，不用 File.Move。
+                //
+                // 🔴🔴 2026-10-25 实测结论（这条比事故本身更值得记）：
+                //    File.Move 在这个环境里**恒定失败**：
+                //      claim failed (UnauthorizedAccessException hr=0x80070005) 对路径的访问被拒绝
+                //    但同一个文件：
+                //      · 宿主能看见（File.Exists=true，长度读得到）
+                //      · PowerShell / Node 里 renameSync 都成功
+                //      · ACL 跟宿主能正常读写的 pet-window-state.json 完全一样
+                //      · 只有一个 PetHost 实例、没有 .running 残留
+                //    ⇒ rename 需要的是**目录的删除/改名权限**，而宿主从 DSH 那儿继承的令牌
+                //      在这一项上被拒（同一用户、同一会话，但令牌权限集不同）。
+                //    结论：**不要用 rename 做认领**，它在这里根本走不通。
+                //
+                // ✅ 现在的做法：FileShare.None 独占打开 → 读内容 → 立刻删除。
+                //    · 独占打开是**文件级**操作，只要对文件本身有读权限就行（宿主有）
+                //    · FileShare.None 天然互斥：第二个打开者会直接 IOException，
+                //      所以同一个文件不可能被两拍同时读（这正是当初 149 条重复的根因）
+                //    · 删不掉也不重读：内容已经在手里，这一拍一定只执行一次
+                string js = null;
+                bool claimed = false;
+                try
+                {
+                    using (var fs2 = new FileStream(testFile, FileMode.Open, FileAccess.Read, FileShare.None))
+                    using (var sr2 = new StreamReader(fs2, Encoding.UTF8, true))
+                    {
+                        js = sr2.ReadToEnd().Trim();
+                    }
+                    claimed = true;   // 拿到了独占句柄并读完 ⇒ 这一条归我
+                }
+                catch (Exception exm)
+                {
+                    // 别人正拿着它 ⇒ 下一拍再试。这是正常竞争，不是错误。
+                    if (DateTime.UtcNow.Ticks - LastClaimFailLogTicks > TimeSpan.TicksPerSecond * 30)
+                    {
+                        LastClaimFailLogTicks = DateTime.UtcNow.Ticks;
+                        int hr = 0;
+                        try { hr = System.Runtime.InteropServices.Marshal.GetHRForException(exm); } catch { }
+                        Log("test channel: 独占打开失败（" + exm.GetType().Name + " hr=0x" + hr.ToString("X8") + "): " + exm.Message + " ⇒ 下一拍再试");
+                    }
+                }
+                if (!claimed) return;
+                // 删掉它：删不掉也无所谓（下次独占打开照样能读，且内容已消费）
                 try { File.Delete(testFile); } catch { }
+
                 if (js.Length > 0)
                 {
+                    // ② 限流：一分钟最多 3 条，防"某个脚本自己又写回来"变成死循环
+                    int minute = TestMinuteOf(DateTime.Now);
+                    if (minute != LastTestMinute) { LastTestMinute = minute; TestRunsThisMinute = 0; }
+                    if (TestRunsThisMinute >= TEST_MAX_PER_MINUTE)
+                    {
+                        Log("test channel: 本分钟已执行 " + TestRunsThisMinute + " 条，超出上限 " + TEST_MAX_PER_MINUTE + " ⇒ 丢弃这条（防死循环）");
+                        return;
+                    }
+                    // ③ 同一条内容连续出现 ⇒ 丢弃（真正的排障脚本不会重复灌同一句）
+                    if (js == LastTestCmd)
+                    {
+                        Log("test channel: 与上一条完全相同 ⇒ 丢弃（防重放）");
+                        return;
+                    }
+                    LastTestCmd = js;
+                    TestRunsThisMinute++;
+
                     if (js.StartsWith("act:", StringComparison.Ordinal))
                     {
                         string act = js.Substring(4).Trim();

@@ -669,7 +669,76 @@ try {
   // 值必须是 UTC 或规范 IANA 名，否则 dsh-time-context 直接 throw TypeError
   if (/Intl\.DateTimeFormat[\s\S]{0,200}timeZone/.test(relay)) ok('时区值会经过 Intl 规范化（非规范名 DSH 会 throw）')
   else warn('pet-relay 里没看到 Intl 规范化时区 —— 确认一下传出去的是不是规范名')
+  // 🚨 必须有"清队列"的止损口（2026-10-25 事故：149 条堆在 next-turn，只能手改会话）
+  if (/\/api\/douyin-duty\/pet\/queue\/clear/.test(idxCode) && /clearPetQueue/.test(idxCode)) {
+    ok('有 /pet/queue/clear 止损口（队列堆住时能清，不用手改会话）')
+  } else {
+    bad('没有清队列的接口 —— 下次队列堆住又只能手改会话文件')
+  }
+  // 清队列只清 pet-relay，不许误伤真人输入（默认不是 all）
+  if (/only === 'all'/.test(idxCode) && /'pet-relay'/.test(idxCode)) ok('清队列默认只清转达、不碰真人输入')
+  else warn('清队列的 scope 看着可疑 —— 确认默认不会误删主人自己的输入')
 } catch (e) { bad(`投递检查跑不起来：${e.message}`) }
+
+/* ── 4j-4. 排障通道不许变成"定时重发器"（2026-10-25 事故）──
+ * 🔴 事故经过：pet-test.txt 里留了一段测试 JS，
+ *      fetch('/pet/chat', {text:'接手验证：桌宠对话链路'})
+ *    旧的通道实现是「ReadAllText → Delete」两步分离：
+ *      · Delete 失败一次（文件被锁 / 另一进程也在读）⇒ 下一拍再读到同一文件
+ *      · 500ms 一拍 ⇒ **每 2 秒往会话里塞一条**
+ *    实测堆了 149 条同一句话在 agent 的 next-turn 里，每轮上下文被刷满。
+ *    （发现方式：主人在窗口里看到一堆自己没发过的"接手验证"，一问才知道不是他点的。）
+ *
+ * ⚠️ 修的时候又踩了一次（值得记）：第一版用 **File.Move 原子 rename** 做认领，
+ *    在这个环境里**恒定失败** —— hr=0x80070005「对路径的访问被拒绝」。
+ *    但同一个文件：宿主 File.Exists 为真、能读到长度；PowerShell/Node 里 rename 成功；
+ *    ACL 跟宿主能正常读写的 pet-window-state.json 一模一样；只有一个实例、无 .running 残留。
+ *    ⇒ rename 需要的是**目录的改名/删除权限**，而宿主从 DSH 继承的令牌在这一项上被拒。
+ *    结论：**认领不能用 rename**。
+ *
+ *    正解：**FileShare.None 独占打开** —— 纯文件级操作，只要对文件有读权限；
+ *    独占句柄天然互斥（第二个打开者直接 IOException），所以同一条脚本不可能被两拍同时读。
+ *    实测：故意把文件留在原地 8 秒，执行次数 1096→1096，一条都没多加。
+ */
+console.log('\n4j-4. 排障通道不许定时重发（防死循环）')
+try {
+  const cs = readFileSync(join(here, 'tools', 'pet-host', 'PetHost.cs'), 'utf8')
+  const csCode = cs.split('\n')
+    .filter((l) => {
+      const t = l.trim()
+      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))
+    })
+    .join('\n')
+  // ① 认领必须用 FileShare.None 独占打开（rename 在这个环境里被拒，实测过）
+  if (/FileShare\.None/.test(csCode) && /FileMode\.Open/.test(csCode)) {
+    ok('排障文件用 FileShare.None 独占认领（天然互斥，不靠 rename）')
+  } else {
+    bad('排障文件认领没走独占句柄 —— 两拍同时读到同一文件就会重复执行（149 条的来源）')
+  }
+  // ② 不许再用 rename 做认领（这条是踩过的坑，防止有人"优化"回去）
+  if (/File\.Move\(testFile/.test(csCode)) {
+    bad('又用 File.Move 做认领了 —— 这个环境里它恒定 Access Denied（实测），必须用独占句柄')
+  } else {
+    ok('没有再用 File.Move 做认领（那个方案在本机不可用）')
+  }
+  // ③ 认领会失败时直接 return，不许"读读看"
+  if (/if \(!claimed\) return;/.test(csCode)) ok('认领失败就跳过这一拍（绝不清读）')
+  else bad('认领失败还往下读 —— 竞态下照样重复执行')
+  // ④ 限流
+  if (/TEST_MAX_PER_MINUTE/.test(csCode) && /TestRunsThisMinute >= TEST_MAX_PER_MINUTE/.test(csCode)) {
+    ok('有每分钟执行上限（防某个脚本自己写回来变成死循环）')
+  } else bad('排障通道没有限流 —— 一旦形成循环就停不下来')
+  // ⑤ 相同内容去重
+  if (/LastTestCmd/.test(csCode) && /与上一条完全相同/.test(cs)) ok('相同内容连续出现会丢弃（防重放）')
+  else bad('排障通道没有相同内容去重')
+  // ⑥ 内容消费掉之后要尝试删除（删不掉也不影响正确性，但不该完全不删）
+  if (/File\.Delete\(testFile\)/.test(csCode)) ok('读完会尝试删除排障文件（删不掉也不重读）')
+  else warn('读完没有删除排障文件 —— 文件会一直留着，虽然不会重放但不干净')
+
+  // ⑤ 宿主源码里不许再出现"跑了就删的测试文件会被重建"这种组合
+  if (/pet-test\.txt/.test(csCode)) ok('排障文件路径仍是 pet-test.txt（跟文档一致）')
+  else warn('排障文件改名了 —— 文档/脚本里的调用点要跟着改')
+} catch (e) { bad(`排障通道检查跑不起来：${e.message}`) }
 
 /* ── 4j-3. PetHost 请求体必须按 UTF-8 解（中文不许变问号） ──
  * 🔴 2026-10-25 真凶：宿主里手写的 TcpListener 用 Encoding.ASCII 解整个请求，

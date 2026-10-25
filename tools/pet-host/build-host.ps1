@@ -41,8 +41,33 @@ if ($running.Count -gt 0) {
   }
   Start-Sleep -Seconds 1
 }
-if (Test-Path $target) { Copy-Item $target "$target.bak" -Force }
-Copy-Item "$tmp\PetHost.exe" $target -Force
+# 2026-10-25: Copy-Item -Force can silently do NOTHING when the target is locked.
+# Symptom: build reports success and the timestamp changes, but the old binary still runs.
+# Fix: delete the old file explicitly, File.Copy it, then compare SHA256.
+# Every step throws loudly on failure; nothing is silent.
+if (Test-Path $target) {
+  try { Copy-Item $target "$target.bak" -Force } catch { Write-Output ("  backup failed: " + $_.Exception.Message) }
+  $removed = $false
+  for ($attempt = 0; $attempt -lt 10 -and -not $removed; $attempt++) {
+    # NOTE: keep this file pure ASCII. PS 5.1 reads a BOM-less .ps1 as ANSI and
+    # any non-ASCII byte (emoji/CJK) can break quote pairing -> "Unexpected token".
+    # That is exactly how an emoji in a comment broke this script once.
+    try { Remove-Item $target -Force -ErrorAction Stop; $removed = $true } catch { Start-Sleep -Milliseconds 400 }
+  }
+  if (-not $removed) { throw "cannot delete old $target (still locked) - stop PetHost and retry" }
+}
+try {
+  [System.IO.File]::Copy("$tmp\PetHost.exe", $target, $true)
+} catch {
+  throw ("copy to target failed: " + $_.Exception.Message)
+}
+# Byte-for-byte check: what we deploy must BE the freshly built file.
+$srcHash = (Get-FileHash "$tmp\PetHost.exe" -Algorithm SHA256).Hash
+$dstHash = (Get-FileHash $target -Algorithm SHA256).Hash
+if ($srcHash -ne $dstHash) {
+  throw ("deployed exe does not match the freshly built one!`n  built:    $srcHash`n  deployed: $dstHash")
+}
+Write-Output ("hash verified: " + $srcHash.Substring(0, 16) + "...")
 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 $fi = Get-Item $target

@@ -3134,6 +3134,60 @@ export function apply(ctx, config) {
     return _mkUserMsgCache
   }
 
+  /**
+   * 清掉桌宠堆在 agent 收件箱里的**待处理**消息（不动已落盘的历史）。
+   *
+   * 🔴 为什么需要它（2026-10-25 真实事故）：
+   *   我的排障通道 `pet-test.txt` 里留了一段测试 JS，内容是
+   *   `fetch('/pet/chat', {text:'接手验证：桌宠对话链路'})`。
+   *   宿主每 500ms 轮询这个文件、读到就执行一次 —— 于是**每 2 秒往会话里塞一条**，
+   *   很快堆了 149 条同一句话在 next-turn 里，每轮上下文被刷满。
+   *   事故止损要靠一个"能清队列"的正式接口，而不是手工改会话文件。
+   *
+   * 用 agent 自己的 `inbox.clear()`：那是宿主公开的取消待处理输入，
+   * **不会** abort 正在跑的这一轮（cancel() 才会）。所以清队列不会打断当前对话。
+   *
+   * @param {{only?: 'pet-relay'|'all'}} [opts] 默认只清桌宠自己发的（不误伤真人输入）
+   */
+  const clearPetQueue = (opts = {}) => {
+    const only = opts.only || 'pet-relay'
+    try {
+      const agents = (() => { try { return ctx.get('agents') } catch { return null } })()
+      if (!agents || typeof agents.list !== 'function') return { ok: false, error: 'agents 服务不可用' }
+      const roots = (() => { try { return agents.roots?.() || [] } catch { return [] } })()
+      const list = typeof agents.list === 'function' ? (agents.list() || []) : []
+      const target = (roots.length ? roots : list).filter(Boolean).pop()
+      if (!target) return { ok: false, error: '没有 live agent' }
+      const inbox = target.inbox
+      if (!inbox) return { ok: false, error: 'agent 没有 inbox（宿主版本不支持）' }
+      const before = {
+        nextTurn: (inbox.nextTurn?.length) || 0,
+        nextStep: (inbox.nextStep?.length) || 0,
+      }
+      if (only === 'all') {
+        inbox.clear()
+        const after = { nextTurn: (inbox.nextTurn?.length) || 0, nextStep: (inbox.nextStep?.length) || 0 }
+        log(`桌宠队列清理（全部）：next-turn ${before.nextTurn}→${after.nextTurn}，next-step ${before.nextStep}→${after.nextStep}`)
+        return { ok: true, mode: 'all', before, after, removed: (before.nextTurn + before.nextStep) - (after.nextTurn + after.nextStep) }
+      }
+      // 只清 pet-relay：逐条 remove，真人的输入一条都不碰
+      let removed = 0
+      for (const targetName of ['nextTurn', 'nextStep']) {
+        const arr = (inbox[targetName] || []).slice()   // 先快照，remove 会改底层
+        for (const m of arr) {
+          const rpc = String(m?.source?.rpcId || '')
+          if (!rpc.startsWith('pet-relay')) continue
+          try { if (inbox.remove(m.id)) removed++ } catch { /* 已经不在队列里 */ }
+        }
+      }
+      const after = { nextTurn: (inbox.nextTurn?.length) || 0, nextStep: (inbox.nextStep?.length) || 0 }
+      log(`桌宠队列清理（只清转达）：移除 ${removed} 条，next-turn ${before.nextTurn}→${after.nextTurn}，next-step ${before.nextStep}→${after.nextStep}`)
+      return { ok: true, mode: 'pet-relay', before, after, removed }
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) }
+    }
+  }
+
   /** 从几句台词里随机挑一句（她自己的口吻，说"我正在干嘛"）。
    *  ⚠️ 只用于桌宠播报，不参与任何业务判断。 */
   const pickOf = (arr) => arr[Math.floor(Math.random() * arr.length)]
@@ -3675,6 +3729,20 @@ export function apply(ctx, config) {
         const r = diaryAdd(stateDir, o.text, { kind: String(o.kind || 'manual') })
         return sendJson(res, 200, { ok: r.ok, ...r })
       } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) }) }
+    }
+
+    /* ── 🔴 清掉桌宠堆在会话收件箱里的待处理消息（2026-10-25 事故后加的止损口）
+     * 事故：排障文件 pet-test.txt 里留的一段测试 JS 每 2 秒往 /pet/chat 发一次，
+     *       149 条同一句话堆在 next-turn 里。没有"清队列"的正式口子就只能手改会话。
+     * 用法：POST /pet/queue/clear          → 只清桌宠发的（真人输入不碰，默认）
+     *       POST /pet/queue/clear?all=1    → 全清
+     * 注意：走 agent.inbox.clear()/remove()，**不会 abort 正在跑的这一轮**。
+     * ── */
+    if (req.method === 'POST' && path === '/api/douyin-duty/pet/queue/clear') {
+      const u = new URL(req.url, 'http://x')
+      const all = ['1', 'true', 'yes'].includes(String(u.searchParams.get('all') || '').toLowerCase())
+      const r = clearPetQueue({ only: all ? 'all' : 'pet-relay' })
+      return sendJson(res, 200, r)
     }
 
     /* ── ⭐ 她的对话（主人 2026-10-24 的设计初衷）
