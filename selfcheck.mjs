@@ -1203,8 +1203,15 @@ try {
       else bad('im-send.mjs 选择器坏了（引号被换成别的字符）—— 发送会永远报"没登录"')
     } else bad('tools/im-send.mjs 不见了 —— 发送器没了')
     // ⑥ 值班鱼投递（2026-10-25 深夜两轮探查后的正式实现）：插件自有常驻会话
-    if (/chatWatchTarget: z\.enum\(\['lead', 'duty'\]\)/.test(idxM) && /chatWatchTarget: 'lead'/.test(idxM)) ok('chatWatchTarget 双登记（zod enum + DEFAULTS）')
-    else bad('chatWatchTarget 没双登记 —— 投递目标开关点了没反应（同 chatWatch 事故口径）')
+    if (/chatWatchTarget: z\.string\(\)\.default\('lead'\)/.test(idxM) && /chatWatchTarget: 'lead'/.test(idxM) && /chatWatchTarget: \['lead', 'duty'\]/.test(idxM)) ok('chatWatchTarget 三处齐（zod 默认 + DEFAULTS + ENUMS 钳制）')
+    else bad('chatWatchTarget 登记不全（zod/DEFAULTS/ENUMS）—— 投递目标开关点了没反应')
+    // 🔴 2026-10-25 深夜事故：写了 z.enum(...) ⇒ 宿主 schemastery 没有该方法 ⇒
+    //    整个插件 import 失败（MCP 工具全消失、桌宠不拉、health.json 停更），
+    //    而依赖/符号链接/bundles 全是好的 —— 排查方向被彻底带偏。
+    //    ⚠️ 要先剥注释再查：解释"别用 z.enum"的注释本身就会命中关键词（老坑）。
+    const idxNoComment = idxM.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+    if (/z\.enum\(/.test(idxNoComment)) bad('index.js 里出现 z.enum —— 宿主 schemastery 没有这个方法，整个插件会 import 失败')
+    else ok('没有 z.enum（宿主不支持，踩过整个插件加载失败）')
     if (/DUTY_SESSION_ID = 'douyin-duty-fish-v1'/.test(idxM) && /agents\.create\(/.test(idxM) && /agents\.resume\(/.test(idxM)) ok('值班会话走官方正路（agents.get → resume → create，绝不重复 create 同一 id）')
     else bad('值班会话没走 agents.create/resume 官方通道')
     if (/ownerCtx|生命周期挂在|插件重载不杀它/.test(idxM) || /照 headless runner 的用法/.test(idxM)) ok('值班会话生命周期说明在案（挂宿主根，不随插件重载而死）')

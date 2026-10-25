@@ -162,11 +162,16 @@ export const Config = !z ? undefined : z.object({
   /**
    * ⭐ 私信投递目标（2026-10-25 深夜，主人令「探明呗」后实测可行）：
    *   'lead' = 投进当前前台会话（原行为；回话延迟 = 等当前轮跑完）
-   *   'duty' = 投给常驻值班鱼（Agent Teams 队友 dm-duty-fish，独立会话：
-   *            私聊不占前台上下文，它自动醒来跑一轮、跑完待命，跨重启在册可唤醒）
-   *   值班鱼不在（没拉起/宿主没这服务）⇒ 自动退回前台 + 日志记一笔，绝不丢消息。
+   *   'duty' = 投给常驻值班鱼（插件自有会话 douyin-duty-fish-v1：私聊不占前台上下文，
+   *            它自动醒来跑一轮、跑完待命，跨重启 resume 拉回）
+   *   值班会话不在（拉不起来/投递失败）⇒ 自动退回前台 + 日志记一笔，绝不丢消息。
+   *
+   * ⚠️ 用 z.string() + ENUMS 校验，**绝不用 z.enum()** —— 宿主自带的 schemastery
+   *    没有 enum 方法（只有 union/const）。2026-10-25 深夜踩过：写了 z.enum 后
+   *    整个插件 import 失败，表现是「MCP 工具全消失 + 桌宠不拉 + health.json 停更」，
+   *    而依赖、符号链接、bundles 全是好的 —— 排查方向完全被带偏。
    */
-  chatWatchTarget: z.enum(['lead', 'duty']).default('lead').extra('volatile', true),
+  chatWatchTarget: z.string().default('lead').extra('volatile', true),
   /**
    * ⭐⭐ 2026-10-25 深夜 拆分：**桌宠不再是这个插件的配置项了。**
    *
@@ -370,6 +375,9 @@ export function apply(ctx, config) {
     notifyMode: ['file', 'toast', 'webhook', 'both'],
     webhookPreset: ['custom', 'wecom', 'feishu', 'dingtalk'],
     reportLevel: ['full', 'brief', 'off'],
+    // ⭐ 私信投给谁（2026-10-25 深夜）：schema 用 z.string()（宿主 schemastery 没有
+    //    z.enum），取值钳制收在这里 —— 写错的值会被打回默认 'lead'，不会静默失效。
+    chatWatchTarget: ['lead', 'duty'],
     // ⚠️ 2026-10-25 拆分：petPersona 搬去 dsh-deskpet 了（人格是宠物的事）
   }
   const clampPatch = (patch) => {
