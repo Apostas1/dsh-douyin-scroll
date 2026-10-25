@@ -41,7 +41,6 @@ import { matchLocalIntent, askModel, runAction, PET_ACTIONS } from './lib/pet-br
 // 🔴 她的眼睛（看主人在干什么）。主人：「要像人一样」。
 import { translateEvents } from './lib/pet-observe.mjs'
 // 🔴 她的日记（主人：「可以查看她今天写了什么感人的言论」）。
-import { diaryAdd, diaryRead, diaryDays, isTouching, todayKey } from './lib/pet-diary.mjs'
 // 🔴🔴 桌宠说的话怎么**真正送进 DSH 会话**（主人：「对话等同于我在文本框里打字」）。
 //    2026-10-25 前两版直接把消息 append 进会话日志，两次都把主人的会话写坏了
 //    （漏 source / 漏 id / 插在 tool-call 与 tool-result 中间 ⇒ 每轮 400）。
@@ -51,7 +50,6 @@ import { deliverToSession, makeUserMessage, relayLine } from './lib/pet-relay.mj
 // 🔴 她的**声音**（主人 2026-10-25：「语音输出要跟嘴型对上」）。
 //    edge-tts 云端中文音色合成 mp3 + 顺带给出句级时间轴（口型靠它对齐）。
 //    逻辑在 lib/pet-tts.mjs，纯函数 + 依赖注入，有离线单测（tools/pet-tts-test.mjs）。
-import { cleanForSpeech, synthesize, resolvePython, pickVoice, makeTtsCache, sweepTtsDir, MAX_TEXT, DEFAULT_VOICE } from './lib/pet-tts.mjs'
 
 export const name = 'douyin-scroll'
 export const inject = ['webServer', 'tools', 'settings']
@@ -162,31 +160,31 @@ export const Config = !z ? undefined : z.object({
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
   /**
-   * ⭐ 桌宠（2026-10-24 v5 从 dsh-deskpet 迁回：主人拍板「放到刷抖音面板里来」）。
-   *    petOn 总开关 / petPersona MBTI 人格 / petDanmaku + petDanmakuMode 弹幕（三态）。
-   *    素材在 assets/pet/（主人私货，.gitignore 挡着）——没素材时窗口不拉起、面板提示。
-   *    🔴 DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
+   * ⭐⭐ 2026-10-25 深夜 拆分：**桌宠不再是这个插件的配置项了。**
+   *
+   *   主人原话：「宠物，单独要做一个模块，然后要有一个联动抖音插件的选项就行了」
+   *
+   *   原来这里有 7 个 pet* 字段（petOn / petPersona / petDanmaku / petDanmakuMode /
+   *   petToolbar / petVoice / petVoiceName）—— 全部搬去 dsh-deskpet 自己的 Config。
+   *
+   *   为什么必须搬走而不是留着（照抄一起）：
+   *     ① 两个插件各有一份 petOn，主人关一个另一个还开着，表现为"关不掉"
+   *     ② 更有害的是**两套默认值**：桌面宠那边默认 infp，这边也默认 infp，
+   *        看着一样，但改了一边另一边不跟着变 —— 排障时会互相打架
+   *     ③ 面板里 7 个桌宠字段挤在抖音设置页里，跟刷抖音毫无关系
+   *
+   *   ⚠️ 留了一个兜底：zod 不认识的旧键会被 DSH 忽略（不报错），
+   *      所以主人机器上 config.json 里残留的 pet* 字段**不会炸**，只是不再生效。
+   *      它们的值已经迁到 $DSH_HOME/deskpet/config.json 了。
    */
-  petOn: z.boolean().default(true).extra('volatile', true),
-  petPersona: z.string().default('infp').extra('volatile', true),
-  petDanmaku: z.boolean().default(false).extra('volatile', true),
-  /** ⭐ 2026-10-25 主人：「我要的是全屏弹幕跟局域弹幕，但是你好像都用一个窗口画了」
-   *  off   = 关
-   *  local = 局域弹幕（只在她自己那个窗口里飘，跟着她走）
-   *  full  = 全屏弹幕（宿主开独立的全屏覆盖窗，铺满整个屏幕、点击穿透） */
-  petDanmakuMode: z.string().default('off').extra('volatile', true),
-  /** ⭐ 2026-10-25 深夜 主人：「最低排按钮要可以隐藏」
-   *  false = 底部按钮条收起（#dock 加 .tool-off，右键菜单/这里都能叫回来）。
-   *  默认 true：藏起来之后新手找不到入口，所以默认让她露着。 */
-  petToolbar: z.boolean().default(true).extra('volatile', true),
-  /** ⭐ 2026-10-25 深夜 主人：「你能接入语音输出吗…其中语音输出要跟嘴型对上」
-   *  语音方案（实测过）：edge-tts 云端中文音色 zh-CN-XiaoyiNeural，
-   *  嘴型用**音频振幅包络**驱动 mouthOpen —— 声音响她就张嘴，这是天生对齐，
-   *  不需要 viseme/音素表（那要额外模型，而且中文音素表拿不到）。
-   *  petVoice=false 时她完全不出声（默认关：突然出声会吓人，主人自己开）。 */
-  petVoice: z.boolean().default(false).extra('volatile', true),
-  /** 语音音色（edge-tts 的 ShortName）。留空 = zh-CN-XiaoyiNeural。 */
-  petVoiceName: z.string().default('zh-CN-XiaoyiNeural').extra('volatile', true),
+  /**
+   * ⭐ 联动桌宠（主人：「要有一个联动抖音插件的选项就行了」）
+   *   on  = 把「我现在在干嘛」提供给桌宠（它会在气泡/弹幕里说出来）
+   *   off = 不给，桌宠自己待着
+   * ⚠️ 这是**单向**的：只往外提供状态，不反过来控制桌宠。
+   *   桌宠在不在、开不开语音，全是它自己的事（那边的 petLink 才是"我要不要听"）。
+   */
+  petLinkTo: z.boolean().default(true).extra('volatile', true),
   /**
    * ⭐ 2026-10-24 定稿（使用者：「我要的是迁移，不是开发新功能」）：
    *    聊天模式 = 今早实测那套的「读」半边（30 秒一读 + 通知 + 状态屏）。
@@ -300,8 +298,8 @@ export function apply(ctx, config) {
     // ⭐ 聊天模式（2026-10-24 定稿：默认开启，使用者拍板；要关就整个关掉）。
     //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
     chatWatch: true, chatWatchSec: 30,
-    petOn: true, petPersona: 'infp', petDanmaku: false, petDanmakuMode: 'off',
-    petToolbar: true, petVoice: false, petVoiceName: 'zh-CN-XiaoyiNeural',
+    // ⭐ 2026-10-25 拆分：7 个 pet* 字段全部搬去 dsh-deskpet 了，这里只留"要不要喂状态给它"
+    petLinkTo: true,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
@@ -337,7 +335,7 @@ export function apply(ctx, config) {
     notifyMode: ['file', 'toast', 'webhook', 'both'],
     webhookPreset: ['custom', 'wecom', 'feishu', 'dingtalk'],
     reportLevel: ['full', 'brief', 'off'],
-    petPersona: ['infp', 'entp', 'esfp', 'istj'],
+    // ⚠️ 2026-10-25 拆分：petPersona 搬去 dsh-deskpet 了（人格是宠物的事）
   }
   const clampPatch = (patch) => {
     // ⭐ 只认 schema 里真有的字段。
@@ -2975,14 +2973,28 @@ export function apply(ctx, config) {
     ctx.effect(() => () => clearInterval(cw), 'douyin-duty: 聊天盯梢')
   } catch (e) { log(`聊天盯梢没起来：${e?.message ?? e}`) }
 
-  /* ─────────────── ⭐ 桌宠（2026-10-24 v2：桌面级置顶窗口） ───────────────
-   * 主人验收 0.4.0 后两条指令：①图裂了（素材在 layers/ 子目录 + 带空格层名，已修）；
-   * ②「悬浮在所有窗口上」——网页浮层出不了 DSH 窗口 ⇒ 桌宠搬进独立置顶小窗。
-   * 这层是**状态源**：聚合真实状态 + 写 pet-window-state.json（桌面窗轮询它）。
-   * 桌面窗本体在 tools/pet-window.py（WPF Topmost 透明窗），由 petKeeper 拉起/收掉。
-   */
-  const petSpriteDirOf = () => join(pluginDir, 'assets', 'pet', 'sprite')
-  const petManifestOf = () => readJson(join(petSpriteDirOf(), 'manifest.json'), null)
+  /* ══════════════════════════════════════════════════════════════════════
+     ⭐⭐ 桌宠状态源（2026-10-25 拆分后唯一保留的桌宠职责）
+     ──────────────────────────────────────────────────────────────────────
+     主人：「宠物，单独要做一个模块，然后要有一个联动抖音插件的选项就行了」
+
+     拆分后这里只剩**聚合真实状态**这一件事（petStateOf）——
+     "刷抖音刷到哪一步了"只有抖音知道，宠物想知道就必须来问。
+
+     搬去 dsh-deskpet 的（不要在这里再加回来）：
+       素材路径 / 人格档案 / pet-window-state.json 写入 / petSay 写文件 / 日记
+       窗口意图文件（pet-cmd.json）/ 拉起 PetHost.exe
+
+     为什么必须走，不能"留一份继续写"：
+       两个插件都写同一个 pet-window-state.json ⇒ **后写的把前写的整个覆盖掉**。
+       抖音每 10 秒写一次、宠物每 10 秒也写一次，谁后落盘谁赢。
+       表现就是：她在气泡里说的话**随机消失**、刚切的弹幕模式**随机回弹**。
+       这不是理论风险 —— 抖音那边原来的 petWinWrite 就在干这件事
+       （注释里那句「keeper 一写就把她刚说的话抹掉」的坑，本质上就是同一个病）。
+
+     连接方式：下面 registerPetStateSource() 往 ctx 里登记一个状态源，
+       宠物那侧 collectSources() 会读到它。**宠物不认识抖音，抖音不碰窗口。**
+     ══════════════════════════════════════════════════════════════════════ */
   const petStateOf = () => {
     const st = readJson(dutyStateFile, {})
     const cw = readJson(join(stateDir, 'chat-watch-state.json'), {})
@@ -3010,145 +3022,57 @@ export function apply(ctx, config) {
         new_text: String(cw.lastNewText || '').slice(0, 40),
         checked_ago: cw.lastCheckAt ? Math.round((Date.now() - cw.lastCheckAt) / 1000) : null,
       } : { on: false },
-      asset_ok: Boolean(petManifestOf()),
       now: Date.now(),
     }
   }
-  /* ── 桌宠 v5（2026-10-24 主人拍板「放到刷抖音面板里来」：从 dsh-deskpet 迁回）──
-   * petKeeper 拉起/收掉置顶窗（tools/pet-window.ps1），每 10 秒写状态文件 +
-   * 读窗口的意图文件（右键菜单 → 配置，不走 HTTP——代理会坑死请求，实测教训）。
-   * 人格档案在 prompts/deskpet-personas/（随包发布，通用文案）。
-   */
-  const petPersonaFile = (id) => join(pluginDir, 'prompts', 'deskpet-personas', `${id}.json`)
-  const petPersonaOf = (id) => {
-    const p = ENUMS.petPersona.includes(String(id)) ? String(id) : 'infp'
-    try { return JSON.parse(readFileSync(petPersonaFile(p), 'utf8')) } catch { return { id: p, name: p } }
-  }
-  const petWinStateFile = join(stateDir, 'pet-window-state.json')
-  /** 🔴 2026-10-24 主人抓的「她的所思所想看不见」根因：
-   *  petWinWrite() 每 10 秒被 keeper 全量覆盖写，而它的字面量里**没有 activity**，
-   *  于是 petSay() 刚写进去的那句话最多 10 秒就被抹掉 —— 页面那头永远读到空。
-   *  修法：写之前先把旧的 activity / ts 捞出来带上，让覆盖变成"合并"。 */
-  const petWinWrite = () => {
-    try {
-      let origin = ''
-      try { origin = ctx.webServer?.getOrigin?.() || '' } catch { origin = '' }
-      const prev = readJson(petWinStateFile, null) || {}
-      writeJson(petWinStateFile, {
-        on: Boolean(cfg.petOn),
-        persona: cfg.petPersona,
-        danmaku: Boolean(cfg.petDanmaku),
-        danmakuMode: String(cfg.petDanmakuMode || 'off'),
-        // ⭐ 2026-10-25 深夜：按钮条显不显示（主人「最低排按钮要可以隐藏」）
-        toolbar: cfg.petToolbar !== false,
-        // ⭐ 语音（主人「语音输出要跟嘴型对上」）——页面拿到这两个才决定要不要出声
-        voice: Boolean(cfg.petVoice),
-        voiceName: String(cfg.petVoiceName || 'zh-CN-XiaoyiNeural'),
-        link: { state: petStateOf().state },
-        sprite_dir: petSpriteDirOf(),
-        api: origin + '/api/douyin-duty',
-        // ⭐ 保留她这一刻在干嘛（不保留就会被这一行覆盖逻辑吃掉）
-        activity: typeof prev.activity === 'string' ? prev.activity : '',
-        activityAt: Number(prev.activityAt) || 0,
-        ts: Date.now(),
-      })
-    } catch { /* 写不进也不能出事 */ }
-  }
-  let petWinChild = null
-  let petSpawningAt = 0
-  let petOnPrev = null
+  /* ══════════════════════════════════════════════════════════════════════
+     ⭐⭐ 2026-10-25 拆分：这里原来有一大块「桌宠状态文件写入」
+     ──────────────────────────────────────────────────────────────────────
+     搬走的东西（都在 dsh-deskpet 了）：
+       petSpriteDirOf / petManifestOf   素材路径
+       petPersonaFile / petPersonaOf    人格档案
+       petWinWrite                      写 pet-window-state.json
+       petSay                           把"她在干嘛"写进状态文件 + 日记
+       petHideFile / pet-cmd.json       窗口意图文件
+       petWinChild / PetHost spawn      拉起窗口
+
+     为什么必须走，不能"留一份继续写"：
+       两个插件都写同一个 pet-window-state.json ⇒ **后写的把前写的整个覆盖掉**。
+       抖音每 10 秒写一次、宠物每 10 秒也写一次，谁后落盘谁赢。
+       表现就是：她在气泡里说的话**随机消失**、刚切的弹幕模式**随机回弹**。
+       这不是理论风险 —— 抖音那边原来的 petWinWrite 就在干这件事
+       （注释里那句「keeper 一写就把她刚说的话抹掉」的坑，本质上就是同一个病）。
+
+     ✅ 现在抖音只剩一件事：**回答"我在干嘛"**（petStateOf + 状态源）。
+        她那边的 activity / 日记 / 窗口，全是宠物自己管的。
+     ══════════════════════════════════════════════════════════════════════ */
   // 她跟主人的对话上下文（内存，最多 8 条；不入盘，重启即清）
   let petChatHistory = []
-  const petHideFile = () => join(stateDir, 'pet-hide.json')
-  /** 🔴 v5.5 拟人状态：把「这一刻在干嘛」用人话写进桌宠状态，她念出来。
-   *  只追加字段，不动其他键；写失败不影响正事。
-   *  ⚠️ 必须带 activityAt：页面靠它判断"这句话是不是新的"，不然同一条会一直闪。
-   *  ⭐ 2026-10-24 追加：同时记进**日记**（主人要「查看她今天写了什么感人的言论」）。
-   *     每句话都记，其中"感人"的标 star（判定见 lib/pet-diary.mjs）。 */
+  /* ⭐ 2026-10-25 拆分：`petSay` 从"写状态文件 + 写日记"改成**只在内存里记一句**。
+   *
+   *  原来它做两件事：
+   *    ① writeJson(pet-window-state.json, {activity})  → 宠物每次也会写这个文件
+   *    ② diaryAdd(stateDir, ...)                       → 日记归宠物了
+   *  两件事都越界了：① 会和宠物抢同一个文件（谁后落盘谁赢，表现为她的话随机消失）
+   *                ② 日记本在她自己家里，抖音不该往那儿写
+   *
+   *  ✅ 现在只记到内存：`lastActivity`，由状态源 read() 带出去。
+   *     宠物读到之后自己决定要不要说、要不要记日记 —— 那才是它的职责。 */
+  let lastActivity = ''
+  let lastActivityAt = 0
   const petSay = (text) => {
     try {
-      const j = readJson(petWinStateFile, null)
       const t = String(text || '')
       if (!t) return
-      writeJson(petWinStateFile, { ...(j || {}), activity: t, activityAt: Date.now(), ts: Date.now() })
-      try { diaryAdd(stateDir, t, { kind: 'activity' }) } catch { /* 日记写不进不影响播报 */ }
+      lastActivity = t
+      lastActivityAt = Date.now()
     } catch { /* 播报是锦上添花，失败不碍事 */ }
   }
-  /** 窗口意图文件：右键菜单写 pet-cmd.json，keeper 每拍应用（readJson 已剥 BOM——PS5.1 教训） */
-  const petCmdFile = () => join(stateDir, 'pet-cmd.json')
-  const petApplyCmd = () => {
-    try {
-      if (!existsSync(petCmdFile())) return
-      const c = readJson(petCmdFile(), null)
-      try { rmSync(petCmdFile(), { force: true }) } catch { /* 无所谓 */ }
-      if (!c) return
-      const age = Date.now() - Number(new Date(c.at).getTime() || 0)
-      if (!Number.isFinite(age) || age > 120_000) return   // 陈旧指令丢弃
-      const patch = {}
-      if (typeof c.danmaku === 'boolean') patch.petDanmaku = c.danmaku
-      // ⭐ 2026-10-25 弹幕三态（主人要求区分全屏/局域）：off / local / full
-      if (typeof c.danmakuMode === 'string' && ['off', 'local', 'full'].includes(c.danmakuMode)) {
-        patch.petDanmakuMode = c.danmakuMode
-        patch.petDanmaku = c.danmakuMode !== 'off'   // 老字段跟着走，兼容旧窗口
-      }
-      if (typeof c.petOn === 'boolean') patch.petOn = c.petOn
-      if (typeof c.petPersona === 'string' && ENUMS.petPersona.includes(c.petPersona)) patch.petPersona = c.petPersona
-      // ⭐ 2026-10-25 深夜：按钮条显示/隐藏（主人「最低排按钮要可以隐藏」）
-      //    页面先本地改（点了要立刻见效），这里负责写进配置，这样重启/换窗口还记着。
-      if (typeof c.toolbar === 'boolean') patch.petToolbar = c.toolbar
-      // ⭐ 语音开关（主人「你能接入语音输出吗」）—— 页面 🔊 那枚按钮 / 右键菜单都能切
-      if (typeof c.voice === 'boolean') patch.petVoice = c.voice
-      // 🔴 2026-10-25 补：原来**完全没处理 hide**（「去休息」点了永远不生效），
-      //    也没处理 feed（「喂饭」同理）。主人抓的"点了没反应"有一半是这里。
-      if (c.hide === true) {
-        try { writeJson(petHideFile(), { at: new Date().toISOString(), why: 'page-menu' }); log('桌宠：主人让她去休息（写 pet-hide.json，keeper 会收窗口）') }
-        catch (e) { log(`桌宠：写休息标记失败 ${e?.message ?? e}`) }
-      }
-      if (c.feed === true) {
-        try {
-          const f = join(stateDir, 'pet-feed.json')
-          const cur = readJson(f, null) || {}
-          const today = dayKey()
-          const count = cur.date === today ? Number(cur.count || 0) : 0
-          writeJson(f, { date: today, count: count + 1, at: new Date().toISOString() })
-          log(`桌宠：喂了一碗大白饭（今天第 ${count + 1} 碗）`)
-        } catch (e) { log(`桌宠：喂饭失败 ${e?.message ?? e}`) }
-      }
-      if (Object.keys(patch).length) {
-        saveCfg(patch)
-        log(`桌宠窗口指令已应用：${JSON.stringify(patch)}`)
-      }
-      // 🔴 v5.4 维修工真体检：窗口右键「维修工模式」开 ⇒ 后台跑 doctor.mjs（不堵宿主），
-      //    结果落 pet-doctor.json，窗口 poll 读到逐条播报
-      if (c.repair === true) {
-        try {
-          log('桌宠维修工：开始环境体检（doctor.mjs，后台）')
-          const cp = spawn(process.execPath, [join(pluginDir, 'tools', 'doctor.mjs'), '--json'], {
-            windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-            env: pyEnv({ DOUYIN_HOME: stateDir }),
-          })
-          let out = ''
-          cp.stdout?.on('data', (d) => { out += String(d) })
-          const t = setTimeout(() => { try { cp.kill() } catch { /* 超时兜底 */ } }, 100_000)
-          cp.on('exit', () => {
-            clearTimeout(t)
-            try {
-              const start = out.indexOf('{')
-              const end = out.lastIndexOf('}')
-              if (start >= 0 && end > start) {
-                const j = JSON.parse(out.slice(start, end + 1))
-                writeJson(join(stateDir, 'pet-doctor.json'), j)
-                const bad = (j.items || []).filter((it) => it.state !== 'ok').length
-                log(`桌宠维修工：体检完成，${(j.items || []).length} 项里 ${bad} 项要修（已落 pet-doctor.json）`)
-              } else {
-                log('桌宠维修工：体检脚本没输出 JSON，跳过')
-              }
-            } catch (e) { log(`桌宠维修工：结果解析失败（${e?.message ?? e}）`) }
-          })
-        } catch (e) { log(`桌宠维修工：体检起不来（${e?.message ?? e}）`) }
-      }
-    } catch { /* 坏文件不致命 */ }
-  }
+  /* ⚠️ 2026-10-25 拆分后删掉了 petHideFile / petCmdFile / petApplyCmd：
+   *    这三个都是"窗口意图文件"那套 —— 休息标记、右键菜单指令、喂饭。
+   *    窗口归 dsh-deskpet 之后，那个文件由**宠物自己**消费。
+   *    两个插件都读同一个文件会互相抢指令（谁先读到谁删，看着像"点了有时灵有时不灵"）。
+   *    抖音这边要改自己的配置，走 POST /api/douyin-duty/config 就行。 */
   /**
    * ⭐⭐⭐ 把桌宠输入框里的话**当成主人真的在 DSH 里打字**送进当前会话。
    * 主人 2026-10-25 原话：「对话等同于我现在在这个窗口跟你对话，
@@ -3363,117 +3287,77 @@ export function apply(ctx, config) {
     } catch { return null }
   }
   let petKeeperBusy = false
-  let petOnPrevState = null   // 上一跳的 petOn 值（用于"状态变了就强制写一次状态文件"）
   const petKeeperTick = async () => {
-    // 🔴 2026-10-25：keeper 改成 async 之后，setInterval 每 10 秒都会新起一个 tick ——
-    //    如果上一跳还没跑完（读会话慢），就会越堆越多，最后把她整个拖死。
-    //    这里加互斥：上一跳没结束就直接跳过这一跳。
+    // mutex：上一跳没跑完（读会话慢）就跳过，否则 setInterval 会越堆越多
     if (petKeeperBusy) { return }
     petKeeperBusy = true
     try {
-      petApplyCmd()
-      if (petOnPrev === true && !cfg.petOn) { try { rmSync(petHideFile(), { force: true }) } catch { /* 无所谓 */ } }
-      petOnPrev = Boolean(cfg.petOn)
-      const hidden = existsSync(petHideFile())
-      const want = Boolean(cfg.petOn) && Boolean(petManifestOf()) && !hidden
-      const alive = petWinChild && !petWinChild.killed
-      // 🔴🔴 2026-10-25 主人「点退出没反应」的**真正根因**（前面查错了两次，这条是实测确认的）：
-      //    原来 petWinWrite() 只在两处调用：① spawn 之前 ② `if (want)`。
-      //    而 want = cfg.petOn && ... —— **cfg.petOn 一旦变 false，want 就 false，就再也不写状态文件**。
-      //    宿主靠读状态文件里的 on 字段决定退不退出 ⇒ 它永远读不到 false ⇒ 永远不退。
-      //    这是个死锁：要靠状态文件的 on=false 才能关，而写 on=false 的条件是"已经关着"。
-      //    修法：**这一跳里状态变了就无条件写一次**（不挂 want 条件）。
-      if (want || petOnPrevState !== Boolean(cfg.petOn)) {
-        petWinWrite()
+      /* ⭐⭐ 2026-10-25 深夜 拆分后，这个 tick 只做一件事：
+       *    **决定"她这一刻该说什么"**，写进自己家的 deskpet-source.json（自描述广播），
+       *    由桌宠那边的 collectSources 扫到。不写窗口状态文件、不拉任何窗口。
+       *
+       * 为什么还要留着它：
+       *   「刷到候选 / 跑完一轮 / 出岔子」是**抖音侧的事件**，只有抖音知道。
+       *   宠物那边只能看到"state=run"，说不出"捞到 12 条候选"这种话。
+       *   所以这句人话必须由抖音生成，再交给宠物去念。
+       *
+       * ⚠️ 四条红线（都是这次拆分定下的）：
+       *   ① 不写 pet-window-state.json —— 那是宠物自己的文件，两个插件都写会互相覆盖
+       *   ② 不写 pet-diary —— 日记本在宠物家里
+       *   ③ 不 spawn 窗口 —— 窗口归宠物，两个都拉会抢端口
+       *   ④ 写广播只写**自己家**的 deskpet-source.json —— 桌宠扫同级目录发现它，
+       *      依赖方向是"我们发布、桌宠订阅"，桌宠不知道"抖音"两个字。
+       */
+      const linked = cfg.petLinkTo !== false
+      if (!linked) {
+        // 联动关了 ⇒ 撤掉广播（且把 freshness 抹掉，让桌宠立刻读不到）
+        try { rmSync(join(stateDir, 'deskpet-source.json'), { force: true }) } catch { /* 无所谓 */ }
+        return
       }
-      petOnPrevState = Boolean(cfg.petOn)
-      if (want && !alive && Date.now() - petSpawningAt > 15_000) {
-        petSpawningAt = Date.now()
-        const spawnAt = petSpawningAt
-        petWinWrite()
-        // 🔴 v6（2026-10-24 主人令「我要的是 Anime2.5DRig 网页上传 PSD 的效果」）：
-        //    优先拉 WebView2 宿主（跑引擎页，参数驱动真动画）；宿主缺失才回退旧位图窗。
-        const hostExe = join(pluginDir, 'tools', 'pet-host', 'PetHost.exe')
-        const useHost = existsSync(hostExe)
-        if (useHost) {
-          petWinChild = spawn(hostExe, [], {
-            windowsHide: true,
-            stdio: 'ignore',
-            env: pyEnv({ DOUYIN_HOME: stateDir }),
-          })
-        } else {
-          const pwsh = process.env.ProgramFiles && existsSync(join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'))
-            ? join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe')
-            : 'powershell.exe'
-          petWinChild = spawn(pwsh, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(pluginDir, 'tools', 'pet-window.ps1')], {
-            windowsHide: true,   // 只藏 PowerShell 控制台；她的 WPF 窗口照常显示
-            stdio: 'ignore',
-            env: pyEnv({ DOUYIN_HOME: stateDir }),
-          })
-        }
-        petWinChild.unref?.()
-        petWinChild.on('exit', (code, sig) => {
-          petWinChild = null
-          const lived = Date.now() - spawnAt
-          log(`桌宠窗口退出：${useHost ? 'WebView2宿主' : '位图窗'} code=${code} sig=${sig ?? '-'} 存活 ${Math.round(lived / 1000)}s`)
-          if (lived < 60_000 && code !== 0) {
-            try {
-              const dbgF = join(stateDir, useHost ? 'pet-host.log' : 'pet-window-debug.log')
-              const tail = readFileSync(dbgF, 'utf8').split('\n').filter(Boolean).slice(-3).join(' | ')
-              log(`桌宠黑匣子尾部：${tail}`)
-            } catch { /* 读不到就只有退出码 */ }
-          }
-        })
-        log(`桌宠窗口已拉起（${useHost ? 'WebView2 引擎宿主' : '旧位图窗'}；右键有菜单，弹幕/喂饭/维修工都在里面）`)
-      } else if (!want && alive) {
-        try { petWinChild.kill() } catch { /* 已经没了 */ }
-        petWinChild = null
-        log('桌宠已收（开关关 / 素材缺 / 她在休息）')
-      }
-      // （状态文件已经在上面按"变了就写"统一处理过，这里不再重复写）
-      // ⭐ 主人的设计初衷：要**看见她在干嘛**，不是光看她动。
-      // 🔴 2026-10-24 二改：主人说「我的意思是要像人一样」——
-      //    光有随机台词不算像人，她得**真的看得见主人在干什么**。
-      //    所以优先读当前 DSH 会话的最新事件，翻译成鱼话；读不到才退回状态播报。
-      if (want) {
+      // 15 秒一条新话（比原来 45 秒更"活着"，但不会刷屏）
+      if (Date.now() - lastActivityAt > 15_000) {
+        let said = false
+        // ① 她在看主人干活（真事，优先）
         try {
-          const actAge = (() => {
-            const p = readJson(petWinStateFile, null) || {}
-            return Number(p.activityAt) || 0
-          })()
-          // 15 秒一条新话（比原来 45 秒更"活着"，但不会刷屏）
-          if (Date.now() - actAge > 15_000) {
-            let said = false
-            // ① 她在看主人干活（真事，优先）
-            try {
-              const ob = await observeMaster()
-              if (ob && ob.say) { petSay(ob.say); said = true }
-            } catch { /* 看不见就算了，走下面的状态播报 */ }
-            // ② 看不见（没会话/刚启动/服务不在）⇒ 说自己在干嘛
-            if (!said) {
-              const st = petStateOf().state
-              if (st === 'run' || st === 'watch') {
-                petSay(pickOf([
-                  '鱼在盯着抖音呢，有动静就喊主人～',
-                  '正一条条看视频文案，眼睛都花了…',
-                  '还在挑，别急呀，挑错了主人要骂鱼的',
-                ]))
-              } else if (st === 'error') {
-                petSay(pickOf(['诶…出岔子了，鱼在想办法', '刚才那步没成，鱼再试一次']))
-              } else {
-                petSay(pickOf([
-                  '鱼在发呆…顺便等主人叫我',
-                  '今天的大白饭还没着落 (｡•́︿•̀｡)',
-                  '尾巴摇一摇，没别的事干',
-                  '在这个角落待着，看主人忙',
-                  '有点困…但鱼不睡，鱼要看着',
-                  '刚吐了个泡泡，破了',
-                ]))
-              }
-            }
+          const ob = await observeMaster()
+          if (ob && ob.say) { petSay(ob.say); said = true }
+        } catch { /* 看不见就算了，走下面的状态播报 */ }
+        // ② 看不见（没会话/刚启动/服务不在）⇒ 说自己在干嘛
+        if (!said) {
+          const st = petStateOf().state
+          if (st === 'run' || st === 'watch') {
+            petSay(pickOf([
+              '鱼在盯着抖音呢，有动静就喊主人～',
+              '正一条条看视频文案，眼睛都花了…',
+              '还在挑，别急呀，挑错了主人要骂鱼的',
+            ]))
+          } else if (st === 'error') {
+            petSay(pickOf(['诶…出岔子了，鱼在想办法', '刚才那步没成，鱼再试一次']))
+          } else {
+            petSay(pickOf([
+              '鱼在发呆…顺便等主人叫我',
+              '今天的大白饭还没着落 (｡•́︿•̀｡)',
+              '尾巴摇一摇，没别的事干',
+              '在这个角落待着，看主人忙',
+              '有点困…但鱼不睡，鱼要看着',
+              '刚吐了个泡泡，破了',
+            ]))
           }
-        } catch { /* 播报失败不影响别的 */ }
+        }
       }
+      /* ⭐ 广播：把"我现在是什么状态、刚说了什么"写进**自己家**的
+       *    deskpet-source.json —— 桌宠扫同级目录发现这个自描述标记就收进去。
+       *    ⚠️ 只写自己家；新鲜度（at）由桌宠那边卡（>60s 不读）。
+       *    ⚠️ 这一步**每拍必做**（不等 15 秒的说话节奏）—— 状态变了要立刻让桌宠知道，
+       *       否则她会在刷完一轮之后还播报"在挑视频"好半分钟。 */
+      try {
+        writeJson(join(stateDir, 'deskpet-source.json'), {
+          name: 'douyin-scroll',
+          state: petStateOf().state,
+          activity: lastActivity,
+          at: Date.now(),
+        })
+      } catch { /* 广播写不进不影响刷抖音 */ }
     } catch (e) { log(`petKeeper 出错（已兜住）：${e?.message ?? e}`) }
     finally { petKeeperBusy = false }
   }
@@ -3485,8 +3369,55 @@ export function apply(ctx, config) {
     const pk = setInterval(tickSafe, 10_000)
     pk.unref?.()
     tickSafe()
-    ctx.effect(() => () => { clearInterval(pk); try { petWinChild?.kill() } catch { /* 收摊 */ } }, 'douyin-duty: 桌宠窗口守护')
+    // ⚠️ 原来这里还要 kill 窗口子进程。拆分后窗口归 dsh-deskpet，这里没有子进程可杀了。
+    ctx.effect(() => () => { clearInterval(pk) }, 'douyin-duty: 桌宠状态轮')
   } catch (e) { log(`petKeeper 没起来：${e?.message ?? e}`) }
+
+  /* ══════════════════════════════════════════════════════════════════════
+     ⭐⭐ 注册「桌宠状态源」—— 两个插件唯一的连接点（2026-10-25 拆分）
+     ──────────────────────────────────────────────────────────────────────
+     主人原话：「宠物，单独要做一个模块，然后要有一个联动抖音插件的选项就行了」
+
+     所以抖音**不再拉起窗口、不再写窗口状态文件的内容一半**，它只做一件事：
+     老老实实回答"我现在在干嘛"，谁想问就问。
+
+     形状（宠物侧 collectSources 认这个）：
+         { name, read(): { state, activity, note } }
+           state    = idle | watch | run | sleep | error
+           activity = 一句人话（"正一条条看视频文案，眼睛都花了…"）
+
+     ⚠️ 三条红线：
+       ① 这是**只读**的 —— 别人问状态，不许反过来改抖音的配置
+       ② 读失败必须自己兜住，不许把异常抛给宠物（那会拖死她的 keeper）
+       ③ 抖音不可用（没登录/没装 venv）也要给一个诚实的 state，不假装在干活
+     ══════════════════════════════════════════════════════════════════════ */
+  try {
+    const petStateSource = {
+      name: 'douyin-scroll',
+      read: () => {
+        try {
+          const s = petStateOf()
+          return {
+            state: String(s.state || 'idle'),
+            // ⭐ activity 来自内存（petKeeperTick 里 petSay() 刚说过的话）——
+            //    不再读 pet-window-state.json（那文件归宠物，两个插件都写会互相覆盖）
+            activity: lastActivityAt > 0 ? lastActivity : '',
+            note: cfg.chatWatch ? '聊天模式开着（在盯私信）' : '',
+          }
+        } catch (e) {
+          // 读失败：给一个诚实的 idle，不编"她在干活"
+          return { state: 'idle', activity: '', note: `状态读失败：${e?.message ?? e}` }
+        }
+      },
+    }
+    // provde 是可选的（老 DSH 没有就跳过，不影响抖音自己的功能）
+    if (typeof ctx.provide === 'function') {
+      ctx.provide('deskpetStateSource', petStateSource)
+      log('已注册桌宠状态源（deskpetStateSource = douyin-scroll）：宠物会跟着刷抖音的状态说话')
+    } else {
+      log('本机 DSH 没有 ctx.provide，跳过桌宠状态源注册（抖音功能不受影响）')
+    }
+  } catch (e) { log(`注册桌宠状态源失败（不影响刷抖音）：${e?.message ?? e}`) }
 
   /* ─────────────── 健康信号 ─────────────── */
   const healthFile = join(stateDir, 'health.json')
@@ -3551,49 +3482,6 @@ export function apply(ctx, config) {
     req.on('error', () => finish({}))
   })
 
-  /* ─────────────── ⭐ 她的声音（2026-10-25）───────────────
-   * 主人：「你能接入语音输出吗…其中语音输出要跟嘴型对上」
-   *
-   * 合成放**临时目录**（`<家>/tts-cache/`），**绝不写插件包目录** ——
-   * 插件装进 node_modules 后可能只读，升级还会被覆盖（lib/state.mjs 顶上那条规矩）。
-   *
-   * 🔴 并发只放 1 个：edge-tts 每次合成要开一条 WSS 到微软，实测 2~4 秒。
-   *    桌宠可能一次要念好几句话（播报多条），全并起来既容易被限流，
-   *    也会让最先要念的那句排在最后 → 嘴型对上了、声音却晚到。所以用一条
-   *    promise 链把请求排队：**先来先合成的顺序 = 先来先出声的顺序**。
-   */
-  const ttsDir = join(stateDir, 'tts-cache')
-  const ttsCache = makeTtsCache({ max: 64 })
-  const ttsStats = { spawned: 0, hits: 0, fails: 0, lastError: '', lastMs: 0 }
-  let ttsChain = Promise.resolve()
-  /** 排队执行（同一时刻只有一个合成在跑）；永不 reject —— 调用方只看返回值 */
-  const ttsEnqueue = (fn) => {
-    const run = ttsChain.then(fn, fn)          // 前一个失败了也要接着跑下一个
-    // 链上只挂"跑完"这件事，不把异常传下去（不然整条链断掉，后面全被拒）
-    ttsChain = run.then(() => { }, () => { })
-    return run
-  }
-  /** 探测到的 python（缓存住，别每句话都花 0.9 秒找解释器） */
-  let ttsPython = null
-  const ttsResolvePython = async () => {
-    if (ttsPython?.ok) return ttsPython
-    /**
-     * 候选顺序：主人配置的 pythonPath → 插件 venv → python → py -3 → python3。
-     * ⚠️ 实测：本机 `python` 能跑、venv 里**没有** edge-tts（主人装在系统 Python 上）。
-     *    所以 venv 排在 pythonPath 之后、python 之前 —— venv 里要是装了 edge-tts 就用它（版本可控），
-     *    没装就自然落到系统 python（lib 那边会 import 一次确认，不会瞎认）。
-     */
-    const cands = []
-    if (cfg.pythonPath && String(cfg.pythonPath).trim()) cands.push(String(cfg.pythonPath).trim())
-    try { if (existsSync(venvPython())) cands.push(venvPython()) } catch { /* 没 venv 就算了 */ }
-    cands.push('python', 'py -3', 'python3')
-    ttsPython = await resolvePython([...new Set(cands)])
-    if (ttsPython.ok) log(`语音：用 ${ttsPython.executable}（edge-tts ${ttsPython.version}）`)
-    else log(`语音：没有可用的 python + edge-tts —— ${String(ttsPython.reason || '').slice(0, 200)}`)
-    return ttsPython
-  }
-  /** 启动时扫一遍残留（半截文件 / 上次被杀留下的），只在很旧时删 */
-  try { sweepTtsDir(ttsDir, { olderThanMs: 6 * 3600_000 }) } catch { /* 扫不掉不算错 */ }
 
   /* ─────────────── 检查更新 ───────────────
    * 🔴 三条设计约束：
@@ -3746,11 +3634,13 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of Object.keys(DEFAULTS)) if (k in body) patch[k] = body[k]
-      // 桌宠联动：面板把 petOn 打开 = 「叫她回来」——清掉休息标记（主人验收反馈的联动缺口）
-      if (patch.petOn === true) { try { rmSync(join(stateDir, 'pet-hide.json'), { force: true }) } catch { /* 无所谓 */ } }
+      /* ⚠️ 2026-10-25 拆分：原来这里有一句
+       *   `if (patch.petOn === true) rmSync(pet-hide.json)`
+       *   （面板把 petOn 打开 = 「叫她回来」）。petOn 归 dsh-deskpet 了，
+       *   pet-hide.json 也在它家里 —— 面板「叫她回来」调它自己的 /api/deskpet/show。 */
       const { clean, host } = await persistCfg(patch)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
-      petKeeperTick().catch((e) => log(`petKeeperTick（开关变更）异步出错：${e?.message ?? e}`))   // 桌宠开关变化立即反应（不等下一拍）
+      petKeeperTick().catch((e) => log(`petKeeperTick（开关变更）异步出错：${e?.message ?? e}`))   // 联动状态变化立即反应（不等下一拍）
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
     /**
@@ -3812,56 +3702,16 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, ...s, now: Date.now() })
     }
 
-    /* ─────────────── ⭐ 桌宠状态源（2026-10-24 v3：只留状态，窗口归 dsh-deskpet）───────────────
-     * /pet/state  —— 聚合真实状态（petStateOf()），dsh-deskpet 的窗口经它联动。
-     * /pet/asset/* —— 白名单素材服务（历史保留；dsh-deskpet 自带素材，这里不再必需）。
+    /* ─────────────── ⭐ 桌宠状态源（2026-10-25 拆分后保留的最后一批接口）───────────────
+     * 保留的：
+     *   /pet/chat        把桌宠输入框的话送进当前 DSH 会话（这是抖音侧的能力：会话在这里）
+     *   /pet/reply       读会话里"我"的回复（同上）
+     *   /pet/queue/clear 止损口：中转排队堆了就清（149 条事故的教训）
+     * 删掉的（都在 dsh-deskpet 自己的 /api/deskpet/pet/* 上了）：
+     *   /pet/state   /pet/asset/*   /pet/diary   /pet/diary/days   /pet/tts
+     *   —— 状态、素材、日记、语音都是宠物自己的东西，抖音不再代管。
+     *      页面（pet.js）现在调的是 /api/deskpet/*，这些老路由没人调了。
      */
-    if (req.method === 'GET' && path === '/api/douyin-duty/pet/state') {
-      return sendJson(res, 200, petStateOf())
-    }
-    if (req.method === 'GET' && path.startsWith('/api/douyin-duty/pet/asset/')) {
-      // 只放行白名单里的文件名（层名 / 道具名），别开成任意文件服务器。
-      // ⚠️ 层图在 layers/ 子目录；「back hair」这种带空格的层名：
-      //    浏览器 <img src> 会发 %20 编码，手写测试常发原样空格 —— 两种都认。
-      const mf = petManifestOf()
-      const allow = new Map()
-      for (const n of mf?.layers || []) allow.set(encodeURIComponent(n) + '.png', join('layers', n + '.png'))
-      for (const n of mf?.props || []) allow.set(encodeURIComponent(n) + '.png', n + '.png')
-      const key = path.slice('/api/douyin-duty/pet/asset/'.length)
-      const rel = allow.get(key) || allow.get(decodeURIComponent(key))
-      if (!mf || !rel) return sendJson(res, 404, { ok: false, error: 'no such asset' })
-      try {
-        const buf = readFileSync(join(petSpriteDirOf(), rel))
-        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=300' })
-        return res.end(buf)
-      } catch {
-        return sendJson(res, 404, { ok: false, error: 'asset read failed' })
-      }
-    }
-
-    /* ── ⭐ 她的日记（主人：「可以查看她今天写了什么感人的言论」）
-     * GET  /pet/diary?day=YYYY-MM-DD   → 那天的日记（新的在前，star=感人）
-     * GET  /pet/diary/days             → 有日记的日子列表（往前翻）
-     * POST /pet/diary                  → 手动记一条（她主动想写的时候用）
-     * ── */
-    if (req.method === 'GET' && path === '/api/douyin-duty/pet/diary') {
-      const u = new URL(req.url, 'http://x')
-      const day = u.searchParams.get('day') || todayKey()
-      const r = diaryRead(stateDir, day)
-      return sendJson(res, 200, { ok: true, ...r, days: diaryDays(stateDir, 30) })
-    }
-    if (req.method === 'GET' && path === '/api/douyin-duty/pet/diary/days') {
-      return sendJson(res, 200, { ok: true, days: diaryDays(stateDir, 60) })
-    }
-    if (req.method === 'POST' && path === '/api/douyin-duty/pet/diary') {
-      let body = ''
-      try {
-        for await (const c of req) { body += c; if (body.length > 8192) break }
-        const o = JSON.parse(body || '{}')
-        const r = diaryAdd(stateDir, o.text, { kind: String(o.kind || 'manual') })
-        return sendJson(res, 200, { ok: r.ok, ...r })
-      } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) }) }
-    }
 
     /* ── 🔴 清掉桌宠堆在会话收件箱里的待处理消息（2026-10-25 事故后加的止损口）
      * 事故：排障文件 pet-test.txt 里留的一段测试 JS 每 2 秒往 /pet/chat 发一次，
@@ -3942,106 +3792,9 @@ export function apply(ctx, config) {
       }
     }
 
-    /* ── ⭐ 她的声音：一句话 → mp3 字节流（主人 2026-10-25）
-     *
-     *   GET /api/douyin-duty/pet/tts?text=<urlencoded>&voice=<可选>
-     *   → 成功：HTTP 200 + `audio/mpeg` 二进制 body（浏览器 <audio src> 直接就能播）
-     *   → 失败：HTTP 200 + JSON `{ ok:false, error }`（**故意不用 4xx/5xx**：
-     *     前端是拿 <audio>.onerror 判的，4xx 会让它在控制台报警、还拿不到原因；
-     *     200 + JSON 前端一眼能读出"为什么没出声"）
-     *
-     * 🔴 四条红线（每条都是踩过的坑）：
-     *   ① **绝不许把宿主进程搞崩**：全程 try/catch。这是 DSH 的 webServer 回调，
-     *      这里抛出去就是未捕获异常 —— 整个宿主进程会死（AGENTS.md 里
-     *      "定时器回调里的异常必须自己兜住"是同一条规矩，接口这里一样适用）。
-     *   ② 文本截断到 300 字：这是本机回环接口，但仍然不许有人灌一篇论文进来。
-     *   ③ 合成放 `<家>/tts-cache/`，不进插件包。
-     *   ④ 并发 1（见 ttsEnqueue），多的排队。
-     *
-     * ⚠️ 真实上限比 300 字更早：urlencoded 之后整条 URL 进了 **HTTP 请求行**，
-     *    Node 默认 `maxHeaderSize` 是 16KB ⇒ 大约 8~10KB 的原文就够触发
-     *    **431 Request Header Fields Too Large**，而且这个 431 是 **Node 自己在
-     *    进我们的 handler 之前就发出去的**，我们拦不住（实测：4000 个汉字的 URL 就 431）。
-     *    ⇒ 300 字这个截断实际上是"语义上限"，传输上限由 Node 兜着，两边都不一致时
-     *      前端会看到 431 而不是我们的 JSON。**前端必须自己先截断**，别指望这里。
-     */
-    if (req.method === 'GET' && path === '/api/douyin-duty/pet/tts') {
-      try {
-        const u = new URL(req.url, 'http://x')
-        const rawText = String(u.searchParams.get('text') || '')
-        // 截断在**清洗前**也做一次：urlencoded 一篇文章能有几十 KB，
-        // 清洗正则跑在长文本上不便宜（虽然不至于卡死，但没必要）
-        const spoken = cleanForSpeech(rawText.slice(0, MAX_TEXT * 2))
-        if (!spoken) {
-          return sendJson(res, 200, { ok: false, error: '清洗完没有可念的内容（全是符号/markdown？）' })
-        }
-        const voice = pickVoice(u.searchParams.get('voice') || cfg.petVoiceName || DEFAULT_VOICE)
-
-        // ① 缓存命中：直接回 mp3 文件，0 网络 0 合成（同一句话反复说是常态）
-        const hit = ttsCache.get(spoken, voice)
-        if (hit) {
-          ttsStats.hits++
-          const buf = readFileSync(hit.mp3Path)
-          res.writeHead(200, {
-            'content-type': 'audio/mpeg',
-            'content-length': buf.length,
-            'cache-control': 'no-store',      // no-store：让她换音色/换台词立刻生效
-            // 口型时间轴走响应头带回去（前端要它来判断"她在念哪句"）——
-            // 不塞进 body（body 是纯 mp3），也不另开一个接口（多一次往返）
-            'x-tts-cues': Buffer.from(JSON.stringify(hit.cues || []), 'utf8').toString('base64'),
-            'x-tts-cached': '1',
-            'x-tts-voice': voice,
-            'access-control-expose-headers': 'x-tts-cues,x-tts-cached,x-tts-voice,x-tts-ms',
-          })
-          return res.end(buf)
-        }
-
-        // ② 真合成（排队）
-        const py = await ttsResolvePython()
-        if (!py.ok) {
-          ttsStats.fails++
-          ttsStats.lastError = String(py.reason || '没有可用的 python')
-          return sendJson(res, 200, { ok: false, error: '合成器没准备好：' + String(py.reason || '').slice(0, 300) })
-        }
-        const r = await ttsEnqueue(() => synthesize({
-          python: py.command, pythonArgs: py.args, text: spoken, voice, outDir: ttsDir,
-        }))
-        if (!r.ok) {
-          ttsStats.fails++
-          ttsStats.lastError = String(r.error || '未知')
-          log(`语音合成失败：${String(r.error || '').slice(0, 160)}（${spoken.slice(0, 24)}…）`)
-          return sendJson(res, 200, { ok: false, error: String(r.error || '合成失败'), voice })
-        }
-        ttsStats.spawned++
-        ttsStats.lastMs = Number(r.ms) || 0
-        // 存进缓存（超上限会淘汰最久没用的，并把那个 mp3 一起删掉）
-        ttsCache.set(spoken, voice, {
-          mp3Path: r.mp3Path, bytes: r.bytes, cues: r.cues || [], text: spoken, voice,
-        })
-        const buf = readFileSync(r.mp3Path)
-        res.writeHead(200, {
-          'content-type': 'audio/mpeg',
-          'content-length': buf.length,
-          'cache-control': 'no-store',
-          'x-tts-cues': Buffer.from(JSON.stringify(r.cues || []), 'utf8').toString('base64'),
-          'x-tts-cached': '0',
-          'x-tts-voice': voice,
-          'x-tts-ms': String(ttsStats.lastMs),
-          // 跨域读响应头要显式放行，否则前端 readText 拿到的是 null
-          'access-control-expose-headers': 'x-tts-cues,x-tts-cached,x-tts-voice,x-tts-ms',
-        })
-        return res.end(buf)
-      } catch (e) {
-        // 🔴 走到这里说明连合成都没开始就炸了 —— **绝不外抛**，否则宿主进程陪葬
-        ttsStats.fails++
-        ttsStats.lastError = String(e?.message ?? e)
-        log(`语音接口出错（已兜住，宿主不受影响）：${ttsStats.lastError}`)
-        try {
-          if (!res.headersSent) return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
-          return res.end()
-        } catch { return undefined }
-      }
-    }
+    /* ⚠️ 2026-10-25 拆分：/pet/tts 语音接口搬去 dsh-deskpet 了（/api/deskpet/pet/tts）。
+     *    语音是"她的身体能力"，跟抖音无关 —— 连同 lib/pet-tts.mjs 一起搬走的。
+     *    上面那段"431 请求行上限、前端必须自己截断"的实测注释也跟着过去了，别在这里重写。 */
 
     /* ── ⭐ 她的对话（主人 2026-10-24 的设计初衷）
      * 「我跟她说话你是怎么设计的，收到消息乱回？」——原来只有 4 条正则 + 随机兜底。
@@ -4071,7 +3824,8 @@ export function apply(ctx, config) {
         const delivered = await tryDeliverToSession(q)
         if (delivered.ok) {
           log(`桌宠对话[转达给DSH会话]：${q.slice(0, 40)} → session ${delivered.sessionId}（${delivered.mode}）`)
-          try { diaryAdd(stateDir, `主人通过小鱼说：${q}`, { kind: 'relay' }) } catch { /* 日记失败不影响 */ }
+          // ⚠️ 2026-10-25 拆分：原来的 diaryAdd（"主人通过小鱼说：…"）删了 ——
+          //    日记本归宠物了，它自己的 /api/deskpet/pet/chat 会记。
           // 🔴 第 5 条：告诉页面"从哪个 seq 开始等我的回复"。
           //    这是页面轮询 /pet/reply?since=N 的起点 —— 给了它，
           //    页面才能把我这轮跑完之后写下的 assistant 文本接回上面的文本框。
@@ -4104,9 +3858,9 @@ export function apply(ctx, config) {
         if (local) {
           log(`桌宠对话[本地]：${q.slice(0, 30)} → ${local.intent}`)
           let anim = local.anim || ''
-          if (local.action === 'feed') {
-            try { writeJson(petCmdFile(), { feed: true, at: new Date().toISOString() }) } catch { /* 不影响回话 */ }
-          }
+          /* ⚠️ 2026-10-25 拆分：原来这里会写 pet-cmd.json 的 feed 标记让窗口喂饭。
+             窗口归 dsh-deskpet 之后，喂饭是**它自己的事**（它有 /api/deskpet/say 和自己的
+             feed 逻辑）。抖音这边只负责把她的话送进会话 —— 不跨插件伸手去改她的状态。 */
           return sendJson(res, 200, {
             ok: true, brain: 'local', intent: local.intent, degraded: true,
             say: local.say || pickOf(['嗯！', '好哦～']), anim,
@@ -4153,8 +3907,7 @@ export function apply(ctx, config) {
         petChatHistory.push({ role: 'user', content: q })
         if (r.say) petChatHistory.push({ role: 'assistant', content: r.say })
         if (petChatHistory.length > 8) petChatHistory = petChatHistory.slice(-8)
-        // ⭐ 她跟主人说的话也进日记（日记里 star 会挑出"感人"的那些）
-        try { if (r.say) diaryAdd(stateDir, r.say, { kind: 'chat' }) } catch { /* 日记失败不影响回话 */ }
+        // ⚠️ 2026-10-25 拆分：回话日记归宠物（它自己的 /api/deskpet/pet/chat 会记）。
 
         let anim = ''
         let extraSay = ''

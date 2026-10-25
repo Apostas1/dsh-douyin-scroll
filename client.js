@@ -171,75 +171,6 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
     }
 
     /**
-     * ⭐ 她的「所思所想」状态屏（主人 2026-10-24 定的设计初衷）
-     *
-     * 主人原话：「设计的初衷是为了看见这个宠物，就是你，在干嘛，光看你思考干活，
-     *            但是不知道在干嘛，所以才让她有个文本框用拟人的口吻在显示你在干嘛」
-     *        →「我的意思是要像人一样」
-     *
-     * 数据源和桌面上的她**是同一份**（pet-window-state.json 的 activity 字段），
-     * 所以面板里读到的话，跟桌面上气泡里说的是同一句 —— 不会两边各说各的。
-     *
-     * 显示原则（像人）：
-     *   · 先给她一个**动作**（正在干什么），再给一句**人话**，最后才是技术参数（小字）
-     *   · 时间感：刚说的 / 几分钟前说的，语气不一样（人不会假装十分钟前的事刚发生）
-     *   · 超过 90 秒没更新 ⇒ 她在发呆，如实说，不假装还忙着
-     */
-    function PetActivityStatus() {
-      const [s, setS] = React.useState(null)
-      const [, forceTick] = React.useState(0)
-      React.useEffect(() => {
-        let alive = true
-        const pull = async () => {
-          try { const r = await jget('/pet/state'); if (alive && r) setS(r) } catch { /* 等下一拍 */ }
-        }
-        pull()
-        const t = setInterval(pull, 5_000)
-        const t2 = setInterval(() => forceTick((x) => x + 1), 1000)   // 让"几秒前"动起来
-        return () => { alive = false; clearInterval(t); clearInterval(t2) }
-      }, [])
-      if (!s) return h('div', { 'data-dy-sub': '' }, '🐟 小鱼正在游过来…')
-      const act = String(s.activity || '').trim()
-      const at = Number(s.activityAt) || 0
-      const age = at ? Math.round((Date.now() - at) / 1000) : null
-      // 她说这句话时在干什么（从状态文件里的 link.state 推）
-      const st = (s.link && s.link.state) || 'idle'
-      const doing = st === 'run' || st === 'watch' ? '在刷抖音'
-        : st === 'error' ? '出了点岔子'
-        : '在发呆'
-      const EMOJI = { run: '🐟💨', watch: '🐟👀', error: '🐟💥', idle: '🐟💤', sleep: '🐟😴' }
-      const emo = EMOJI[st] || '🐟'
-      // 时间感：像人一样，不说"刚刚"如果已经过去很久
-      let agoText = ''
-      if (age !== null) {
-        if (age < 8) agoText = '刚说的'
-        else if (age < 60) agoText = `${age} 秒前说的`
-        else if (age < 3600) agoText = `${Math.round(age / 60)} 分钟前说的`
-        else agoText = '很久没吭声了'
-      }
-      const stale = age !== null && age > 90
-      // 没 activity 时也要说话（她不能是空白）
-      const line = act || (stale || !at
-        ? `${emo} 小鱼${doing}，没在说话…`
-        : `${emo} 小鱼${doing}`)
-      return h('div', {
-        'data-dy-inner': '', 'data-dy-subflat': '',
-        style: {
-          background: 'transparent',
-          border: `1px dashed ${stale ? 'rgba(255,255,255,.12)' : 'rgba(120,180,255,.38)'}`,
-          padding: '8px 10px', gap: '4px',
-          opacity: stale ? '.65' : '1',
-          transition: 'opacity .3s, border-color .3s',
-        },
-      },
-        // 第一行：她此刻的动作 + 她说的那句人话（最像人的部分）
-        h('div', { 'data-dy-sub': '', style: { opacity: '.98', lineHeight: '1.5' } }, line),
-        // 第二行：时间感 + 技术参数（小字，排障用，不抢戏）
-        h('div', { 'data-dy-sub': '', style: { opacity: '.62', fontSize: '11px' } },
-          `${agoText || '还没开口'} · ${doing}${stale ? '（可能卡住了）' : ''}`))
-    }
-
-    /**
      * ⭐ 聊天模式的实时状态屏（2026-10-24，使用者两轮反馈打磨成拟人版）。
      *    使用者原话：「显示 AI 现在在干嘛」→「要拟人，小鱼在干啥干啥，
      *    最后是小鱼抱着手机等着你发消息呢，还有正在发送之类的」。
@@ -1426,66 +1357,31 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
             )
           : null,
 
-        /* ── 卡 ⑥ 桌宠：开关 + 她的所思所想 + 人格四选一 + 弹幕三态 + 补充人设 ── */
+        /* ── 卡 ⑥ 桌宠联动：一个开关（宠物本体在独立插件 dsh-deskpet 里）+ 补充人设 ── */
         foldCfg
           ? h('div', { 'data-dy-card': '' },
-              h('div', { 'data-dy-title': '' }, '桌宠'),
+              h('div', { 'data-dy-title': '' }, '桌宠联动'),
               h('div', { 'data-dy-sub': '' },
-                '她浮在桌面上，也在下面这张屏里告诉你她此刻在干嘛。人格决定她的性格，补充人设是额外几句你要求她遵守的话。'),
-      /* ── 桌宠（2026-10-24 v5 从 dsh-deskpet 迁回：主人拍板放回面板）── */
+                '桌宠是独立插件（设置 → 桌宠）。这里只有一个决定：刷抖音的状态要不要喂给她。下面「补充人设」是刷抖音写日报用的，跟桌宠无关。'),
+      /* ⭐⭐ 2026-10-25 拆分：卡⑥从「桌宠控制台」变成「联动桌宠」一个开关。
+       *   为什么缩水：桌宠独立成插件了（dsh-deskpet），她的开关 / 人格 / 弹幕三态 /
+       *   语音 / 按钮条全在**设置 → 桌宠**那边。在这里控制它们就是跨插件伸手，
+       *   两份配置互相覆盖的坑我们踩过一次（dmTo 被清空那次就是这么来的）。
+       *   这里只回答一个问题：**刷抖音的状态要不要喂给她**。 */
               h('div', { 'data-dy-subblock': '' },
                 h('div', { 'data-dy-row': '' },
                   h('div', { 'data-dy-grow': '' },
-                    h('div', { 'data-dy-title': '' }, '桌宠'),
+                    h('div', { 'data-dy-title': '' }, '联动桌宠'),
                     h('div', { 'data-dy-sub': '' },
-                      (cfg.petOn
-                        ? '✅ 她浮在桌面上。右键她有全部功能：聊天 / 喂饭 / 维修工 / 弹幕 / 人格 / 写日记 / 休息 / 退出。'
-                        : '关着。打开她就飘回来（休息中也会被叫回）。')),
+                      (cfg.petLinkTo !== false
+                        ? '✅ 开着：刷抖音的状态会喂给桌宠 —— 她在气泡里说「正一条条看视频文案」这种话，就是从这里来的。'
+                        : '关着：桌宠不知道你在刷抖音，她自己待着（这不是故障）。'))),
                   h(Switch, {
-                    on: cfg.petOn !== false,
+                    on: cfg.petLinkTo !== false,
                     disabled: busy === 'patch',
-                    onChange: (v) => patch({ petOn: v }, v ? '✅ 她回来了' : '她去休息了（面板随时叫回）'),
+                    onChange: (v) => patch({ petLinkTo: v },
+                      v ? '✅ 联动开了：她知道你在刷抖音了' : '联动关了：她不再知道抖音的状态'),
                   }))),
-                /* ⭐ 她的所思所想（主人 2026-10-24 的设计初衷）
-                 *    和桌面上的气泡是同一份数据 —— 面板里读到的就是她此刻在干嘛。 */
-                cfg.petOn !== false ? h(PetActivityStatus, { key: 'pet-activity' }) : null,
-                /* ⚠️ 2026-10-25 主人：「日记功能我要的是彩蛋形式，只在右键宠物的时候有这个选项，
-                 *    插件面板要保持干净」⇒ 面板这里的日记卡片**撤掉**，改成右键菜单里的「写日记」。 */
-                h('div', { 'data-dy-title': '' }, '人格（她是怎样的鱼）'),
-                h('div', { 'data-dy-sub': '', style: { marginBottom: '6px' } },
-                  '选一个性格，她说话的口吻、弹幕台词、小动作都跟着换。想改更深的人设文字，见下面「我的人设」。'),
-                h('div', { 'data-dy-personas': '' },
-                  [
-                    ['infp', 'INFP · 治愈小鱼', '温柔安静，共情力满'],
-                    ['entp', 'ENTP · 毒舌本鱼', '嘴毒手勤倒反天罡（红瞳紫雾）'],
-                    ['esfp', 'ESFP · 元气小鱼', '自来熟表演家，话最多'],
-                    ['istj', 'ISTJ · 维修工小鱼', '一丝不苟，引导体检'],
-                  ].map(([id, name, desc]) =>
-                    h('button', {
-                      key: id, 'data-dy-pcard': '', 'data-on': cfg.petPersona === id ? '' : undefined,
-                      disabled: busy === 'patch',
-                      onClick: () => patch({ petPersona: id }, '人格已切：' + name),
-                    },
-                      h('div', { 'data-dy-pcard-name': '' }, name),
-                      h('div', { 'data-dy-pcard-desc': '' }, desc)))),
-                /* 弹幕三态（主人 2026-10-25：「我要的是全屏弹幕跟局域弹幕」） */
-                h('div', { 'data-dy-title': '', style: { marginTop: '8px' } }, '弹幕'),
-                h('div', { 'data-dy-sub': '', style: { marginBottom: '6px' } },
-                  '全屏 = 铺满整个屏幕（点击穿透，不挡操作）；局域 = 只在她身边飘。'),
-                h('div', { 'data-dy-row': '', style: { gap: '6px' } },
-                  [
-                    ['off', '关'],
-                    ['local', '局域'],
-                    ['full', '全屏'],
-                  ].map(([mode, label]) =>
-                    h('button', {
-                      key: 'dm-' + mode, 'data-dy-mini': '',
-                      'data-primary': (cfg.petDanmakuMode || 'off') === mode ? '' : undefined,
-                      disabled: busy === 'patch',
-                      onClick: () => patch(
-                        { petDanmakuMode: mode, petDanmaku: mode !== 'off' },
-                        mode === 'full' ? '全屏弹幕开了' : mode === 'local' ? '局域弹幕开了' : '弹幕关了'),
-                    }, label)))),
                 /* ⚠️ 2026-10-25 主人：「走动模式去掉，不生效也没动画」⇒ 这块直接删掉。 */
       /* ── 我的人设（补充文字） ──
                  🔴 2026-10-25 主人：「插件面板人设跟人格重合了」

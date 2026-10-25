@@ -373,7 +373,7 @@ console.log('\n【折叠组 · 点开之后】')
     ['卡③自动发送（含私信对象 / 评论区@你 / 聊天模式）', /自动发送[\s\S]*私信发给谁|私信发给谁/],
     ['卡④出问题了？', /出问题了？/],
     ['卡⑤刷抖音的策略', /刷抖音的策略/],
-    ['卡⑥桌宠', /人格（她是怎样的鱼）/],
+    ['卡⑥桌宠联动（宠物本体在独立插件里）', /联动桌宠/],
     ['卡⑦消息与记忆', /消息与记忆/],
   ]) {
     if (re.test(allText)) console.log(`  ✅ ${label}`)
@@ -755,17 +755,27 @@ if (rLog) {
   else { console.log('  ❌ 没显示上次跑时间'); fail++ }
 }
 
-/* ── 桌宠（2026-10-24 v5：从 dsh-deskpet 迁回，主人拍板放回面板）── */
-console.log('\n【桌宠】')
+/* ── 桌宠联动（2026-10-25 拆分：窗口/人格/弹幕归独立插件 dsh-deskpet，这里只剩状态源）── */
+console.log('\n【桌宠联动】')
 {
   const idx = readFileSync(join(ROOT, 'index.js'), 'utf8')
   const cl = readFileSync(join(ROOT, 'client.js'), 'utf8')
-  if (/petStateOf/.test(idx) && /\/pet\/state/.test(idx)) console.log('  ✅ 状态源在（/pet/state）')
-  else { console.log('  ❌ 状态源没了'); fail++ }
-  if (/petKeeperTick/.test(idx) && /pet-window\.ps1/.test(idx)) console.log('  ✅ 宿主有 petKeeper（v5 拉起/收掉 + 意图文件）')
-  else { console.log('  ❌ 没有 petKeeper'); fail++ }
-  if (/人格（MBTI）/.test(cl) && /data-dy-pcard/.test(cl)) console.log('  ✅ 面板桌宠卡回归（开关+人格四选一+弹幕+走动）')
-  else { console.log('  ❌ 面板没有桌宠卡'); fail++ }
+  // ⚠️ 断言看**去掉注释后的代码**：为什么要拆、搬走了什么，这些解释都在注释里，
+  //    全文搜会把"注释里说我们不写 pet-window-state.json"误判成"我们在写"。
+  const idxCode = idx.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+  // ⚠️ 拆分后的规矩（这条守的是"两个插件不许抢同一个文件"）：
+  //    抖音侧可以读状态、可以提供状态源，但**不许**再写 pet-window-state.json ——
+  //    那文件归 dsh-deskpet 写。两个都写 = 谁后落盘谁赢 = 她说的话随机消失。
+  if (/petStateOf/.test(idxCode)) console.log('  ✅ 状态聚合在（petStateOf，给状态源用）')
+  else { console.log('  ❌ 状态聚合没了'); fail++ }
+  if (/deskpetStateSource/.test(idxCode)) console.log('  ✅ 有状态源注册（deskpetStateSource）')
+  else { console.log('  ❌ 没有状态源注册 —— 桌宠那边拿不到抖音的状态'); fail++ }
+  if (/petWinWrite|pet-window-state\.json/.test(idxCode)) { console.log('  ❌ 抖音侧还在写 pet-window-state.json —— 会跟桌宠互相覆盖'); fail++ }
+  else console.log('  ✅ 抖音侧不写窗口状态文件（归 dsh-deskpet）')
+  if (/spawn\(hostExe|PetHost\.exe/.test(idxCode)) { console.log('  ❌ 抖音侧还在拉起窗口进程 —— 会跟桌宠抢实例'); fail++ }
+  else console.log('  ✅ 抖音侧不拉窗口（窗口归 dsh-deskpet）')
+  if (/联动桌宠/.test(cl) && /petLinkTo/.test(cl)) console.log('  ✅ 面板有「联动桌宠」开关（petLinkTo）')
+  else { console.log('  ❌ 面板没有联动开关'); fail++ }
   if (/slots\.inject\('shell\.overlay'/.test(cl)) { console.log('  ❌ 还在往 shell.overlay 注册（会出两只她）'); fail++ }
   else console.log('  ✅ GUI 内没有浮层（只有桌面窗一只）')
 }

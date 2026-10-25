@@ -5,9 +5,59 @@
 
 ---
 
-## 未发布 — 2026-10-25（第二批：布局 / 弹幕循环 / 语音）
+## 未发布 — 2026-10-25（第三批：桌宠拆成独立插件）
 
-> ⚠️ 这一批同样**没发版本号**（等主人拍板）。下面每一条都附实测数字。
+> ⚠️ 没发版本号。**装这套插件的人要注意**：桌宠从本插件里搬走了，变成独立插件
+> `dsh-deskpet`（仓库同级目录）。要桌宠就把两个都装上；只要刷抖音，这个包比原来小了
+> （0.37MB，桌宠素材/宿主/页面全走了）。
+
+### 🐟 主人原话
+
+「宠物，单独要做一个模块，然后要有一个联动抖音插件的选项就行了」
+「直播的话要用离线语音包，延时是大问题」（离线语音是下一步，先拆模块）
+「你别让我反复确认，你按最好的做，不要出错」
+
+### 拆了什么
+
+| | 搬走前 | 搬走后 |
+|---|---|---|
+| 窗口本体（PetHost.exe + WebView2） | 本插件 tools/pet-host/ | dsh-deskpet |
+| 页面（pet.js 104KB + 引擎） | 本插件 tools/pet-page/ | dsh-deskpet |
+| 语音 / 日记 / 脑子（lib/pet-*） | 本插件 lib/ | dsh-deskpet（只剩 brain/observe/relay） |
+| 人格档案 ×4 | prompts/deskpet-personas/ | dsh-deskpet/personas/ |
+| 素材（主人私货） | assets/pet/ | dsh-deskpet（gitignore 挡着，不随仓库发） |
+| pet* 配置 7 项 | 本插件 Config | dsh-deskpet Config |
+| 本插件发布包 | 1.02MB / 103 files | **0.37MB / 70 files** |
+
+**面板卡⑥从「桌宠控制台」缩成「联动桌宠」一个开关**（petLinkTo）——
+她的开关/人格/弹幕/语音全在 设置 → 桌宠（独立插件）。在这里控制就是跨插件伸手，
+两份配置互相覆盖的坑刚踩过（dmTo 被清空那次）。
+
+### 两条插件的连接（本次拆分的关键设计）
+
+桌宠**只认形状，不认插件名**，两条通道谁通用走谁：
+
+1. `ctx.provide('deskpetStateSource', ...)`（若 harness 支持）
+2. 文件广播：抖音往**自己家**写 `deskpet-source.json`
+   `{ name, state, activity, at }`，桌宠扫同级目录发现这个自描述标记就收进来；
+   新鲜度 60 秒，过期不读。依赖方向永远是"抖音发布、桌宠订阅"——
+   桌宠侧没有任何"抖音"字样（selfcheck 有守卫，做过破坏性验证）。
+
+抖音侧删掉的：spawn(PetHost.exe)、写 pet-window-state.json、pet-cmd.json 消费、
+petSay 写文件、日记写入、/pet/state、/pet/asset、/pet/diary、/pet/tts 路由。
+**为什么必须删干净**：两个插件写同一个状态文件 = 谁后落盘谁赢 =
+她说的话随机消失、弹幕模式随机回弹（同一个病在 petWinWrite 注释里早就写过）。
+
+保留的：/pet/chat（送会话）、/pet/reply、/pet/queue/clear —— 会话是抖音侧的能力。
+
+### 给装插件的人
+
+- 两个都装：`dsh plugin --profile <你的profile> add link:<各自目录>`，重启 DSH
+- 桌宠面板 ④「跟别的插件联动」选「自动」；抖音面板卡⑥「联动桌宠」默认开
+- 只要刷抖音不装桌宠：一切照常，抖音面板的卡⑥只剩一个说明文字
+
+---
+
 
 ### 🐟 主人当面说的三条
 
