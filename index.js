@@ -48,6 +48,10 @@ import { diaryAdd, diaryRead, diaryDays, isTouching, todayKey } from './lib/pet-
 //    现在逻辑在 lib/pet-relay.mjs，走 agent.followup()，并且有离线单测
 //    （tools/pet-relay-test.mjs 会用 DSH 自己的校验器验消息格式）。
 import { deliverToSession, makeUserMessage, relayLine } from './lib/pet-relay.mjs'
+// 🔴 她的**声音**（主人 2026-10-25：「语音输出要跟嘴型对上」）。
+//    edge-tts 云端中文音色合成 mp3 + 顺带给出句级时间轴（口型靠它对齐）。
+//    逻辑在 lib/pet-tts.mjs，纯函数 + 依赖注入，有离线单测（tools/pet-tts-test.mjs）。
+import { cleanForSpeech, synthesize, resolvePython, pickVoice, makeTtsCache, sweepTtsDir, MAX_TEXT, DEFAULT_VOICE } from './lib/pet-tts.mjs'
 
 export const name = 'douyin-scroll'
 export const inject = ['webServer', 'tools', 'settings']
@@ -171,6 +175,18 @@ export const Config = !z ? undefined : z.object({
    *  local = 局域弹幕（只在她自己那个窗口里飘，跟着她走）
    *  full  = 全屏弹幕（宿主开独立的全屏覆盖窗，铺满整个屏幕、点击穿透） */
   petDanmakuMode: z.string().default('off').extra('volatile', true),
+  /** ⭐ 2026-10-25 深夜 主人：「最低排按钮要可以隐藏」
+   *  false = 底部按钮条收起（#dock 加 .tool-off，右键菜单/这里都能叫回来）。
+   *  默认 true：藏起来之后新手找不到入口，所以默认让她露着。 */
+  petToolbar: z.boolean().default(true).extra('volatile', true),
+  /** ⭐ 2026-10-25 深夜 主人：「你能接入语音输出吗…其中语音输出要跟嘴型对上」
+   *  语音方案（实测过）：edge-tts 云端中文音色 zh-CN-XiaoyiNeural，
+   *  嘴型用**音频振幅包络**驱动 mouthOpen —— 声音响她就张嘴，这是天生对齐，
+   *  不需要 viseme/音素表（那要额外模型，而且中文音素表拿不到）。
+   *  petVoice=false 时她完全不出声（默认关：突然出声会吓人，主人自己开）。 */
+  petVoice: z.boolean().default(false).extra('volatile', true),
+  /** 语音音色（edge-tts 的 ShortName）。留空 = zh-CN-XiaoyiNeural。 */
+  petVoiceName: z.string().default('zh-CN-XiaoyiNeural').extra('volatile', true),
   /**
    * ⭐ 2026-10-24 定稿（使用者：「我要的是迁移，不是开发新功能」）：
    *    聊天模式 = 今早实测那套的「读」半边（30 秒一读 + 通知 + 状态屏）。
@@ -285,6 +301,7 @@ export function apply(ctx, config) {
     //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
     chatWatch: true, chatWatchSec: 30,
     petOn: true, petPersona: 'infp', petDanmaku: false, petDanmakuMode: 'off',
+    petToolbar: true, petVoice: false, petVoiceName: 'zh-CN-XiaoyiNeural',
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
@@ -2961,6 +2978,11 @@ export function apply(ctx, config) {
         persona: cfg.petPersona,
         danmaku: Boolean(cfg.petDanmaku),
         danmakuMode: String(cfg.petDanmakuMode || 'off'),
+        // ⭐ 2026-10-25 深夜：按钮条显不显示（主人「最低排按钮要可以隐藏」）
+        toolbar: cfg.petToolbar !== false,
+        // ⭐ 语音（主人「语音输出要跟嘴型对上」）——页面拿到这两个才决定要不要出声
+        voice: Boolean(cfg.petVoice),
+        voiceName: String(cfg.petVoiceName || 'zh-CN-XiaoyiNeural'),
         link: { state: petStateOf().state },
         sprite_dir: petSpriteDirOf(),
         api: origin + '/api/douyin-duty',
@@ -3010,6 +3032,11 @@ export function apply(ctx, config) {
       }
       if (typeof c.petOn === 'boolean') patch.petOn = c.petOn
       if (typeof c.petPersona === 'string' && ENUMS.petPersona.includes(c.petPersona)) patch.petPersona = c.petPersona
+      // ⭐ 2026-10-25 深夜：按钮条显示/隐藏（主人「最低排按钮要可以隐藏」）
+      //    页面先本地改（点了要立刻见效），这里负责写进配置，这样重启/换窗口还记着。
+      if (typeof c.toolbar === 'boolean') patch.petToolbar = c.toolbar
+      // ⭐ 语音开关（主人「你能接入语音输出吗」）—— 页面 🔊 那枚按钮 / 右键菜单都能切
+      if (typeof c.voice === 'boolean') patch.petVoice = c.voice
       // 🔴 2026-10-25 补：原来**完全没处理 hide**（「去休息」点了永远不生效），
       //    也没处理 feed（「喂饭」同理）。主人抓的"点了没反应"有一半是这里。
       if (c.hide === true) {
@@ -3463,6 +3490,50 @@ export function apply(ctx, config) {
     req.on('error', () => finish({}))
   })
 
+  /* ─────────────── ⭐ 她的声音（2026-10-25）───────────────
+   * 主人：「你能接入语音输出吗…其中语音输出要跟嘴型对上」
+   *
+   * 合成放**临时目录**（`<家>/tts-cache/`），**绝不写插件包目录** ——
+   * 插件装进 node_modules 后可能只读，升级还会被覆盖（lib/state.mjs 顶上那条规矩）。
+   *
+   * 🔴 并发只放 1 个：edge-tts 每次合成要开一条 WSS 到微软，实测 2~4 秒。
+   *    桌宠可能一次要念好几句话（播报多条），全并起来既容易被限流，
+   *    也会让最先要念的那句排在最后 → 嘴型对上了、声音却晚到。所以用一条
+   *    promise 链把请求排队：**先来先合成的顺序 = 先来先出声的顺序**。
+   */
+  const ttsDir = join(stateDir, 'tts-cache')
+  const ttsCache = makeTtsCache({ max: 64 })
+  const ttsStats = { spawned: 0, hits: 0, fails: 0, lastError: '', lastMs: 0 }
+  let ttsChain = Promise.resolve()
+  /** 排队执行（同一时刻只有一个合成在跑）；永不 reject —— 调用方只看返回值 */
+  const ttsEnqueue = (fn) => {
+    const run = ttsChain.then(fn, fn)          // 前一个失败了也要接着跑下一个
+    // 链上只挂"跑完"这件事，不把异常传下去（不然整条链断掉，后面全被拒）
+    ttsChain = run.then(() => { }, () => { })
+    return run
+  }
+  /** 探测到的 python（缓存住，别每句话都花 0.9 秒找解释器） */
+  let ttsPython = null
+  const ttsResolvePython = async () => {
+    if (ttsPython?.ok) return ttsPython
+    /**
+     * 候选顺序：主人配置的 pythonPath → 插件 venv → python → py -3 → python3。
+     * ⚠️ 实测：本机 `python` 能跑、venv 里**没有** edge-tts（主人装在系统 Python 上）。
+     *    所以 venv 排在 pythonPath 之后、python 之前 —— venv 里要是装了 edge-tts 就用它（版本可控），
+     *    没装就自然落到系统 python（lib 那边会 import 一次确认，不会瞎认）。
+     */
+    const cands = []
+    if (cfg.pythonPath && String(cfg.pythonPath).trim()) cands.push(String(cfg.pythonPath).trim())
+    try { if (existsSync(venvPython())) cands.push(venvPython()) } catch { /* 没 venv 就算了 */ }
+    cands.push('python', 'py -3', 'python3')
+    ttsPython = await resolvePython([...new Set(cands)])
+    if (ttsPython.ok) log(`语音：用 ${ttsPython.executable}（edge-tts ${ttsPython.version}）`)
+    else log(`语音：没有可用的 python + edge-tts —— ${String(ttsPython.reason || '').slice(0, 200)}`)
+    return ttsPython
+  }
+  /** 启动时扫一遍残留（半截文件 / 上次被杀留下的），只在很旧时删 */
+  try { sweepTtsDir(ttsDir, { olderThanMs: 6 * 3600_000 }) } catch { /* 扫不掉不算错 */ }
+
   /* ─────────────── 检查更新 ───────────────
    * 🔴 三条设计约束：
    *   ① **不能拖慢面板**：走异步 fetch + 3 秒超时，查不到就报"查不到"，绝不让设置页转圈。
@@ -3807,6 +3878,107 @@ export function apply(ctx, config) {
         })
       } catch (e) {
         return sendJson(res, 200, { ok: false, reason: String(e?.message ?? e) })
+      }
+    }
+
+    /* ── ⭐ 她的声音：一句话 → mp3 字节流（主人 2026-10-25）
+     *
+     *   GET /api/douyin-duty/pet/tts?text=<urlencoded>&voice=<可选>
+     *   → 成功：HTTP 200 + `audio/mpeg` 二进制 body（浏览器 <audio src> 直接就能播）
+     *   → 失败：HTTP 200 + JSON `{ ok:false, error }`（**故意不用 4xx/5xx**：
+     *     前端是拿 <audio>.onerror 判的，4xx 会让它在控制台报警、还拿不到原因；
+     *     200 + JSON 前端一眼能读出"为什么没出声"）
+     *
+     * 🔴 四条红线（每条都是踩过的坑）：
+     *   ① **绝不许把宿主进程搞崩**：全程 try/catch。这是 DSH 的 webServer 回调，
+     *      这里抛出去就是未捕获异常 —— 整个宿主进程会死（AGENTS.md 里
+     *      "定时器回调里的异常必须自己兜住"是同一条规矩，接口这里一样适用）。
+     *   ② 文本截断到 300 字：这是本机回环接口，但仍然不许有人灌一篇论文进来。
+     *   ③ 合成放 `<家>/tts-cache/`，不进插件包。
+     *   ④ 并发 1（见 ttsEnqueue），多的排队。
+     *
+     * ⚠️ 真实上限比 300 字更早：urlencoded 之后整条 URL 进了 **HTTP 请求行**，
+     *    Node 默认 `maxHeaderSize` 是 16KB ⇒ 大约 8~10KB 的原文就够触发
+     *    **431 Request Header Fields Too Large**，而且这个 431 是 **Node 自己在
+     *    进我们的 handler 之前就发出去的**，我们拦不住（实测：4000 个汉字的 URL 就 431）。
+     *    ⇒ 300 字这个截断实际上是"语义上限"，传输上限由 Node 兜着，两边都不一致时
+     *      前端会看到 431 而不是我们的 JSON。**前端必须自己先截断**，别指望这里。
+     */
+    if (req.method === 'GET' && path === '/api/douyin-duty/pet/tts') {
+      try {
+        const u = new URL(req.url, 'http://x')
+        const rawText = String(u.searchParams.get('text') || '')
+        // 截断在**清洗前**也做一次：urlencoded 一篇文章能有几十 KB，
+        // 清洗正则跑在长文本上不便宜（虽然不至于卡死，但没必要）
+        const spoken = cleanForSpeech(rawText.slice(0, MAX_TEXT * 2))
+        if (!spoken) {
+          return sendJson(res, 200, { ok: false, error: '清洗完没有可念的内容（全是符号/markdown？）' })
+        }
+        const voice = pickVoice(u.searchParams.get('voice') || cfg.petVoiceName || DEFAULT_VOICE)
+
+        // ① 缓存命中：直接回 mp3 文件，0 网络 0 合成（同一句话反复说是常态）
+        const hit = ttsCache.get(spoken, voice)
+        if (hit) {
+          ttsStats.hits++
+          const buf = readFileSync(hit.mp3Path)
+          res.writeHead(200, {
+            'content-type': 'audio/mpeg',
+            'content-length': buf.length,
+            'cache-control': 'no-store',      // no-store：让她换音色/换台词立刻生效
+            // 口型时间轴走响应头带回去（前端要它来判断"她在念哪句"）——
+            // 不塞进 body（body 是纯 mp3），也不另开一个接口（多一次往返）
+            'x-tts-cues': Buffer.from(JSON.stringify(hit.cues || []), 'utf8').toString('base64'),
+            'x-tts-cached': '1',
+            'x-tts-voice': voice,
+            'access-control-expose-headers': 'x-tts-cues,x-tts-cached,x-tts-voice,x-tts-ms',
+          })
+          return res.end(buf)
+        }
+
+        // ② 真合成（排队）
+        const py = await ttsResolvePython()
+        if (!py.ok) {
+          ttsStats.fails++
+          ttsStats.lastError = String(py.reason || '没有可用的 python')
+          return sendJson(res, 200, { ok: false, error: '合成器没准备好：' + String(py.reason || '').slice(0, 300) })
+        }
+        const r = await ttsEnqueue(() => synthesize({
+          python: py.command, pythonArgs: py.args, text: spoken, voice, outDir: ttsDir,
+        }))
+        if (!r.ok) {
+          ttsStats.fails++
+          ttsStats.lastError = String(r.error || '未知')
+          log(`语音合成失败：${String(r.error || '').slice(0, 160)}（${spoken.slice(0, 24)}…）`)
+          return sendJson(res, 200, { ok: false, error: String(r.error || '合成失败'), voice })
+        }
+        ttsStats.spawned++
+        ttsStats.lastMs = Number(r.ms) || 0
+        // 存进缓存（超上限会淘汰最久没用的，并把那个 mp3 一起删掉）
+        ttsCache.set(spoken, voice, {
+          mp3Path: r.mp3Path, bytes: r.bytes, cues: r.cues || [], text: spoken, voice,
+        })
+        const buf = readFileSync(r.mp3Path)
+        res.writeHead(200, {
+          'content-type': 'audio/mpeg',
+          'content-length': buf.length,
+          'cache-control': 'no-store',
+          'x-tts-cues': Buffer.from(JSON.stringify(r.cues || []), 'utf8').toString('base64'),
+          'x-tts-cached': '0',
+          'x-tts-voice': voice,
+          'x-tts-ms': String(ttsStats.lastMs),
+          // 跨域读响应头要显式放行，否则前端 readText 拿到的是 null
+          'access-control-expose-headers': 'x-tts-cues,x-tts-cached,x-tts-voice,x-tts-ms',
+        })
+        return res.end(buf)
+      } catch (e) {
+        // 🔴 走到这里说明连合成都没开始就炸了 —— **绝不外抛**，否则宿主进程陪葬
+        ttsStats.fails++
+        ttsStats.lastError = String(e?.message ?? e)
+        log(`语音接口出错（已兜住，宿主不受影响）：${ttsStats.lastError}`)
+        try {
+          if (!res.headersSent) return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
+          return res.end()
+        } catch { return undefined }
       }
     }
 

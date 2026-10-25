@@ -1,6 +1,6 @@
 # probe-danmaku-rebuild.ps1 -- prove the "danmaku disappears after off/on" bug is fixed.
 #
-# Bug ("3.弹幕模式，出问题了，会消失"):
+# Bug (owner's item 3: "danmaku mode breaks / it disappears"):
 #   setDanmakuMode('off') did `danmakuEl.innerHTML = ''` (detaches 26 nodes) but the JS
 #   pool array still held them, and buildPool() starts with `if (pool.length) return`
 #   => it never re-created them. Any off/on cycle left the layer empty forever.

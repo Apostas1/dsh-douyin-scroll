@@ -240,10 +240,16 @@ public class PetHostApp
     static int BubbleBand = 170;
     static int BubbleWiden = 100;
     /// <summary>画布下面的「输入区」高度（DIP）。
-    /// 2026-10-25：34 → 74。34 只够塞一条 26px 的输入框，多一行就顶到她身上；
-    /// 74 = 输入框最大 96px 的一部分 + 按钮条 25px + 间距，长高也不会越界。
-    /// 这个值会作为 --foot-gap 注入页面，CSS 里所有贴底布局都从它算。</summary>
-    static int FootGap = 74;
+    /// 2026-10-25：34 → 74 → **152**。这个值一路涨是因为它就是那条缝的**高度预算**，
+    /// 而弹幕/按钮条/输入框全住在这条缝里，少一像素就会被窗口底边裁掉：
+    ///   74 = 只够「按钮条 + 一行输入框」，输入框长到第 3 行就开始被裁；
+    ///   152 = 按钮条 27 + 间距 4 + 输入框外壳 14 + 输入框最多 100 + 底留白 6 + 余量 1
+    ///         （实测各块高度见 pet.css 的注释），5 行全展开也一行不裁。
+    /// ⚠️ 这个值会作为 --foot-gap 注入页面，#dock 的 top 直接拿它算锚点 ——
+    ///    改这里不用改 CSS，两边自动跟着走。
+    /// ⚠️ 但它同时决定窗口总高（WH = 画布 + 气泡带 + FootGap）：
+    ///    240 + 170 + 152 = 562 DIP。屏幕 1583 可用高，完全放得下。</summary>
+    static int FootGap = 152;
     static int WW = 240 + 200;   // 窗口宽（DIP）—— 下面 RecomputeWin() 算
     static int WH = 240 + 170;   // 窗口高（DIP）
 
@@ -533,6 +539,11 @@ public class PetHostApp
     static bool TlValid = false;
     static double BbY = -1, BbX = 0, BbW = 0, BbH = 0;      // 泡泡
     static bool BbValid = false;
+    // ⭐ 2026-10-25 深夜：#dock（按钮条 + 输入框那个竖排容器）的并集。
+    //   为什么必须单独报：按钮条能藏起来，藏起来之后输入框顶上那一段在宿主眼里
+    //   就是"透明留白" ⇒ 点它会穿到桌面，输入框再也点不开。见 IsPointOnPet。
+    static double DkY = -1, DkX = 0, DkW = 0, DkH = 0;
+    static bool DkValid = false;
 
     static void ClickThroughTick()
     {
@@ -548,6 +559,7 @@ public class PetHostApp
             Log("hit: cur=" + p.X + "," + p.Y + " win=" + wr.L + "," + wr.T + "," + (wr.R - wr.L) + "x" + (wr.B - wr.T)
                 + " onPet=" + onPet + " box=" + (BoxValid ? (BoxX + "," + BoxY + "," + BoxW + "x" + BoxH) : "(none)")
                 + " tb=" + (TbValid ? (TbX + "," + TbY + "," + TbW + "x" + TbH) : "-")
+                + " dk=" + (DkValid ? (DkX + "," + DkY + "," + DkW + "x" + DkH) : "-")
                 + " clickthrough=" + ClickThrough);
     }
 
@@ -570,6 +582,10 @@ public class PetHostApp
         if (TbValid && InsideBox(cx, cy, S(TbX), S(TbY), S(TbW), S(TbH))) return true;
         if (TlValid && InsideBox(cx, cy, S(TlX), S(TlY), S(TlW), S(TlH))) return true;
         if (BbValid && InsideBox(cx, cy, S(BbX), S(BbY), S(BbW), S(BbH))) return true;
+        // ⭐ 2026-10-25 深夜：#dock（按钮条 + 输入框那个竖排容器）
+        //   页面把它报上来了就必须认，否则"按钮条藏起来、输入框在它原来的位置"
+        //   这一段在宿主眼里是留白 ⇒ 点输入框会穿到桌面，输入框再也点不开。
+        if (DkValid && InsideBox(cx, cy, S(DkX), S(DkY), S(DkW), S(DkH))) return true;
         return false;
     }
 
@@ -601,6 +617,7 @@ public class PetHostApp
                 BoxRectA(ref TbX, ref TbY, ref TbW, ref TbH, ref TbValid, j, "tb");
                 BoxRectA(ref TlX, ref TlY, ref TlW, ref TlH, ref TlValid, j, "tl");
                 BoxRectA(ref BbX, ref BbY, ref BbW, ref BbH, ref BbValid, j, "bb");
+                BoxRectA(ref DkX, ref DkY, ref DkW, ref DkH, ref DkValid, j, "dk");
             }
         }
         catch (Exception ex) { Log("OnHitRects EXC: " + ex.Message); }
@@ -1596,6 +1613,12 @@ public class PetHostApp
             new string[] { "ESFP · 元气小鱼（活泼）", "persona-esfp" },
             new string[] { "ISTJ · 维修工小鱼（认真）", "persona-istj" },
         });
+        // ⭐ 2026-10-25 深夜 主人：
+        //    「4最低排按钮要可以隐藏」→ 这条就是那个隐藏开关（藏了还能叫回来）
+        //    「你能接入语音输出吗…语音输出要跟嘴型对上」→ 语音开关
+        menu.Items.Add(new Separator());
+        addAct("🔊 语音：开/关（她出声，嘴型跟上）", "voice");
+        addAct("⌄ 显示/隐藏底部按钮条", "toolbar-toggle");
         menu.Items.Add(new Separator());
         addAct("去休息（面板可叫回）", "hide");
         addAct("退出（关掉她）", "quit");
@@ -1856,6 +1879,25 @@ public class PetHostApp
                             });
                         }
                         else Log("js: 主窗口还没好（Wv=null）");
+                    }
+                    else if (js.StartsWith("reload:", StringComparison.Ordinal) || js == "reload")
+                    {
+                        // ⭐ 2026-10-25：写 `reload` 就让页面重新加载。
+                        //   为什么需要：改页面（pet.js/pet.css/index.html）之后，
+                        //   要验证就必须让 WebView2 重新取一遍 —— 否则内存里跑的还是旧脚本。
+                        //   以前只能"杀掉宿主 → 等 keeper 拉起"，那一圈要 10 秒还容易撞
+                        //   singleton 锁；现在一条指令 2 秒就换新。
+                        Log("reload: 页面重载（测试通道）");
+                        try
+                        {
+                            if (Wv != null && Wv.CoreWebView2 != null)
+                            {
+                                Wv.CoreWebView2.Reload();
+                                Log("reload dispatched");
+                            }
+                            else Log("reload: 主窗口还没好（Wv=null）");
+                        }
+                        catch (Exception er) { Log("reload EXC: " + er.Message); }
                     }
                     else if (js.StartsWith("diaryjs:", StringComparison.Ordinal))
                     {

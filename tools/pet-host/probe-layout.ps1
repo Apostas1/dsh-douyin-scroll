@@ -1,9 +1,10 @@
 # probe-layout.ps1 -- prove the input box is FIXED and can grow beyond 3 lines.
 #
-# User complaints (2026-10-25 evening):
-#   1. "宠物下面的对话框要固定位置，不要因为点击对话框就自动弹上去了"
-#   2. "文本输入框太丑了"
-#   3. "文本框只能输入三行就不变化了"
+# User complaints (2026-10-25 evening), quoted here in ASCII on purpose:
+#   0. the chat box must stay put; clicking it must not make it jump upward
+#      (the TEXT OUTPUT box is the thing that should change, and it pops up on top)
+#   1. the text input box is ugly
+#   2. the text box only grows to three lines and then stops
 #
 # Method: run the REAL host against a temp home + fake upstream, drive the page via
 # the pet-test.txt channel (`js:` prefix), read measurements back from trace.txt.

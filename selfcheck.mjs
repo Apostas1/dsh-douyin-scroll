@@ -20,6 +20,10 @@ let pass = 0
 let fail = 0
 const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
 const bad = (m) => { fail++; console.log(`  ❌ ${m}`) }
+/** 读文件，读不到就返回空串（断言会自然失败，但不会把整段检查炸掉）。
+ *  为什么需要：selfcheck 已经很长，某个文件被改名/删除时应该报"缺这个文件"，
+ *  而不是 "TypeError: readFileSync ... ENOENT" 把后面几十条断言一起带走。 */
+const readIf = (p) => { try { return readFileSync(p, 'utf8') } catch { return '' } }
 const warn = (m) => { console.log(`  ⚠️  ${m}`) }
 
 console.log('dsh-douyin-scroll 本地预检\n')
@@ -827,6 +831,209 @@ try {
     bad(`弹幕逻辑有问题：${why || String(r.stderr || '').slice(0, 200)}`)
   }
 } catch (e) { bad(`弹幕逻辑测试跑不起来：${e.message}`) }
+
+/* ── 4j-7. 语音输出 + 嘴型同步（2026-10-25 深夜 主人第 3 条）──
+ *
+ * 🔴 这一段守的是"能对上嘴型"这件事**在代码里成立**，不是"文件里有这个词"：
+ *    ① 嘴型必须由**音频振幅**驱动（AnalyserNode + getByteTimeDomainData），
+ *       不是随便随机张合 —— 主人要的是"对上"，随机会被一眼看出来。
+ *    ② 源必须**经 analyser 再到扬声器**（`src.connect(analyser)`），
+ *       直接连 destination 的话 readRms 恒 0，嘴一下都不动。
+ *    ③ 不许用 `<audio>` + createMediaElementSource：跨 origin 无 CORS 头时
+ *       AnalyserNode 输出全 0（浏览器判污染），这条路在 WebView2 里是死的。
+ *    ④ 不许退化到 SAPI 念中文（本机只有英文音色，念中文像外星人）。
+ *    ⑤ 后端合成必须**永不抛**（这是 webServer 回调，抛出去宿主进程陪葬）。
+ */
+console.log('\n4j-7. 语音输出 + 嘴型同步')
+try {
+  const tts = readIf(join(here, 'lib', 'pet-tts.mjs'))
+  const petjs = readIf(join(here, 'tools', 'pet-page', 'pet.js'))
+  const idx = readIf(join(here, 'index.js'))
+
+  // ① 后端模块该有的导出
+  for (const name of ['DEFAULT_VOICE', 'cleanForSpeech', 'synthesize', 'resolvePython',
+    'pickVoice', 'makeTtsCache', 'synthesize', 'looksLikeMp3']) {
+    if (tts.includes(`export`) && new RegExp(`export\\s+(const|function|async\\s+function)\\s+${name}\\b`).test(tts)) {
+      ok(`语音模块导出 ${name}`)
+    } else bad(`lib/pet-tts.mjs 缺导出 ${name}`)
+  }
+  // ② 音色必须是中文女声（不许退化成英文）
+  if (/zh-CN-XiaoyiNeural/.test(tts)) ok('默认音色是中文女声 zh-CN-XiaoyiNeural')
+  else bad('默认音色不是中文音色')
+  if (/pickVoice/.test(tts) && /(!|不)/.test('')) { /* 占位，避免误判 */ }
+  // ③ 清洗必须是白名单（黑名单会把中文标点连坐删掉 —— 踩过，已返工）
+  if (/cleanForSpeech/.test(tts) && !/\\u3000-\\u303F/.test(tts.split('cleanForSpeech')[1]?.slice(0, 4000) || '')) {
+    ok('cleanForSpeech 不再用符号区黑名单（会把，。？！连坐删掉）')
+  } else bad('cleanForSpeech 又回到符号区黑名单了（中文标点会被删）')
+  // ④ 合成超时不许 unref（断了事件循环会直接退出，await 永远等不到 —— 踩过）
+  if (!/timer\s*[\s\S]{0,80}unref\(\)/.test(tts)) ok('合成超时定时器没有 unref（unref 会让 Node 直接退出）')
+  else bad('超时定时器 unref 了 —— 会让 Node 提前退出')
+
+  // ⑤ 路由：二进制 + 失败走 200+JSON + 全程 try/catch
+  if (idx.includes('/api/douyin-duty/pet/tts')) ok('接口 /pet/tts 已注册')
+  else bad('缺 /pet/tts 路由')
+  if (/['"]content-type['"]\s*:\s*['"]audio\/mpeg['"]/.test(idx)) ok('成功时回 audio/mpeg 二进制')
+  else bad('成功时没回 audio/mpeg（前端 <audio>/decodeAudioData 都放不了）')
+  if (/ttsEnqueue/.test(idx)) ok('合成并发被限制成 1（ttsEnqueue 排队）')
+  else bad('没做并发限制 —— 多句话会同时起多个 python')
+
+  // ⑥ 页面侧：嘴型必须由振幅驱动
+  if (/createAnalyser/.test(petjs)) ok('页面建了 AnalyserNode（准备量振幅）')
+  else bad('页面没建 AnalyserNode —— 嘴型就不可能对上声音')
+  if (/getByteTimeDomainData/.test(petjs)) ok('用 getByteTimeDomainData 算时域 RMS')
+  else bad('没读时域数据（频域峰值会让嘴随背景音乱抖）')
+  if (/src\.connect\(analyser\)/.test(petjs)) ok('音源先接 analyser 再接扬声器（不接就恒为 0）')
+  else bad('音源没接 analyser —— readRms 会是恒 0，嘴一下都不动')
+  if (/decodeAudioData/.test(petjs)) ok('走 fetch→arrayBuffer→decodeAudioData（不用 <audio>，避开污染）')
+  else bad('没走 decodeAudioData')
+  if (!/createMediaElementSource/.test(petjs)) ok('没有用 createMediaElementSource（跨域污染那条死路）')
+  else bad('用了 createMediaElementSource —— 跨 origin 时 AnalyserNode 会输出全 0')
+  // ⑦ 嘴型要真的并进 mouthOpen
+  if (/tgt\.mouthOpen\s*=\s*Math\.max\([^)]*envOpen/.test(petjs)) ok('包络真的并进 mouthOpen（不是只算不用）')
+  else bad('算出的包络没并进 mouthOpen')
+  // ⑧ 不许退化成 SAPI
+  if (!/System\.Speech|SpeechSynthesizer|sapi/i.test(idx) && !/System\.Speech|SpeechSynthesizer/i.test(tts)) {
+    ok('没有 SAPI 兜底（本机只有英文音色，念中文是噪音）')
+  } else bad('出现了 SAPI —— 那会用英文音色念中文')
+
+  // ⑨ 离线单测真的能跑（真跑一次 edge-tts，python 不可用则 SKIP 不算失败）
+  const r = spawnSync(process.execPath, [join(here, 'tools', 'pet-tts-test.mjs')], {
+    encoding: 'utf8', timeout: 120_000,
+  })
+  const out = String(r.stdout || '')
+  const line = out.split('\n').filter((l) => l.includes('结果：')).pop() || ''
+  if (r.status === 0) ok(`语音离线单测通过（${line.replace('结果：', '').replace('✓', '').trim()}）`)
+  else bad(`语音单测失败：${out.split('\n').filter((l) => l.includes('❌')).slice(0, 2).join(' ') || String(r.stderr || '').slice(0, 200)}`)
+} catch (e) { bad(`4j-7 检查跑不起来：${e.message}`) }
+
+/* ── 4j-8. 底部停靠区：输入框在按钮条下面、按钮条可隐藏（2026-10-25 深夜）──
+ *
+ * 主人拍板：「3 输入框移动到 4 最低排按钮下面，4 最低排按钮要可以隐藏」。
+ *
+ * 🔴 守这几件事（每一条都对应我踩过的坑）：
+ *   ① 结构必须是 **按钮条在 DOM 里排在输入框前面** —— 靠 flex column 排，
+ *      不是靠两个独立 fixed 的 bottom 值"算准"（我算错过，两条直接叠住）。
+ *   ② `#talkbar` **不许再有自己的 bottom** —— 那正是上一版"点一下弹上去"的根。
+ *   ③ `#dock` 的锚点必须是她的脚线（`100vh - --foot-gap`），不然会跟她错位。
+ *   ④ 按钮条隐藏必须有 `#dock.tool-off #toolbar{display:none}`。
+ *   ⑤ 宿主必须把 `dk` 矩形算进命中区 —— 按钮条藏起来之后，
+ *      输入框顶上那一段在宿主眼里是留白，点它会穿到桌面，输入框再也点不开。
+ *   ⑥ FootGap 必须 ≥ 152（那条缝的真实高度预算，算少了会被窗口底边裁掉）。
+ */
+console.log('\n4j-8. 底部停靠区（输入框在按钮下面 / 按钮条可隐藏）')
+try {
+  const html = readIf(join(here, 'tools', 'pet-page', 'index.html'))
+  const css = readIf(join(here, 'tools', 'pet-page', 'pet.css'))
+  const petjs2 = readIf(join(here, 'tools', 'pet-page', 'pet.js'))
+  const host = readIf(join(here, 'tools', 'pet-host', 'PetHost.cs'))
+
+  const iTool = html.indexOf('id="toolbar"')
+  const iTalk = html.indexOf('id="talkbar"')
+  if (iTool > 0 && iTalk > 0 && iTool < iTalk) ok('DOM 顺序：按钮条在输入框前面（页面上下顺序才对）')
+  else bad('DOM 顺序错了：输入框必须排在按钮条后面')
+  if (/#dock\s*\{/.test(html.replace(/<[^>]+>/g, '')) === false && /id="dock"/.test(html)) ok('#dock 容器存在（统一锚点）')
+  else bad('没有 #dock 容器')
+
+  const talkbarBlock = (css.match(/#talkbar\s*\{[\s\S]*?\}/) || [''])[0]
+  if (talkbarBlock && !/\bbottom\s*:/.test(talkbarBlock)) ok('#talkbar 不再自己写 bottom（不再两个 fixed 打架）')
+  else bad('#talkbar 又写了 bottom —— 会和 #dock 抢位置')
+  if (/#dock\s*\{[\s\S]{0,600}?top:\s*calc\(100vh\s*-\s*var\(--foot-gap/.test(css)) {
+    ok('#dock 锚定在她的脚线（100vh - --foot-gap）')
+  } else bad('#dock 没锚在脚线上')
+  if (/#dock\.tool-off\s+#toolbar\s*\{[^}]*display:\s*none/.test(css)) ok('按钮条可隐藏（#dock.tool-off）')
+  else bad('按钮条藏不起来')
+  if (petjs2.includes('setToolbarVisible')) ok('页面有 setToolbarVisible（按钮条开关）')
+  else bad('页面没有按钮条开关')
+
+  // 宿主命中区
+  if (/DkValid\s*&&\s*InsideBox/.test(host)) ok('宿主命中区算进了 dk（否则按钮条藏了输入框点不开）')
+  else bad('宿主没把 dk 算进命中区')
+  const fg = (host.match(/static\s+int\s+FootGap\s*=\s*(\d+)/) || [])[1]
+  if (Number(fg) >= 152) ok(`FootGap=${fg}（够装 按钮条+间距+输入框最大高）`)
+  else bad(`FootGap=${fg} 太小 —— 输入框长高会被窗口底边裁掉（要 ≥152）`)
+} catch (e) { bad(`4j-8 检查跑不起来：${e.message}`) }
+
+/* ── 4j-9. 弹幕"不许丢、要循环"（2026-10-25 深夜 主人第 2 条）──
+ *
+ * 主人：「弹幕要播放循环播放，不能几句就没了」。
+ * 真因是**丢**，不是量小：旧 spawnDanmaku 遇到"轨道全忙"直接 return，
+ * 而回话是排队推的、每片占 8 秒 ⇒ 第 8 片开始全丢且永不重来。
+ *
+ * 守：① 发射必须经过队列（dmQueue.push），不许"发不出去就扔掉"
+ *     ② 语句来源必须 > 单个 danmaku 列表（要拼各状态台词）
+ *     ③ 必须有洗牌袋（不是纯随机 —— 随机会让短句复读、长句永远抽不到）
+ *     ④ --dm-dist 必须按元素自身宽度算，而且**先 display:block 再量**
+ *        （我在 display:none 时量过 scrollWidth，恒为 0，兜底成 200，等于没修）
+ */
+console.log('\n4j-9. 弹幕不许丢 / 循环播放')
+try {
+  const pjs = readIf(join(here, 'tools', 'pet-page', 'pet.js'))
+  const dhtml = readIf(join(here, 'tools', 'pet-page', 'danmaku.html'))
+
+  if (/const\s+dmQueue\s*=\s*\[\]/.test(pjs)) ok('有统一队列 dmQueue')
+  else bad('没有队列 —— 又会"发不出去就丢"')
+  if (/dmQueue\.push\(/.test(pjs) && /dmQueue\.shift\(\)/.test(pjs)) ok('入队/出队成对（唯一发射出口）')
+  else bad('队列没被真正用起来')
+  if (/dmQueue\.length\s*=\s*0/.test(pjs)) ok('关弹幕时队列会被清（不留积压）')
+  else bad('关弹幕没清队列')
+  if (/function\s+pumpDanmaku/.test(pjs) && /startDanmakuPump/.test(pjs)) ok('有泵（单一发射定时器）')
+  else bad('没有统一的发射泵')
+  if (/function\s+danmakuPhrasePool/.test(pjs) && /'idle'|"idle"/.test(pjs)) {
+    ok('语句池拼了各状态的台词（不再只有 danmaku 那几句）')
+  } else bad('语句池还是只有 danmaku 列表')
+  if (/dmPhraseBag/.test(pjs) && /splice|reverse|for\s*\(let\s+i\s*=\s*dmPhraseBag\.length/.test(pjs)) {
+    ok('洗牌袋（一轮内不重复，循环播放）')
+  } else bad('没有洗牌袋 —— 随机抽会复读')
+  // dist 必须按自身宽度
+  if (/getBoundingClientRect\(\)\.width|scrollWidth/.test(pjs)) ok('弹幕距离按元素自身宽度算')
+  else bad('弹幕距离还是固定值（长句会卡在左边出不去）')
+  // 关键：必须**先 display:block 再量**（这条是我返工一次的原因）
+  const iDisp = pjs.indexOf("el.style.display = 'block'")
+  const iMeas = pjs.indexOf('const elW =')
+  if (iDisp > 0 && iMeas > 0 && iDisp < iMeas) ok('先 display:block 再量宽度（不可见元素量出来是 0）')
+  else bad('量宽度的顺序错了 —— display:none 时 scrollWidth 恒为 0')
+  // 全局弹幕页同一个病，也要修
+  if (/el\.style\.display\s*=\s*'block'[\s\S]{0,400}?getBoundingClientRect\(\)\.width/.test(dhtml)) {
+    ok('全屏弹幕页也按自身宽度算距离')
+  } else bad('全屏弹幕页还是写死 vw+400（残字那个病还在）')
+
+  // 离线单测（复现 bug 型）
+  const r = spawnSync(process.execPath, [join(here, 'tools', 'pet-danmaku-test.mjs')], {
+    encoding: 'utf8', timeout: 30_000,
+  })
+  if (r.status === 0) ok('弹幕离线单测通过')
+  else bad(`弹幕离线单测失败：${String(r.stdout || '').split('\n').filter((l) => l.includes('FAIL')).slice(0, 2).join(' ')}`)
+} catch (e) { bad(`4j-9 检查跑不起来：${e.message}`) }
+
+/* ── 4j-10. 本地开关不许被状态轮询扳回去（踩过两次的坑）──
+ *
+ * 状态同步是双向的：页面读 pet-window-state.json，也写 pet-cmd.json 让 keeper 改配置。
+ * 而 keeper 是 10 秒一拍 ⇒ 主人刚点完，2 秒后轮询读到**还没更新的旧值**，一把按回去。
+ *  - 弹幕踩过（"开了又自己关掉"）
+ *  - 语音又踩一次（实测 setVoice(true) 后 2 秒变 on:false、rms 恒 0，
+ *    看起来像"振幅分析坏了"，其实是开关被顶掉了）
+ * ⇒ 所有"主人亲手改的开关"必须进静默期。
+ */
+console.log('\n4j-10. 本地开关的静默期（防被状态轮询扳回去）')
+try {
+  const pjs2 = readIf(join(here, 'tools', 'pet-page', 'pet.js'))
+  if (/localChangedAt/.test(pjs2)) ok('有 localChangedAt（本地改动记账）')
+  else bad('没有本地改动记账 —— 开关会被回灌顶掉')
+  if (/LOCAL_GRACE_MS/.test(pjs2)) ok('有静默期常量 LOCAL_GRACE_MS')
+  else bad('没有静默期')
+  for (const k of ['voice', 'toolbar']) {
+    if (new RegExp(`localChangedAt\\.${k}\\s*=\\s*Date\\.now\\(\\)`).test(pjs2)) ok(`${k} 改动会进静默期`)
+    else bad(`${k} 改动没进静默期`)
+    if (new RegExp(`Date\\.now\\(\\)\\s*-\\s*localChangedAt\\.${k}\\s*>\\s*LOCAL_GRACE_MS`).test(pjs2)) {
+      ok(`${k} 回灌前会检查静默期`)
+    } else bad(`${k} 回灌没检查静默期`)
+  }
+  // 弹幕那个是更早的独立机制，别被后续改动拆掉
+  if (/danmakuUserUntil/.test(pjs2)) ok('弹幕的静默期还在（上一批修的，不许回退）')
+  else bad('弹幕静默期被拆了 —— "开了又自己关掉"会复发')
+} catch (e) { bad(`4j-10 检查跑不起来：${e.message}`) }
+
+/* ── 4j-7 结束 ── */
 
 /* ── 4j-4. 排障通道不许变成"定时重发器"（2026-10-25 事故）──
  * 🔴 事故经过：pet-test.txt 里留了一段测试 JS，

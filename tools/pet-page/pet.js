@@ -231,6 +231,184 @@ let rnd = { ax: 0, ay: 0, az: 0, bd: 0, ex: 0, ey: 0 }, nextRnd = 0
 // talk 口型（chat 面板发消息时说话）
 let talkTgt = 0, talkV = 0, talkUntil = 0
 
+/* ══════════════════════════════════════════════════════════════════════
+   ⭐⭐ 语音输出 + 嘴型同步（主人 2026-10-25 深夜第 3 条）
+   「你能接入语音输出吗，给我方案，其中语音输出要跟嘴型对上」
+
+   ## 声音从哪来
+   edge-tts（云端，中文女声 zh-CN-XiaoyiNeural，实测 2.1 秒出 31KB MP3）。
+   真人在后面合成，页面只干两件事：拿字节、放出来。
+
+   ## 嘴型怎么"对上"——这是本设计的核心取舍
+   拿得到的两条路：
+     ① **viseme / 音素时间轴**：要音素表，中文没有公开可靠的；edge-tts 的
+        subtitle 只给**整句一个时间块**（实测：「00:00:00,100 --> 00:00:05,200 整句话」），
+        拿它做口型等于整句嘴一直张着 —— 比不张还假。
+     ② **音频振幅包络（RMS）**：把正在放的声音逐帧算响度，响度直接喂 mouthOpen。
+        · 天生对齐：她出声的这一刻嘴就是张的，静音的气口嘴就合上
+          （真人说话的口型本质就是"有没有声、声多大"，元音差别肉眼看不出）
+        · 零额外依赖：AnalyserNode 就在浏览器里
+        · 任何语言、任何音色都自动成立
+   ⇒ 选 ②。主人要的是"对上"，不是"念得准";包络在观感上就是对的。
+
+   ⚠️ 一个坑：WebView2 里 `<audio>` + MediaElementSource 在**跨 origin 无 CORS 头**时
+      会把 AnalyserNode 的输出变成全 0（浏览器认为音频被污染，禁止读频谱）。
+      所以这里不用 <audio>，改成 fetch → arrayBuffer → decodeAudioData → AudioBufferSourceNode，
+      这条路拿到的 AudioBuffer 在**同一个 origin** 下就是可分析的。
+      接口 /api/douyin-duty/pet/tts 走的是宿主同源代理，origin 天然一致。
+   ══════════════════════════════════════════════════════════════════════ */
+let voiceOn = false              // 语音开关（状态文件 / 🔊 按钮 / 右键菜单）
+let voiceName = 'zh-CN-XiaoyiNeural'
+let audioCtx = null
+let analyser = null
+let analyserBuf = null           // Uint8Array(analyser.fftSize)
+let rmsData = 0                  // 最近一帧的响度（0..1）
+let voiceBusy = false            // 一次只放一句（别叠着念）
+let voiceQueue = []              // 待念的话（说完一句接下一句）
+
+/** 懒建 AudioContext：必须在有用户手势之后建，否则 WebView2 里是 suspended */
+function ensureAudio() {
+  if (audioCtx) {
+    if (audioCtx.state === 'suspended') { audioCtx.resume().catch(() => { }) }
+    return audioCtx
+  }
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext
+    if (!AC) return null
+    audioCtx = new AC()
+    analyser = audioCtx.createAnalyser()
+    analyser.fftSize = 1024          // 1024 点 ≈ 21ms 一帧，够跟上口型
+    analyser.smoothingTimeConstant = 0.55   // 平滑一点，嘴不要抖
+    analyser.connect(audioCtx.destination) // ⚠️ 分析节点也要接到出口才有时钟
+    analyserBuf = new Uint8Array(analyser.fftSize)
+    return audioCtx
+  } catch (e) { console.warn('[voice] audio init', e); return null }
+}
+
+/** 读当前响度（0..1）。用 RMS 而不是 max：max 会被一个毛刺顶满，嘴会乱张。 */
+function readRms() {
+  if (!analyser || !analyserBuf) return 0
+  try {
+    analyser.getByteTimeDomainData(analyserBuf)
+    let sum = 0
+    for (let i = 0; i < analyserBuf.length; i++) {
+      const v = (analyserBuf[i] - 128) / 128
+      sum += v * v
+    }
+    return Math.sqrt(sum / analyserBuf.length)
+  } catch { return 0 }
+}
+
+/** 她说一句话（有声音）。voiceOn 关着时只做口型、不出声 —— 不许静默失效。 */
+async function speak(text) {
+  const t = String(text || '').trim()
+  if (!t) return
+  // 口型无论如何都动（主人看到的"她在说话"这一层不能因为没网就没有）
+  talkUntil = Math.max(talkUntil, Date.now() + Math.min(6000, t.length * 90 + 900))
+  if (!voiceOn) return
+  if (voiceQueue.length > 3) voiceQueue = voiceQueue.slice(-3)   // 别积压太多
+  voiceQueue.push(t)
+  pumpVoice()
+}
+
+async function pumpVoice() {
+  if (voiceBusy || !voiceQueue.length) return
+  voiceBusy = true
+  const text = voiceQueue.shift()
+  try {
+    const base = apiBase()
+    if (!base) throw new Error('no-api')
+    const url = `${base}/pet/tts?text=${encodeURIComponent(text.slice(0, 200))}&voice=${encodeURIComponent(voiceName)}`
+    const r = await fetch(url, { cache: 'no-store' })
+    const ct = (r.headers.get('content-type') || '').toLowerCase()
+    if (ct.indexOf('json') >= 0) {
+      // 后端合成失败：明确降级成"只有口型"，不假装说过
+      const j = await r.json().catch(() => ({}))
+      console.warn('[voice] 合成失败：', j && j.error)
+      voiceStats.fails++
+      bubble('嗓子哑了…（语音没合成出来）', 3000)
+      return
+    }
+    const buf = await r.arrayBuffer()
+    if (!buf || buf.byteLength < 800) throw new Error('empty-audio')
+    const ac = ensureAudio()
+    if (!ac) throw new Error('no-audiocontext')
+    const audioBuf = await ac.decodeAudioData(buf.slice(0))
+    // ⚠️ 关键：源必须经 analyser 再到扬声器，否则 readRms 恒为 0（嘴不动）
+    const src = ac.createBufferSource()
+    src.buffer = audioBuf
+    src.connect(analyser)
+    voiceStats.played++
+    voiceStats.lastBytes = buf.byteLength
+    voiceStats.lastMs = Math.round(audioBuf.duration * 1000)
+    // 口型窗口先按音频真实时长开出来：即使 analyser 读不到（极端降级），
+    // 嘴也至少会在这段时间里动，不会"哑着不出声也不动嘴"
+    talkUntil = Math.max(talkUntil, Date.now() + Math.round(audioBuf.duration * 1000) + 400)
+    await new Promise((resolve) => {
+      src.onended = resolve
+      src.start(0)
+      // 兜底：解码出来的时长可能不准，超时也放行
+      setTimeout(resolve, Math.round(audioBuf.duration * 1000) + 800)
+    })
+  } catch (e) {
+    console.warn('[voice]', e && e.message || e)
+    voiceStats.fails++
+  } finally {
+    voiceBusy = false
+    // 接着念下一句（队列空了就停在 rmsData≈0，嘴自然合上）
+    if (voiceQueue.length) pumpVoice()
+  }
+}
+
+/* ── 本地操作的静默期（u）──────────────────────────────────────────
+   🔴🔴 2026-10-25 深夜 一个踩了两次的坑，必须记下来：
+
+   状态同步是**双向**的：页面读 pet-window-state.json 回灌 + 页面写 pet-cmd.json
+   让 keeper 改配置。而 keeper 是 10 秒一拍、状态文件也是它写的 ⇒ 主人刚点完，
+   页面本地生效了，**2 秒后那个 2 秒轮询读到的是还没更新的旧值，一把按回去**。
+
+   弹幕踩过一次（"开了又自己关掉"），语音又踩了一次（实测：
+   `setVoice(true)` 之后 2 秒 `on:false`，连 rms 都读不到了，看着像"嘴型驱动坏了"，
+   其实是 voiceOn 被扳回 false，驱动那段根本没跑）。
+   ⚠️ 诊断时**不要**被这种"看起来是功能坏了"骗了 —— 先查开关是不是被回灌顶掉。
+
+   ⇒ 所有"主人亲手改的开关"进静默期：期间不接受状态文件回灌，
+     过了静默期再跟文件对齐（那时 keeper 已经写完，两边一致）。 */
+const LOCAL_GRACE_MS = 20_000
+const localChangedAt = { voice: 0, toolbar: 0 }
+window.__voiceStats = () => ({
+  ...voiceStats,
+  on: voiceOn,
+  name: voiceName,
+  queued: voiceQueue.length,
+  busy: voiceBusy,
+  ctx: audioCtx ? audioCtx.state : 'none',
+  rms: Math.round(rmsData * 1000) / 1000,
+  mouthNow: cur ? Math.round(Number(cur.mouthOpen) * 100) / 100 : 0,
+  talkOn: Date.now() < talkUntil,
+  envPeak: voiceStats.envPeak,
+})
+
+/* 语音可观测计数：主人问"语音到底出没出声"，用数字答。
+   window.__voiceStats() 给探针读（真实播放次数 / 字节数 / 时长 / RMS 峰值）。 */
+const voiceStats = { played: 0, fails: 0, lastBytes: 0, lastMs: 0, rmsPeak: 0, envPeak: 0 }
+
+/** 开关语音（按钮条 🔊 / 右键菜单 / 状态文件都会走这里） */
+function setVoice(on, fromState) {
+  voiceOn = Boolean(on)
+  state.cfg = state.cfg || {}
+  state.cfg.voice = voiceOn
+  const btn = document.querySelector('#toolbar .tb[data-act="voice"]')
+  if (btn) btn.classList.toggle('on', voiceOn)
+  if (fromState) return voiceOn
+  // 主人亲手改的：进静默期，别被 2 秒轮询的旧值顶回去（见 localChangedAt 注释）
+  localChangedAt.voice = Date.now()
+  cmdWrite({ voice: voiceOn })
+  bubble(voiceOn ? '开嗓啦～鱼会出声了 (๑•̀ㅂ•́)و✧' : '闭嘴模式…只动嘴不出声', 3200)
+  if (voiceOn) { ensureAudio(); speak('主人，小鱼出声啦') }
+  return voiceOn
+}
+
 const smooth = (t) => { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t) }
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
 
@@ -468,8 +646,13 @@ function petReportRects() {
     const tb = R('toolbar'), tl = (document.getElementById('talkbar') || {}).classList &&
       document.getElementById('talkbar').classList.contains('on') ? R('talkbar') : null
     const bb = R('pet-bubble')
+    /* ⭐ 2026-10-25 深夜：#dock 里装了按钮条 + 输入框，它自己 pointer-events:none，
+       但宿主是**按矩形**判命中的（IsPointOnPet）—— 所以要把两者的并集报上去，
+       否则按钮条藏起来之后输入框那一条在宿主眼里还是"透明留白"，
+       点输入框会穿到桌面（用户就再也打不开输入框了）。 */
+    const dk = R('dock')
     const boxJson = box ? JSON.stringify(box) : 'null'
-    const uiJson = JSON.stringify({ tb, tl, bb })
+    const uiJson = JSON.stringify({ tb, tl, bb, dk })
     const stamp = boxJson + '|' + uiJson
     if (stamp === lastReport) return       // 没变化就不重复发，省得刷消息通道
     lastReport = stamp
@@ -547,7 +730,32 @@ function tickTargets(t, dt) {
   if (talkOn) talkTgt = Math.random() < 0.25 ? 0.04 : 0.25 + Math.random() * 0.75
   else talkTgt = 0
   talkV += (talkTgt - talkV) * Math.min(1, dt * 22)
-  tgt.mouthOpen = Math.max(tgt.mouthOpen, talkV)
+  /* ⭐ 语音播放时：**嘴型由真实音频响度驱动**（主人第 3 条「嘴型要跟语音对上」）。
+     ──────────────────────────────────────────────────────────────
+     这一层和上面的假口型是"取大"关系，不是覆盖：
+       · 语音在放 ⇒ RMS 包络几乎总是更大，假口型被盖住，嘴完全跟着声音走；
+       · 语音没在放（没开语音/在等下一句的气口）⇒ RMS≈0，退回假口型，
+         她"想事情/打字"时嘴巴仍然会动，不会像断电一样僵住。
+     映射曲线：实测人声的 byte-domain RMS 大多落在 0.03~0.20，
+       直接乘 1 只能张 1/5，看起来像没张。乘 4.5 并压到 1 之后再开个 0.75 次方，
+       小音量也能看见嘴动、大音量不会糊成一个大洞。
+     ⚠️ 别用 getByteFrequencyData 的峰值：那会让她嘴随背景音乱抖。 */
+  let envOpen = 0
+  if (voiceOn && audioCtx && analyser) {
+    const rms = readRms()
+    // 包络单独平滑一次：帧率抖、音量陡然变化时嘴不要抽搐
+    rmsData += (rms - rmsData) * Math.min(1, dt * 28)
+    const k = Math.min(1, rmsData * 4.5)
+    envOpen = Math.pow(k, 0.75)
+    if (envOpen > voiceStats.envPeak) voiceStats.envPeak = Math.round(envOpen * 100) / 100
+    // 有声音就陪着"说"：把假口型的窗口续上，免得两个来源打架
+    if (rmsData > 0.02) talkUntil = Math.max(talkUntil, Date.now() + 400)
+  } else {
+    rmsData += (0 - rmsData) * Math.min(1, dt * 10)
+  }
+  tgt.mouthOpen = Math.max(tgt.mouthOpen, talkV, envOpen)
+  // 嘴张得越大，下唇也要跟着降一点（引擎只有 mouthOpen 一个量，微调 mouthCY 让口型更像说话）
+  if (envOpen > 0.15) tgt.mouthCY = Math.max(tgt.mouthCY, envOpen * 0.35)
   // 🔴 小动作 override 层：阶梯式——当前补丁的参数**持续生效**到下一个补丁
   //    （v1 是快照式：两个补丁之间参数掉回 idle，动作看起来抽搐一下就没了）
   if (actionOverride) {
@@ -658,6 +866,21 @@ setInterval(() => {
    *     静默期内忽略文件里的旧值，等 keeper 把 cfg 写回正确值再恢复同步。
    *     两边最终仍然一致，只是不会自己顶掉自己刚做的操作。
    */
+  // ⭐ 按钮条显不显示（主人 2026-10-25：「最低排按钮要可以隐藏」）
+  //    🐛 这里踩过：直接拿文件和内存比，文件是 keeper 10 秒前的旧值 ⇒
+  //    主人刚藏好，2 秒后又被拉出来。所以本地改过就静默 20 秒（localChangedAt）。
+  if (typeof j.toolbar === 'boolean'
+    && Date.now() - localChangedAt.toolbar > LOCAL_GRACE_MS
+    && j.toolbar !== Boolean(state.cfg && state.cfg.toolbar)) {
+    setToolbarVisible(j.toolbar, true)
+  }
+  // ⭐ 语音开关同步（面板/状态文件改的，这边要跟上）
+  //    🐛 同一个坑，而且更隐蔽：voiceOn 被扳回 false 之后，嘴型驱动那段整块不跑，
+  //    看起来像"振幅分析坏了"，实际是开关被顶掉了。排查时先看 __voiceStats().on。
+  if (typeof j.voice === 'boolean'
+    && Date.now() - localChangedAt.voice > LOCAL_GRACE_MS
+    && j.voice !== voiceOn) setVoice(j.voice, true)
+  if (typeof j.voiceName === 'string' && j.voiceName) voiceName = j.voiceName
   if (Date.now() < danmakuUserUntil) return
   if (wantMode !== danmakuMode) setDanmakuMode(wantMode, true)   // true = 来自状态，不回写 cmd
 }, 2000)
@@ -860,6 +1083,84 @@ const laneFreeAt = new Array(DM_LANES).fill(0)   // 每条轨道"下一个可发
 let poolIdx = 0
 let dmFlip = 0                   // 0/1 交替，用来切换 dmA / dmB
 
+/* ══════════════════════════════════════════════════════════════════════
+   ⭐ 2026-10-25 深夜 主人第 2 条：「弹幕要播放循环播放，不能几句就没了」
+
+   真因（不是"量太小"，是**丢**）：
+     旧实现里所有发射都走 `spawnDanmaku/spawnDanmakuText`，而它们第一件事是
+       「选一条最早空出来的轨道；如果那条轨道还没到点 ⇒ return（这一拍不发）」
+     对"自动飘"的台词无所谓（下一拍再来），但**对话回复是排队发的**：
+       speakViaDanmaku 每 520ms 推一片，一共最多 12 片。
+       轨道 7 条、每片占 8 秒 ⇒ 第 8 片开始每条轨道都还没空，直接用 return 丢掉，
+       **而且丢掉的片永远不会重来**。
+     主人看到的就是"她说几句，然后就没了"——确实是丢，不是说完了。
+
+   ✅ 新设计：**统一队列 + 泵**（一个定时器，一套逻辑）
+     · 要发的东西一律先 push 进 dmQueue（永不丢）
+     · 泵每 220ms 跑一次：有空轨道就从队头取一条发；没空轨道就等下一拍
+     · 队列空了 ⇒ 自动补一句台词，**循环播放**：用"洗牌袋"而不是随机
+       （一轮里每条台词都出现恰好一次，发完再洗 —— 随机抽会出现
+        "同一句连出三次、另几句半天不出现"的观感，主人说的"就这几句"）
+   ══════════════════════════════════════════════════════════════════════ */
+const dmQueue = []               // 待发的弹幕：{ text, color, ttl }
+let dmPumpTimer = null
+let dmPhraseBag = []             // 洗牌袋：发完一轮再洗，保证"每条都轮得到"
+let dmAutoFill = true            // 局域弹幕开着时自动飘台词（关掉只发队列里的）
+/* 可观测计数（排障/自证用）：主人问"弹幕会不会几句就没了"，
+   唯一的硬证据就是"发射数一直在涨，而且发的句子一轮里不重样"。
+   window.__dmStats() 读它 —— 探针靠这个量，不靠肉眼看截图。 */
+const dmStats = { emitted: 0, dropped: 0, phrases: 0, rounds: 0, lastAt: 0, bagSize: 0 }
+
+/** 洗牌袋取下一句：一轮内不重复，发完自动再洗一轮 ⇒ 真正的"循环"。
+ *
+ *  🔴🔴 2026-10-25 深夜 主人第 2 条：「弹幕要播放循环播放，不能几句就没了」
+ *  这句话有两层意思，我一开始只做了第一层：
+ *    ① **不停**（不能放着放着就空屏）→ 队列 + 泵 + 洗牌袋，已解决；
+ *    ② **不只那几句**（每次开都是同样 6 句，看着像坏了）。
+ *  ② 的真因很蠢：`P('danmaku')` 每个人格只有 6–13 句，我拿它当**唯一**来源。
+ *
+ *  ✅ 现在合成一个大池：人格台词（danmaku）+ 各状态台词（idle/watch/run/error/
+ *     feed/sleep）+ 她此刻的 activity。来源从 6 条涨到 40+ 条，
+ *     **不需要任何新素材**，全是她本来就会说的话。
+ *  ⚠️ 洗牌袋对"大池"尤其重要：随机抽会让短句反复出现、长句永远抽不到，
+ *     一轮不重复才像"她在碎碎念"，而不是"复读机"。 */
+function danmakuPhrasePool() {
+  const p = PERSONAS[state.persona] || PERSONAS.infp
+  const keys = ['danmaku', 'idle', 'watch', 'run', 'error', 'feed', 'sleep']
+  const out = []
+  for (const k of keys) {
+    const a = p[k]
+    if (Array.isArray(a)) for (const s of a) if (s) out.push(String(s))
+  }
+  // 她此刻在干嘛（宿主推来的 activity）—— 只在她"不在思考中"的时候掺进去，
+  // 否则弹幕会一直滚"鱼在想…"，看着像卡住了。
+  if (curActivity && Date.now() - curActivityAt > 8000) out.push(curActivity)
+  /* ⚠️ 这里**不许**去混别的人格（ENTP 的毒舌话不能从 INFP 嘴里出来）。
+     AGENTS.md「一个人格一份话术」是硬规矩，宁可池子小也不能串味。
+     每份人格的 idle/watch/run/error/feed/sleep 加起来本来就有 20–40 句，
+     配洗牌袋（一轮不重复）足够像碎碎念了。 */
+  // 去重（不同状态列表里会有重复句）
+  const seen = new Set()
+  return out.filter((s) => (seen.has(s) ? false : (seen.add(s), true)))
+}
+
+function nextDanmakuPhrase() {
+  const list = danmakuPhrasePool()
+  if (!list.length) return ''
+  if (!dmPhraseBag.length) {
+    dmPhraseBag = list.slice()
+    for (let i = dmPhraseBag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      const t = dmPhraseBag[i]; dmPhraseBag[i] = dmPhraseBag[j]; dmPhraseBag[j] = t
+    }
+    dmStats.rounds++
+    dmStats.bagSize = dmPhraseBag.length
+  }
+  const s = dmPhraseBag.pop() || ''
+  if (s) dmStats.phrases++
+  return s
+}
+
 function buildPool() {
   if (pool.length) return
   for (let i = 0; i < DM_POOL_SIZE; i++) {
@@ -887,24 +1188,32 @@ function takeFreeEl(now) {
   return null            // 全在飞（不该发生：轨道数 < 池），这一拍不发
 }
 
-function spawnDanmaku(startX) {
-  if (danmakuEl.style.display === 'none') return
-  buildPool()
-  const now = performance.now()
-
-  // ① 选轨道：挑"最早空出来"的那条；还没到就等（这一拍不发，不硬塞）
+/** 找一条已经空出来的轨道；全都还在占 ⇒ -1（这一拍不发，等下一拍） */
+function pickFreeLane(now) {
   let lane = 0
   for (let i = 1; i < DM_LANES; i++) if (laneFreeAt[i] < laneFreeAt[lane]) lane = i
-  if (laneFreeAt[lane] > now) return
+  return laneFreeAt[lane] > now ? -1 : lane
+}
 
+/** 真正把一条弹幕交给 DOM（唯一出口）。返回是否发成功。 */
+function emitDanmaku(item) {
+  if (danmakuEl.style.display === 'none') return false
+  buildPool()
+  const now = performance.now()
+  const lane = pickFreeLane(now)
+  if (lane < 0) return false          // 轨道全忙：调用方把这条放回队列
   const el = takeFreeEl(now)
-  if (!el) return
+  if (!el) return false
 
-  el.textContent = pick(P('danmaku'))
+  el.textContent = item.text
   // 字体回到初版观感：17–30px（局域弹幕也要看得清）
-  const fs = 17 + Math.floor(Math.random() * 14)
+  const fs = item.fs || (17 + Math.floor(Math.random() * 14))
   el.style.fontSize = `${fs}px`
-  el.style.color = pick(DM_COLORS)
+  el.style.color = item.color || pick(DM_COLORS)
+  // 回话弹幕描边更重，桌面上也看得清
+  el.style.textShadow = item.strong
+    ? '0 0 6px rgba(0,0,0,.95), 0 2px 3px rgba(0,0,0,.95)'
+    : ''
 
   // ② 轨道定位（不再随机 top）：每条轨道一个高度带，垂直居中于带内
   const vh = window.innerHeight
@@ -912,11 +1221,28 @@ function spawnDanmaku(startX) {
   const laneH = usable / DM_LANES
   const top = 6 + lane * laneH + Math.max(0, (laneH - fs) / 2)
   el.style.top = `${Math.round(top)}px`
-  el.style.left = `${startX !== undefined ? startX : window.innerWidth}px`
+  el.style.left = `${item.startX !== undefined ? item.startX : window.innerWidth}px`
+  // 🔴 必须先变成可见，才能量出真实宽度（见下面 dist 那段的长注释）
+  el.style.display = 'block'
 
-  // ③ 距离/时长：跟窗口宽联动
-  const dist = window.innerWidth + 260
-  const dur = (7 + Math.random() * 4) * 1000      // ms，下面用来算轨道占用
+  // ③ 距离必须按**这一条自己的宽度**算。
+  //
+  // 🔴🔴 2026-10-25 深夜 截图抓到的真实现象：屏幕左边缘卡着一排半截字
+  //   （"主人啦！""好呀"那种，左边被切掉一刀，然后永远不动）。
+  // 两个错叠在一起，第一次修只修了前一半：
+  //   ① `--dm-dist` 原来是**固定值** innerWidth+260 —— 长句能到 600px 宽，
+  //      平移 innerWidth+260 之后右端还留在屏幕里，又被 fill-mode:forwards
+  //      永久钉住 ⇒ "贴边残字"。
+  //   ② 改成按元素宽度算之后**还是错**，因为我在 `display:none` 的状态下读
+  //      scrollWidth —— 不可见元素量出来恒为 0，兜底成 200，等于没改。
+  //      实测证据：位置采样里 20+ 条弹幕的 left 全是 -240（同一个兜底值），
+  //      而它们宽度从 100 到 280 不等。
+  //   ✅ 顺序改成：**先 display:block（字号/内容都设好）→ 再量 → 再设 --dm-dist**
+  //      这一条 layout 是必须付的（每秒约 1 次，7 条轨道分摊），
+  //      和旧版"每帧读 offsetWidth"不是一个量级。
+  const elW = Math.max(40, el.getBoundingClientRect().width || el.scrollWidth || 0)
+  const dist = window.innerWidth + elW + 40
+  const dur = item.strong ? 6800 : (7 + Math.random() * 4) * 1000
   el.style.setProperty('--dm-dist', `-${dist}px`)
   el.style.setProperty('--dm-dur', `${(dur / 1000).toFixed(2)}s`)
 
@@ -929,15 +1255,76 @@ function spawnDanmaku(startX) {
   el.style.animationTimingFunction = 'linear'
   el.style.animationFillMode = 'forwards'
   el.style.animationIterationCount = '1'
-  el.style.display = 'block'
 
   // ⑤ 记账：这条轨道要占用多久（走完 + 140ms 间隔），供下一次挑轨道
   el.__until = now + dur + 140
   laneFreeAt[lane] = el.__until
+  dmStats.emitted++
+  dmStats.lastAt = Date.now()
+  return true
 }
 
-let dmTimer = null
-/** 当前弹幕模式：'off' | 'local' | 'full' */
+/** 排障口子：主人问"弹幕会不会几句就没了"时，用数字回答，别用眼睛。
+ *  ⚠️ visible 只算"真的还在飞"的（__until 未到），不能算 display!=='none' ——
+ *    动画跑完靠 fill-mode:forwards 停在屏幕外，那些元素的 display 仍是 block，
+ *    按 display 数会得出"40 条同时在屏幕上"的假结论（我自己先误读过一次）。 */
+window.__dmStats = () => {
+  const now = performance.now()
+  let flying = 0
+  if (danmakuEl) {
+    for (const c of danmakuEl.children) {
+      if (Number(c.__until || 0) > now) flying++
+    }
+  }
+  return {
+    ...dmStats,
+    queued: dmQueue.length,
+    lanes: DM_LANES,
+    poolSize: DM_POOL_SIZE,
+    bagLeft: dmPhraseBag.length,
+    bagTotal: danmakuPhrasePool().length,
+    bagSize: dmStats.bagSize,
+    mode: danmakuMode,
+    pump: Boolean(dmPumpTimer),
+    dom: danmakuEl ? danmakuEl.children.length : 0,
+    flying,                 // 真正在屏幕上飘的条数（≤ lanes）
+  }
+}
+
+/**
+ * 泵：唯一的发射定时器。
+ * ① 有空轨道 ⇒ 从队头取一条发（发不出去就放回去，不丢）
+ * ② 队列空、且局域弹幕开着 ⇒ 补一句台词（洗牌袋 ⇒ 循环播放）
+ * ③ 一层 while 最多铺满所有轨道，绝不一次性刷爆
+ */
+function pumpDanmaku() {
+  if (danmakuEl.style.display === 'none') return
+  buildPool()
+  for (let guard = 0; guard < DM_LANES; guard++) {
+    const now = performance.now()
+    if (pickFreeLane(now) < 0) return         // 轨道全忙 ⇒ 这一拍到此为止
+    if (!dmQueue.length) {
+      if (!dmAutoFill) return
+      const t = nextDanmakuPhrase()
+      if (!t) return
+      dmQueue.push({ text: t })
+    }
+    const item = dmQueue[0]
+    if (!emitDanmaku(item)) return            // 没发出去：留着，下一拍再来
+    dmQueue.shift()
+  }
+}
+
+function startDanmakuPump() {
+  if (dmPumpTimer) return
+  // 220ms 一拍：比轨道释放间隔细，肉眼看起来是"持续不断地飘"
+  dmPumpTimer = setInterval(pumpDanmaku, 220)
+}
+
+function stopDanmakuPump() {
+  if (dmPumpTimer) { clearInterval(dmPumpTimer); dmPumpTimer = null }
+}
+
 let danmakuMode = 'off'
 /** 主人亲手改过弹幕模式的时刻（+静默期）—— 期间不接受状态文件回灌的旧值。
  *  见下面轮询里的长注释：这就是"开了又自己关掉"的主因。 */
@@ -956,12 +1343,19 @@ function setDanmakuMode(mode, fromState) {
   // ① 本窗口只画 local
   if (mode === 'local') {
     danmakuEl.style.display = 'block'
-    if (!dmTimer) {
-      for (let i = 0; i < 6; i++) spawnDanmaku(window.innerWidth - Math.random() * window.innerWidth * 0.6)
-      dmTimer = setInterval(() => spawnDanmaku(), 450 + Math.random() * 500)
+    buildPool()
+    dmAutoFill = true
+    // ⭐ 先把轨道"铺开"：一开场撒 6 条在不同起点，屏幕上立刻就有东西在飘
+    //    （不是等 6 拍：那 1.3 秒的空白就是主人说的"开了没反应"）
+    for (let i = 0; i < 6; i++) {
+      const t = nextDanmakuPhrase()
+      if (t) dmQueue.push({ text: t, startX: window.innerWidth - Math.random() * window.innerWidth * 0.6 })
     }
+    startDanmakuPump()
+    pumpDanmaku()
   } else {
     danmakuEl.style.display = 'none'
+    stopDanmakuPump()
     // 🔴🔴🔴 2026-10-25 晚 主人：「弹幕模式，出问题了，会消失」
     //
     //   真因就在下面这两行的**顺序**上（一个典型的池化 + 清 DOM 冲突）：
@@ -979,7 +1373,9 @@ function setDanmakuMode(mode, fromState) {
     danmakuEl.innerHTML = ''
     pool.length = 0
     poolIdx = 0
-    if (dmTimer) { clearInterval(dmTimer); dmTimer = null }
+    laneFreeAt.fill(0)
+    dmQueue.length = 0       // 队列也清：关掉的时候没人想看积压
+    dmPhraseBag = []         // 洗牌袋重来（下次开从新的一轮开始）
   }
   // ② full 交给宿主的独立全屏窗（状态回灌时也要通知一遍，保证两端一致）
   try { if (hasHost) window.chrome.webview.postMessage('pet:danmaku:' + mode) } catch { }
@@ -990,8 +1386,24 @@ function setDanmakuMode(mode, fromState) {
     mode === 'local' ? '弹幕开在她身边～' : '弹幕关了', 3000)
 }
 
-/** 老接口保留（按钮条那枚📺走循环切换） */
-function setDanmaku(on) { setDanmakuMode(on ? 'local' : 'off') }
+/** 开/关底部按钮条（主人 2026-10-25 深夜：「最低排按钮要可以隐藏」）
+ *  为什么做成"能藏起来"而不是"干脆删掉"：
+ *    右键原生菜单在某些情况下弹不出来（WebView2 composition + 全屏应用抢焦点），
+ *    那一排按钮就是唯一的入口。藏起来是为了干净，但不能没有回入口 ——
+ *    所以右键菜单里保留一条「显示/隐藏底部按钮条」，状态也写进配置，
+ *    重启后仍然是主人喜欢的那个样子。 */
+function setToolbarVisible(on, fromState) {
+  const dock = document.getElementById('dock')
+  if (dock) dock.classList.toggle('tool-off', !on)
+  state.cfg = state.cfg || {}
+  state.cfg.toolbar = Boolean(on)
+  if (fromState) return Boolean(on)
+  // 主人亲手改的：进静默期（否则 keeper 还没写配置，2 秒后又被拉回来）
+  localChangedAt.toolbar = Date.now()
+  cmdWrite({ toolbar: Boolean(on) })
+  bubble(on ? '按钮条回来了' : '按钮条藏好了（右键菜单能叫回来）', 3000)
+  return Boolean(on)
+}
 
 /** 换人格（二级菜单直选时调它） */
 function setPersona(id) {
@@ -1033,7 +1445,8 @@ async function openDiary() {
       const t = String(pick3[i].text || '').trim()
       i++
       bubbleType(`「${t}」`, 55)
-      talkUntil = Date.now() + t.length * 65 + 1800
+      talkUntil = Math.max(talkUntil, Date.now() + t.length * 65 + 1800)
+      speak(t)          // 日记是"念"出来的，语音这里最该有声音
       setTimeout(sayNext, t.length * 65 + 2600)
     }
     sayNext()
@@ -1124,7 +1537,8 @@ async function chatSend(text) {
     startReplyPoll()
     const reply = String(j.say || '').trim() || '嗯！'
     bubbleType(reply, 45)
-    talkUntil = Date.now() + reply.length * 60 + 900
+    talkUntil = Math.max(talkUntil, Date.now() + reply.length * 60 + 900)
+    speak(reply)        // 语音：嘴型跟着真实音频走（主人第 3 条）
     if (j.anim) { try { perform(j.anim) } catch { } }
     // 脸部情绪：真生气/真开心时跟一下
     if (/哼|不理|讨厌|滚/.test(reply)) perform('sulk')
@@ -1136,7 +1550,8 @@ async function chatSend(text) {
     // 接口不通 = 浏览器预览 / 宿主没起来 ⇒ 退回本地小脑（明确降级，不假装）
     const reply = chatBrain(text)
     bubbleType(reply, 45)
-    talkUntil = Date.now() + reply.length * 60 + 800
+    talkUntil = Math.max(talkUntil, Date.now() + reply.length * 60 + 800)
+    speak(reply)
     console.warn('[chat] 走本地小脑：', e?.message || e)
     return { ok: false, brain: 'local', say: reply }
   } finally {
@@ -1182,68 +1597,40 @@ function splitForDanmaku(text, max = 22) {
   return parts.filter(Boolean).slice(0, 12)   // 最多 12 片，再多也没人看
 }
 
-/** 弹幕回话：复用既有 spawnDanmaku 管线（分轨 + 无强制重排），逐片滚出来 */
+/** 弹幕回话：全部塞进统一队列，由泵按轨道空闲节奏发 —— **一片都不丢**。
+ *
+ *  🔴🔴 2026-10-25 深夜 主人第 2 条：「弹幕要播放循环播放，不能几句就没了」
+ *  旧实现在这里每 520ms 直接调 spawnDanmakuText，而那个函数遇到"轨道全忙"就
+ *  `return` —— 排到第 8 片以后全被丢掉，而且永不重来。
+ *  现在只负责 **入队**，发不发、什么时候发，交给 pumpDanmaku 决定。
+ */
 function speakViaDanmaku(text) {
   const parts = splitForDanmaku(text)
   if (!parts.length) return
-  // 先确保局域弹幕层是开着的（否则 spawnDanmaku 直接 return，等于没回）
+  // 她说的话必须看得见：局域弹幕没开就先亮起来（不改主人的弹幕设置，
+  // 说完之后如果本来是关着的，再收回去）
   const wasOff = danmakuEl.style.display === 'none'
   if (wasOff) {
     danmakuEl.style.display = 'block'
     buildPool()
+    startDanmakuPump()
   }
-  let i = 0
-  const feed = () => {
-    if (i >= parts.length) {
-      // 说完之后：如果本来是关着的，收回去（不改变主人的设置）
-      if (wasOff) setTimeout(() => { if (danmakuEl.style.display !== 'none') danmakuEl.style.display = 'none' }, 1200)
-      return
-    }
-    // 回话片用固定颜色、比普通弹幕更显眼（这是"我要能看见"的那条）
-    const px = pick(DM_COLORS)
-    // 借 spawnDanmaku 的分轨/复用，但内容要指定 —— 用一次性 override
-    spawnDanmakuText(parts[i], px)
-    i++
-    setTimeout(feed, 520)
+  const color = pick(DM_COLORS)
+  for (const p of parts) dmQueue.push({ text: p, color, strong: true })
+  if (wasOff) {
+    // 队列清空后再收回去（用"泵空闲"作判据，而不是拍脑袋等 1.2 秒）
+    const idleCheck = setInterval(() => {
+      if (dmQueue.length) return
+      clearInterval(idleCheck)
+      stopDanmakuPump()
+      danmakuEl.innerHTML = ''
+      pool.length = 0
+      poolIdx = 0
+      laneFreeAt.fill(0)
+      danmakuEl.style.display = 'none'
+    }, 300)
   }
-  feed()
-}
-
-/** 指定文字 + 颜色的弹幕（复用同一条管线，只是内容由我们给） */
-function spawnDanmakuText(text, color) {
-  if (danmakuEl.style.display === 'none') return
-  buildPool()
-  const now = performance.now()
-  let lane = 0
-  for (let i = 1; i < DM_LANES; i++) if (laneFreeAt[i] < laneFreeAt[lane]) lane = i
-  if (laneFreeAt[lane] > now) return
-  const el = takeFreeEl(now)
-  if (!el) return
-  el.textContent = String(text)
-  const fs = 18 + Math.floor(Math.random() * 8)
-  el.style.fontSize = `${fs}px`
-  el.style.color = color || '#7FE3FF'
-  // 回话弹幕加一个描边更重的样式，保证在桌面上也看得清
-  el.style.textShadow = '0 0 6px rgba(0,0,0,.95), 0 2px 3px rgba(0,0,0,.95)'
-  const vh = window.innerHeight
-  const usable = Math.max(60, vh * 0.62)
-  const laneH = usable / DM_LANES
-  el.style.top = `${Math.round(6 + lane * laneH + Math.max(0, (laneH - fs) / 2))}px`
-  el.style.left = `${window.innerWidth}px`
-  const dist = window.innerWidth + 260
-  const dur = 8000
-  el.style.setProperty('--dm-dist', `-${dist}px`)
-  el.style.setProperty('--dm-dur', `${(dur / 1000).toFixed(2)}s`)
-  dmFlip ^= 1
-  el.style.animation = 'none'
-  el.style.animationName = dmFlip ? 'dmA' : 'dmB'
-  el.style.animationDuration = `${(dur / 1000).toFixed(2)}s`
-  el.style.animationTimingFunction = 'linear'
-  el.style.animationFillMode = 'forwards'
-  el.style.animationIterationCount = '1'
-  el.style.display = 'block'
-  el.__until = now + dur + 140
-  laneFreeAt[lane] = el.__until
+  pumpDanmaku()   // 立刻试着发第一条，不等下一拍（手感：她"马上"开口）
 }
 
 /** 轮询"我的真实回复"进来没有 */
@@ -1270,7 +1657,9 @@ function startReplyPoll() {
       // ② 弹幕聊天模式：同一段再滚一遍（第 6 条）
       if (chatViaDanmaku) speakViaDanmaku(merged)
       // 她也"说"这句话的时候，嘴动一下
-      talkUntil = Date.now() + merged.length * 60 + 1200
+      talkUntil = Math.max(talkUntil, Date.now() + merged.length * 60 + 1200)
+      // ③ 语音：真正念出来（主人第 3 条）—— 主人离开电脑时，这是唯一能"听见"她的路
+      speak(merged)
     } catch (e) {
       // 静默：这是后台轮询，失败不该弹错误气泡打扰主人
     } finally {
@@ -1479,7 +1868,16 @@ function doAction(act) {
     if (on && danmakuEl.style.display === 'none') {
       danmakuEl.style.display = 'block'
       buildPool()
+      startDanmakuPump()
+      pumpDanmaku()
     }
+    return
+  }
+  // ⭐ 语音开关（主人 2026-10-25 第 3 条）
+  if (act === 'voice') { setVoice(!voiceOn); return }
+  // ⭐ 按钮条显示/隐藏（主人 2026-10-25：「最低排按钮要可以隐藏」）
+  if (act === 'toolbar-toggle') {
+    setToolbarVisible(!(state.cfg && state.cfg.toolbar !== false))
     return
   }
   // ⭐ 人格直选（主人 2026-10-25：「人格应该有二级选项可以选择」）

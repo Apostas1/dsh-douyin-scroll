@@ -106,6 +106,49 @@ html.debug-white, html.debug-white body { background: #f5f5f5; }
 /* 命中热区（她躯干范围；泡泡和台词条各自独立接管点击） */
 #pet-body { position: absolute; top: 15%; left: 12%; right: 12%; bottom: 20%; }
 
+/* ── ⭐ 底部停靠区（#dock）：按钮条 + 输入框 ──
+   🔴🔴🔴 2026-10-25 深夜 主人拍板的最终布局：
+     「3输入框移动到4最低排按钮下面，4最低排按钮要可以隐藏」
+     （1 说的是「输入框放宠物状态栏下面、状态栏可隐藏」—— 也是这个方向）
+
+   从上到下的顺序：她 → 按钮条 → 输入框。
+
+   为什么是**一个从她脚下往下排的 column flex**，而不是各写一个 fixed：
+     · 上一版的病是"两条独立的 fixed bottom 互相打架"：输入框长高就往上顶，
+       而且算错一点就互相盖（实测踩过 input.bottom=400 / toolbar.bottom=406 直接叠住）。
+     · 现在只有一个锚点：**她的脚线**（画布底边 = 窗口高 - --foot-gap）。
+       容器从这条线往下排，里面的东西按 DOM 顺序往下落。
+     · ⇒ 输入框永远在按钮条下面（主人第 3 条）；
+       ⇒ 按钮条永远贴着她的脚，不会飘到半空中（不藏的时候看着是连着的）；
+       ⇒ 输入框长高只往**下**长，绝不推动她、绝不推动按钮条
+         （主人上一轮说的"点一下就弹上去"，那种"往上蹿"彻底没了）。
+
+   ⚠️ 高度预算必须算死，否则会被窗口底边裁掉（实测各块高度）：
+       按钮条 27（按钮 21 + padding 2/2 + 边框 1/1）
+       + 间距 4
+       + 输入框外壳 14（上下 padding 6/6 + 边框 1/1）+ 输入框最多 100（96 + content-box 的 2/2）
+       + 底部留白 6
+       = 151 ⇒ 宿主那边 FootGap 定 152，刚好装得下，一行都不裁。 */
+#dock {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  /* 锚点 = 她的脚线：画布贴底留 --foot-gap，所以脚线距窗口底正好是它 */
+  top: calc(100vh - var(--foot-gap, 152px));
+  width: calc(var(--canvas-w, 100%) + 44px);
+  display: flex; flex-direction: column; align-items: center;
+  gap: 4px;                                     /* 按钮条 ↔ 输入框之间那道缝 */
+  padding-bottom: 6px;                          /* 不贴着窗口最底边（贴边看着像被切了） */
+  z-index: 20; cursor: default;
+  pointer-events: none;                         /* 容器本身不吃点击（透明留白要点得到桌面） */
+}
+/* 只有真控件吃点击 —— 否则 #dock 那圈空白会把桌面的点击挡死 */
+#dock > * { pointer-events: auto; }
+/* 按钮条藏起来之后：输入框顶上那条缝没东西了，位置照样不动（锚点没变）。
+   ⚠️ 但主人要的是"输入框挪到按钮下面"——按钮藏了之后输入框就是这条缝里
+      唯一的东西，自然落在最上面。为了不让她脚边突然空出一大块，
+      这里把"藏起来之后"的输入框**往下压到这条缝的底部**（margin-top:auto）。 */
+#dock.tool-off #toolbar { display: none; }
+#dock.tool-off #talkbar { margin-top: auto; }
+
 /* ── 对话输入区（固定位置，永不跳动）──
    🔴🔴🔴 2026-10-25 晚 主人三条反馈一起改：
      「宠物下面的对话框要固定位置不要因为点击对话框就自动弹上去了」
@@ -120,17 +163,15 @@ html.debug-white, html.debug-white body { background: #f5f5f5; }
 
    新结构：
      · 输入区 = 画布下面那条**固定高度的缝**（--foot-gap，宿主给 74）；
-     · #talkbar 贴缝**底**、内部横排（输入框 + 发送键）；输入框往上长，
+     · #dock 贴缝底、内部竖排（按钮条在上、输入框在下）；输入框往上长，
        但 max-height 卡在 96 ⇒ 绝不推动她、不推动按钮条、不改窗口。
-     · 底座 bottom 固定 6px ⇒ 主人要的"固定位置"（点不点都不动）。 */
+     · 底座 bottom 固定 5px ⇒ 主人要的"固定位置"（点不点都不动）。 */
 #talkbar {
-  position: fixed; left: 50%; transform: translateX(-50%);
-  /* 🔴 底部对齐按钮条**上方**（按钮条高 26 + 底距 5 + 间距 4 = 35）。
-     探针实测过旧值 bottom:6px 会和按钮条叠在一起（input.bottom=400 / toolbar.bottom=406）。 */
-  bottom: 36px;
-  width: calc(var(--canvas-w, 100%) + 44px);
+  /* 位置由 #dock 的 flex 决定，这里只负责"贴底、可显示/隐藏"。
+     ⚠️ 千万不要再写 bottom —— 上一版就是两个独立 fixed 打架。 */
+  width: 100%;
   display: none;
-  z-index: 20; cursor: default;
+  cursor: default;
 }
 #talkbar.on { display: block; }
 /* 输入框外壳：层次感 + 固定的底座（旧版是裸 textarea，所以主人说"丑"） */
@@ -188,18 +229,15 @@ html.debug-white, html.debug-white body { background: #f5f5f5; }
 #menu .mi:hover { background: rgba(255,255,255,.12); }
 #menu .sep { height: 1px; background: rgba(255,255,255,.12); margin: 4px 6px; }
 
-/* ── 底部按钮条（v9）──
+/* ── 底部按钮条（v10）──
    🔴 2026-10-25 主人：「下方的菜单栏有点挡脚了」
    真因：原来 fixed bottom:6px —— 而她的脚就在画布最底边，必然压脚。
-   现在：画布下面单独留了一条**脚位缝**（宿主给的 --foot-gap，默认 34px），
-   按钮条放进这条缝里垂直居中，做成很窄一条、默认 30% 透明。
+   现在：#dock 里排在输入框**前面** ⇒ 永远在输入框上方；做成很窄一条、默认 30% 透明。
    ⚠️ 这里绝不能有整块不透明底板（会变成"背景不透明"）。 */
 #toolbar {
-  position: fixed; left: 50%; transform: translateX(-50%);
-  /* 2026-10-25：底部改成固定 5px。原来按 (--foot-gap-25)/2 算，
-     foot-gap 从 34 改到 74 之后它会漂到 24px 高，跟输入框打架。 */
-  bottom: 5px;
-  display: flex; gap: 3px; z-index: 35;
+  /* 位置交给 #dock 的 column flex（不再自己 fixed）——
+     上一版两个独立 fixed 的 bottom 一旦算错就互相盖（实测 input.bottom=400 / toolbar.bottom=406）。 */
+  display: flex; gap: 3px; flex-wrap: nowrap;
   padding: 2px 4px; border-radius: 10px;
   background: rgba(18,20,26,.50); border: 1px solid rgba(255,255,255,.08);
   opacity: .30; transition: opacity .16s ease, background .16s ease;
@@ -211,9 +249,11 @@ html.debug-white, html.debug-white body { background: #f5f5f5; }
 #toolbar .tb:hover { background: rgba(255,255,255,.26); transform: translateY(-1px); }
 #toolbar .tb:active { transform: translateY(0) scale(.94); }
 #toolbar .tb-danger:hover { background: #e5484d; }
-/* 输入框开着时：**按钮条不许动**。
+/* 语音开着的时候，那枚 🔊 要一眼看出来是"开着"的（不然主人不知道有没有生效） */
+#toolbar .tb.on { background: rgba(56,189,248,.55); box-shadow: 0 0 8px rgba(56,189,248,.65); }
+/* 输入框开着时：**按钮条不许动位置**（只减透明度，别改 bottom）。
    🔴 2026-10-25 晚 主人：「宠物下面的对话框要固定位置不要因为点击对话框就自动弹上去了」
    这里原来是 bottom: calc(--foot-gap + 2px) —— 一聚焦整条按钮就往上跳，
    正是主人说的"弹上去"的观感来源之一（除了输入框本身也在长高）。
-   现在按钮条永远钉在 bottom:5px，输入框在它正上方往上长，两者互不侵占。 */
+   现在按钮条由 #dock 排出位置，这条只在输入时压一点透明度提示"她在听"。 */
 body.talking #toolbar { opacity: .55; }

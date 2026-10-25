@@ -159,9 +159,21 @@
     const laneH = vh / LANES
     el.style.top = Math.round(lane * laneH + Math.max(0, (laneH - fs) / 2)) + 'px'
     el.style.left = (startX !== undefined ? startX : vw) + 'px'
+    // 必须先可见才量得到宽度（见下面 dist 的注释）
+    el.style.display = 'block'
 
+    /* 🔴 2026-10-25 深夜（和局域弹幕同一个病，两处都修）：
+       原来 `--dm-dist` 写死 `-${vw + 400}px`，而弹幕是 white-space:nowrap，
+       一条长句能有 700px 宽 ⇒ 平移 vw+400 之后右端还留在屏幕里，
+       又被 animation-fill-mode:forwards 永久钉住 ⇒ 屏幕左边缘一排半截字。
+       修法：距离按**这一条自己的宽度**算。
+       ⚠️ 另一个更隐蔽的坑：一开始我在 display:none 时读 scrollWidth，
+         量出来恒为 0（不可见元素没有布局），兜底成 200 ⇒ 等于没改。
+         所以上面那行 `el.style.display='block'` 必须在量之前。 */
+    const elW = Math.max(60, el.getBoundingClientRect().width || el.scrollWidth || 0)
+    const dist = vw + elW + 40
     const dur = (7 + Math.random() * 4) * 1000
-    el.style.setProperty('--dm-dist', `-${vw + 400}px`)
+    el.style.setProperty('--dm-dist', `-${dist}px`)
     el.style.setProperty('--dm-dur', (dur / 1000).toFixed(2) + 's')
 
     // 换 keyframe 名重启动画 —— 不读 offsetWidth，没有强制同步重排
@@ -172,7 +184,6 @@
     el.style.animationTimingFunction = 'linear'
     el.style.animationFillMode = 'forwards'
     el.style.animationIterationCount = '1'
-    el.style.display = 'block'
 
     el.__until = now + dur + 120
     laneFreeAt[lane] = el.__until
