@@ -31,3 +31,41 @@ chrome-profile/
 .venv/
 venv/
 node_modules/
+
+# ============================================================================
+# 🔴🔴🔴 桌宠宿主的二进制与 WebView2 用户目录 —— 绝不发布
+#
+# 2026-10-25 实测（npm pack --dry-run）：不加这一段，发布包 **312 MB / 1637 文件**，
+# 其中 604 个是垃圾：
+#   · 微软的 WebView2 DLL（版权是微软的，不该跟着我们的 MIT 包发）
+#   · tools/pet-host/pet-udf*/  ← **WebView2 的浏览器 profile**：
+#       Cookies / History / Login Data / Local Storage / 浏览记录缓存全在里面。
+#       这是主人的真实浏览痕迹，发出去等于把他浏览过什么一起发给全世界。
+#   · *.exe 是我这台机器上编出来的产物，别人机器上没用（而且平台相关）
+#
+# 打包只该带**源码**：PetHost.cs（别人自己编译）、build-host.ps1、探针脚本。
+# 编译好的 exe 由使用者的 build-host.ps1 自己生成。
+# ============================================================================
+tools/pet-host/*.exe
+tools/pet-host/*.exe.bak
+tools/pet-host/*.pdb
+tools/pet-host/*.dll
+tools/pet-host/*.config
+tools/pet-host/trace.txt
+tools/pet-host/pet-host-boot.log
+tools/pet-host/pet-udf/
+tools/pet-host/*-udf/
+tools/pet-host/*-udf-*/
+tools/pet-host/comp-probe/
+tools/pet-host/v7-test/
+tools/pet-host/dll-2903-bak/
+tools/pet-host/PetHost.v6-composite-bak.cs
+tools/pet-host/PetWin32Host.cs
+
+# 桌宠素材是主人的私货（PSD 拆层），只在本机；发布包里没有它
+assets/pet/
+
+# 排查用的一次性脚本 / 截图
+_scratch/
+*.png
+

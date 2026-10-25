@@ -1,0 +1,48 @@
+# ============================================================================
+# tools/pet-host/.npmignore —— 发布包里**不要**的宿主文件
+#
+# 🔴 为什么规则必须写在这里，不能写根 .npmignore（2026-10-25 实测）：
+#    package.json 的 `files` 里有 `"tools"`（整个目录），而 npm 规定
+#    **根目录的 .npmignore 覆盖不了 files 字段**，只有**子目录里的 .npmignore 可以**。
+#    所以之前写根 .npmignore 完全无效：npm pack --dry-run 实测
+#      312 MB / 1637 文件，其中 604 个是垃圾。
+#
+# ⚠️ 这里的位置是"子目录"⇒ 模式**相对本目录**，不用（也不能）写 tools/pet-host/ 前缀。
+#    （跟仓库根的 .gitignore 规则正好相反 —— 那边必须写全路径。这个差异踩过。）
+#
+# 不发的东西：
+#   · pet-udf*/  WebView2 的浏览器 profile：Cookies / History / Login Data /
+#                Local Storage / 浏览缓存全在里面。这是主人的真实浏览痕迹，
+#                发出去等于把他浏览过什么一起发给全世界。几百 MB 也是白占体积。
+#   · *.dll      微软的 WebView2 运行库（版权是微软的，不该跟着我们的 MIT 包发）
+#   · *.exe      本机编出来的产物，别的机器用不了（使用者自己跑 build-host.ps1 编）
+#   · 日志/诊断  trace.txt / pet-host-boot.log（含本机路径、窗口坐标）
+#   · 实验台     comp-probe/ v7-test/ dll-2903-bak/（一次性排障用，结论已进注释）
+# ============================================================================
+
+# WebView2 用户目录（含浏览记录）—— 最要紧的一条
+pet-udf/
+*-udf/
+*-udf-*/
+
+# 编译产物与微软 DLL
+*.exe
+*.exe.bak
+*.pdb
+*.dll
+*.config
+
+# 运行期诊断（含本机路径）
+trace.txt
+pet-host-boot.log
+*.log
+
+# 一次性实验台 / 旧源码备份
+comp-probe/
+v7-test/
+dll-2903-bak/
+PetHost.v6-composite-bak.cs
+PetWin32Host.cs
+
+# 探针用的一次性请求体样本（UTF-8 中文，只对本机有意义）
+probe-payload.json

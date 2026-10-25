@@ -147,10 +147,61 @@ state.actionUntil = 0
 const pick = (a) => a[Math.floor(Math.random() * a.length)]
 const P = (k) => (PERSONAS[state.persona] || PERSONAS.infp)[k] || []
 
-/* ── preload 桥（缺了=浏览器预览降级） ── */
-const bridge = window.dshpetBridge || null
+/* ── 诊断：记录最后一次鼠标事件（宿主/调试用）── */
+window.__lastMouse = { type: '', x: 0, y: 0, t: 0 }
+;['mousedown', 'mouseup', 'click', 'contextmenu', 'mousemove'].forEach((tp) => {
+  document.addEventListener(tp, (e) => {
+    window.__lastMouse = { type: tp, x: e.clientX, y: e.clientY, t: Date.now() }
+  }, true)
+})
+
+/* ── 宿主桥 ──
+   🔴 2026-10-24：宿主从 Electron 换成 WebView2（透明+可点击只能这么走），
+   Electron 的 preload 桥不存在了 ⇒ 之前所有右键动作（退出/喂饭/弹幕/换人格）
+   都只 console.log，点了没反应。现在接 WebView2 的 postMessage 通道：
+     window.chrome.webview.postMessage('cmd:<json>') → 宿主写 pet-cmd.json → keeper 应用
+   宿主还会推 state（pet-window-state.json 内容）进来，供 stateRead() 用。 */
+const isWebView2 = !!(window.chrome && window.chrome.webview && window.chrome.webview.postMessage)
+const hasHost = isWebView2   // v8：宿主在 ⇒ 拖动交原生、右键交原生菜单、命中矩形上报
+const bridge = window.dshpetBridge || (isWebView2 ? {
+  cmdWrite: (obj) => {
+    try { window.chrome.webview.postMessage('cmd:' + JSON.stringify(obj || {})) }
+    catch (e) { console.warn('[cmd] postMessage 失败', e) }
+  },
+  sfx: (which) => {
+    try { window.chrome.webview.postMessage('sfx:' + String(which || '')) } catch { }
+  },
+} : null)
+// 宿主推来的状态（宿主每 2 秒读 pet-window-state.json 后推给页面）
+// 🔴🔴 2026-10-25 修复：宿主原来执行的是
+//      window.chrome.webview.postMessage('state:' + json)
+//    而 postMessage 是**页面→宿主**方向，宿主自己执行等于发给自己 ⇒ 这里永远收不到，
+//    pushedState 恒为 null ⇒ apiBase() 恒为 '' ⇒ 日记 / 聊天一起废掉。
+//    现在宿主改成 ExecuteScriptAsync 直接调 window.__petOnState(jsonText)，
+//    下面这个函数就是它的落点；老的 message 监听保留，防别处还在用。
+let pushedState = null
+function adoptStateText(txt) {
+  try {
+    if (typeof txt !== 'string' || !txt) return false
+    pushedState = JSON.parse(txt)
+    return true
+  } catch (e) {
+    console.warn('[state] 解析失败', e)
+    return false
+  }
+}
+// 宿主 → 页面 的正式入口（PushState 调它）
+window.__petOnState = (txt) => { adoptStateText(txt) }
+if (isWebView2) {
+  window.chrome.webview.addEventListener('message', (ev) => {
+    try {
+      const d = ev.data
+      if (typeof d === 'string' && d.startsWith('state:')) adoptStateText(d.slice(6))
+    } catch (e) { console.warn('[state] 解析失败', e) }
+  })
+}
 function cmdWrite(obj) { if (bridge && bridge.cmdWrite) bridge.cmdWrite(obj); else console.log('[cmd]', obj) }
-function stateRead() { return bridge && bridge.stateRead ? bridge.stateRead() : null }
+function stateRead() { return bridge && bridge.stateRead ? bridge.stateRead() : pushedState }
 function sfx(which) { if (bridge && bridge.sfx) bridge.sfx(which) }
 
 /* ══════════ Anime2.5DRig 引擎集成 ══════════ */
@@ -364,6 +415,73 @@ function fadeAlpha(L, e) {
 }
 function vOpenOf(L, e) { return L.side === 'L' ? e.eyeOpenL : e.eyeOpenR }
 
+/* ── 命中矩形上报（v8：宿主点击穿透用）──
+   ⚠️ 为什么需要：v8 窗口是**真透明**的，但 WebView 表面仍是矩形。如果不告诉宿主
+   "她实际占了哪块"，宿主只能整窗吃掉鼠标，桌面上一大片点不到（或反过来整窗穿透、
+   她点不到）。所以由页面算出：
+     · pet:box → 人物 alpha 包围盒（按当前帧的层边界算，不是读像素，快且准）
+     · pet:ui  → 按钮条 / 台词条 / 泡泡（它们不在包围盒里，必须单独算）
+   宿主把这些换算成物理像素做命中判定（见 PetHost.cs IsPointOnPet）。 */
+let lastReport = ''
+function petReportRects() {
+  if (!hasHost) return
+  try {
+    const vw = window.innerWidth, vh = window.innerHeight
+    // 人物框：取所有可见层在当前变形后的联合包围盒（引擎坐标 1024×1024 → 屏幕）
+    let box = null
+    if (layers.length && renderer) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+      for (const L of layers) {
+        if (!L.visible || L.opacity < 0.02 || !L.cur) continue
+        const ps = L.cur
+        for (let i = 0; i < ps.length; i += 2) {
+          const px = ps[i], py = ps[i + 1]
+          if (px < x0) x0 = px; if (py < y0) y0 = py
+          if (px > x1) x1 = px; if (py > y1) y1 = py
+        }
+      }
+      if (x1 > x0 && y1 > y0) {
+        // 🔴 2026-10-25 修：原来用 min(vw,vh) 反推画布，但窗口现在是
+        //    「气泡带 + 画布 + 脚位」的竖长结构 ⇒ min 得到的是画布边长没错，
+        //    但底边不在 vh、左边不在 (vw-side)/2，导致包围盒整体偏大（实测 700x441 vs 画布 240）。
+        //    正确做法：**直接量 canvas 元素的真实矩形**，按它的边长换算。
+        const cr = cv.getBoundingClientRect()
+        const side = cr.width || Math.min(vw, vh)
+        const cLeft = cr.left, cTop = cr.top
+        box = {
+          x: Math.round(cLeft + x0 * (side / CW)),
+          y: Math.round(cTop + y0 * (side / CH)),
+          w: Math.round((x1 - x0) * (side / CW)),
+          h: Math.round((y1 - y0) * (side / CH)),
+        }
+      }
+    }
+    const R = (id) => {
+      const el = document.getElementById(id)
+      if (!el) return null
+      const st = getComputedStyle(el)
+      if (st.display === 'none' || st.visibility === 'hidden') return null
+      const r = el.getBoundingClientRect()
+      if (r.width < 3 || r.height < 3) return null
+      return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }
+    }
+    const tb = R('toolbar'), tl = (document.getElementById('talkbar') || {}).classList &&
+      document.getElementById('talkbar').classList.contains('on') ? R('talkbar') : null
+    const bb = R('pet-bubble')
+    const boxJson = box ? JSON.stringify(box) : 'null'
+    const uiJson = JSON.stringify({ tb, tl, bb })
+    const stamp = boxJson + '|' + uiJson
+    if (stamp === lastReport) return       // 没变化就不重复发，省得刷消息通道
+    lastReport = stamp
+    try { window.chrome.webview.postMessage('pet:box:' + boxJson) } catch { }
+    try { window.chrome.webview.postMessage('pet:ui:' + uiJson) } catch { }
+  } catch (err) { console.warn('[rects]', err) }
+}
+window.__petReportRects = petReportRects
+
+/* 每 400ms 报一次（够跟得上呼吸/动作，又不吵）；鼠标移动时也顺带报一次 */
+setInterval(petReportRects, 400)
+
 /* 渲染一帧 */
 function render(e) {
   const items = [], masks = []
@@ -483,12 +601,39 @@ document.addEventListener('mousemove', (e) => {
 })
 let lastCursor = null, lastMoveAt = 0
 
+/* ── 窗口拖动（v8：交给宿主做原生拖动）──
+   🔴 2026-10-24 改法：以前是页面算 screenX 增量发 'dragmove:dx,dy'，宿主改 Left/Top。
+   那条路在 180% 缩放下会抖、会把窗口甩到屏幕外。现在只发一条 'pet:drag'：
+   宿主 ReleaseCapture + WM_NCLBUTTONDOWN/HTCAPTION，交给 Windows 自己的移动循环，
+   位置、吸附、多显示器全都由系统处理（业界同类桌宠也是这么做）。
+   浏览器预览（没有宿主）时退化成页面内平移 #pet。 */
+let dragState = null
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return
+  const t = e.target
+  if (t && t.closest && (t.closest('#talkbar') || t.closest('#menu') || t.closest('#toolbar') || t.tagName === 'INPUT' || t.tagName === 'BUTTON')) return
+  dragState = { sx: e.screenX, sy: e.screenY, moved: false, sent: false }
+})
+document.addEventListener('mousemove', (e) => {
+  if (!dragState) return
+  const dx = e.screenX - dragState.sx, dy = e.screenY - dragState.sy
+  if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragState.moved = true
+  // 宿主：超过阈值就交出一次原生拖动（不再自己算增量）
+  if (dragState.moved && !dragState.sent && hasHost) {
+    dragState.sent = true
+    try { window.chrome.webview.postMessage('pet:drag') } catch { }
+  }
+})
+document.addEventListener('mouseup', () => { dragState = null })
+
 /* ── 状态轮询（2s）+ 弹幕开关 ── */
 setInterval(() => {
   const j = stateRead()
   if (!j) return
   if (j.on === false) { window.close && window.close(); return }
   if (!state.loaded && j.sprite_dir) { initModel(j.sprite_dir) }
+  // ⭐ 她的所思所想（主人定的设计初衷）：每拍都兜一次
+  pollActivityFromState(j)
   if (!state.repair) {
     const link = (j.link && j.link.state) || 'idle'
     const nowSec = Date.now() / 1000
@@ -496,8 +641,12 @@ setInterval(() => {
       bubble(pick(P(link)), 5000); state.lastAutoAt = nowSec
     }
   }
-  const wantDm = j.danmaku === true
-  $('danmaku').style.display = wantDm ? 'block' : 'none'
+  // ⭐ 弹幕三态（主人 2026-10-25）：从干净的状态文件恢复 & 跟随外部改动。
+  //    注意这里**不能**直接改 display（会和 setDanmakuMode 抢），统一交给它。
+  const wantMode = (typeof j.danmakuMode === 'string' && ['off', 'local', 'full'].includes(j.danmakuMode))
+    ? j.danmakuMode
+    : (j.danmaku === true ? 'local' : 'off')
+  if (wantMode !== danmakuMode) setDanmakuMode(wantMode, true)   // true = 来自状态，不回写 cmd
 }, 2000)
 
 /* ── 模型加载（PSD → rig → WebGL）── */
@@ -526,8 +675,48 @@ async function initModel(spriteDir, psdUrl) {
   }
 }
 
+/* ⭐ 渲染自检（宿主排障用）：在**同一帧内**读像素。
+   🔴 为什么不能直接在任意时刻 readPixels：WebGL 默认 preserveDrawingBuffer=false，
+   帧一提交缓冲就被清空，事后读到的必然是 0（我 2026-10-25 就这样误判过一次）。
+   所以这里排进 rAF，紧跟 render() 之后立刻读。 */
+window.__petPixels = function () {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      try {
+        const W = cv.width, H = cv.height
+        const px = new Uint8Array(4 * W * H)
+        gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px)
+        let n = 0, mx = 0
+        for (let i = 3; i < px.length; i += 4) { if (px[i] > 8) n++; if (px[i] > mx) mx = px[i] }
+        resolve({ w: W, h: H, opaque: n, maxA: mx, pct: Math.round(n * 1000 / (W * H)) / 10, layers: layers.length, loaded: !!state.loaded })
+      } catch (e) { resolve({ error: String(e && e.message || e) }) }
+    })
+  })
+}
+
+/* ⭐ 画布尺寸自算（主人 2026-10-25「文本框显示不完全」的配套修复）
+   ──────────────────────────────────────────────────────────────
+   宿主把她窗口改成「上面气泡带 + 下面正方形画布 + 左右气泡余量」：
+       窗口高 = 画布 + 气泡带      窗口宽 = 画布 + 左右余量×2
+   画布边长必须是**窗口高 - 气泡带**，且不能超过窗口宽（否则横向溢出）。
+   宿主会注入 --bubble-band；这里兜底算一次，保证 #gl / #pet 永远跟画布对齐、
+   人物不变形（之前写 width:100% 会按窗口宽撑大，人物变大且和命中区错位）。 */
+function layoutCanvas() {
+  const vw = window.innerWidth, vh = window.innerHeight
+  const cs = getComputedStyle(document.documentElement)
+  const band = parseFloat(cs.getPropertyValue('--bubble-band')) || 0
+  const foot = parseFloat(cs.getPropertyValue('--foot-gap')) || 0
+  // 画布 = min(窗口宽, 窗口高 - 气泡带 - 脚位)；>=80 防止极端情况算出 0
+  const side = Math.max(80, Math.min(vw, vh - band - foot))
+  document.documentElement.style.setProperty('--canvas-w', side + 'px')
+}
+layoutCanvas()
+window.addEventListener('resize', layoutCanvas)
+window.__petLayout = layoutCanvas   // 宿主注入几何后叫一次（见 PetHost.cs NavigationCompleted）
+
 /* ── 泡泡 / 弹幕 / 菜单 / 聊天 / 喂饭（交互层与 v5 相同）── */
 let bubbleTimer = null
+let activityPinned = false   // 她正在播报"在干嘛"时，别被普通泡泡顶掉
 function bubble(text, ms) {
   if (!text) { bubbleEl.style.display = 'none'; return }
   bubbleEl.textContent = text; bubbleEl.style.display = 'block'
@@ -535,28 +724,215 @@ function bubble(text, ms) {
   if (ms) bubbleTimer = setTimeout(() => { bubbleEl.style.display = 'none' }, ms)
 }
 
+/* ══════════════════════════════════════════════════════════════
+   ⭐ 她的「所思所想」—— 主人 2026-10-24 定的设计初衷
+   ──────────────────────────────────────────────────────────────
+   主人原话：「设计的初衷是为了看见这个宠物，就是你，在干嘛，
+   光看你思考干活，但是不知道在干嘛，所以才让她有个文本框
+   用拟人的口吻在显示你在干嘛」
+
+   ⚠️ 之前为什么看不见：宿主那套 activity 一直在写，但页面从来没读；
+   而且 keeper 每 10 秒全量覆盖状态文件，把 activity 抹掉。两处都修了。
+
+   这里的显示规则：
+     · 有 activity ⇒ 常驻显示（不自动消失，直到它被新的话替换）
+     · 话变了 ⇒ 淡出淡入 + 她做个小动作（像真的在想事）
+     · 太久没更新（>90 秒）⇒ 加一点"发呆"口吻，不要假装还在忙
+   ══════════════════════════════════════════════════════════════ */
+let curActivity = ''
+let curActivityAt = 0
+const ACTIVITY_STALE_MS = 90_000
+
+function renderActivity(text, at) {
+  text = String(text || '').trim()
+  if (!text) {
+    // 没话了：把她归位成"闲着"，不挂空框
+    if (curActivity) { curActivity = ''; activityPinned = false; bubble('', 0) }
+    return
+  }
+  if (text === curActivity) return          // 同一句，不重绘（避免每 500ms 闪一下）
+  curActivity = text
+  curActivityAt = Number(at) || Date.now()
+  activityPinned = true
+  // 换话的时候做个"回过神来"的小动作，让她像真的在报告自己在干嘛
+  try { perform(pick(['happy', 'surprise', 'wave'])) } catch { }
+  bubble(text, 0)                           // ms=0 ⇒ 常驻，不自动消失
+  bubbleEl.classList.add('is-activity')
+}
+
+// 页面每 2 秒的状态轮询里也要兜一次（万一宿主的快通道没起来）
+function pollActivityFromState(j) {
+  if (!j) return
+  if (typeof j.activity === 'string') renderActivity(j.activity, j.activityAt)
+}
+
+// 宿主 500ms 快通道的回调（见 PetHost.cs PushActivity）
+window.__petOnActivity = (text, at) => { try { renderActivity(text, at) } catch { } }
+
+// 空闲兜底：activity 太久没更新 ⇒ 加点"发呆"，别假装在忙
+setInterval(() => {
+  if (!curActivity || !curActivityAt) return
+  const idle = Date.now() - curActivityAt
+  if (idle > ACTIVITY_STALE_MS && !bubbleEl.classList.contains('is-stale')) {
+    bubbleEl.classList.add('is-stale')
+  }
+}, 5000)
+
+/* ══════════════════════════════════════════════════════════════
+   弹幕（主人 2026-10-25：「我要的是全屏弹幕跟局域弹幕，
+     但是你好像都用一个窗口画了，属于局域内的窗口」）
+   ──────────────────────────────────────────────────────────────
+   两种模式，物理上就是两个不同的显示面：
+     local = 局域弹幕 → 在**她自己这个窗口**里飘（跟着她走，只覆盖她周围一小块）
+     full  = 全屏弹幕 → 交给宿主的**独立全屏覆盖窗**（danmaku.html，整屏、点击穿透）
+     off   = 全关
+   本文件只负责 local；full 由宿主开窗，并通过 __dmSetMode 通知那个页面。
+   ══════════════════════════════════════════════════════════════ */
 const danmakuEl = $('danmaku')
+const DM_COLORS = ['#FFE066', '#FF8FA3', '#7FE3FF', '#B7FF7F', '#FFB86C', '#FFFFFF']
+
+/* 🔴 2026-10-25 主人：「弹幕有点卡顿，运行不流畅，其次局域弹幕字体有点小，
+   最开始的那版本字体就挺合适」
+   ──────────────────────────────────────────────────────────────
+   卡顿的真因（两条，都是我这版引入的）：
+     ① 用 `el.animate()`（Web Animations API）—— 每个弹幕一个动画对象，
+        几百个同时跑时主线程要给每个对象做时间轴调度 + 每帧合成，
+        在 WebView2 这种透明合成窗里尤其贵；
+     ② 动画跑完用 `anim.onfinish` 回收 —— onfinish 是**主线程回调**，
+        高峰时回调堆积也会掉帧。
+   修法：改用 **纯 CSS animation + animationend**：
+     · 走 CSS 合成层（transform 只改 matrix，浏览器可直接在 GPU 合成，不重排）
+     · 循环用**固定池 + 复用 DOM**，不再每 spawn 一个就 new 一个元素（GC 压力大）
+     · `will-change: transform` + `contain: layout style` 让每个弹幕独立成层
+   字体：改回初版大小 17–30px（之前被我压成 12–19px，太小了）。 */
+const DM_POOL_SIZE = 26          // 同时最多这么多条，够满但不压垮合成
+const pool = []
+let poolIdx = 0
+
+function buildPool() {
+  if (pool.length) return
+  for (let i = 0; i < DM_POOL_SIZE; i++) {
+    const el = document.createElement('div')
+    el.className = 'dm'
+    el.style.display = 'none'
+    // animationend 一到就归位（CSS 动画的回调，比 Web Animations 的 onfinish 轻）
+    el.addEventListener('animationend', () => { el.style.display = 'none' })
+    danmakuEl.appendChild(el)
+    pool.push(el)
+  }
+}
+
 function spawnDanmaku(startX) {
   if (danmakuEl.style.display === 'none') return
-  const el = document.createElement('div')
-  el.className = 'dm'; el.textContent = pick(P('danmaku'))
-  el.style.fontSize = `${15 + Math.floor(Math.random() * 12)}px`
-  el.style.top = `${20 + Math.random() * (window.innerHeight - 90)}px`
+  buildPool()
+  // 从池里轮着拿：全都在跑就跳过这一条（宁可少一条，也不掉帧）
+  const el = pool[poolIdx % DM_POOL_SIZE]
+  poolIdx++
+  if (el.style.display !== 'none') return
+
+  el.textContent = pick(P('danmaku'))
+  // ⭐ 字体回到初版观感：17–30px（局域弹幕也要看得清）
+  el.style.fontSize = `${17 + Math.floor(Math.random() * 14)}px`
+  // 局域弹幕只在**她自己那块区域**的高度里飘
+  const topLimit = Math.max(40, window.innerHeight * 0.58)
+  el.style.top = `${8 + Math.random() * topLimit}px`
   el.style.left = `${startX !== undefined ? startX : window.innerWidth}px`
-  const colors = ['#FFE066', '#FF8FA3', '#7FE3FF', '#B7FF7F', '#FFB86C', '#FFFFFF']
-  el.style.color = pick(colors)
-  danmakuEl.appendChild(el)
-  const dur = 6 + Math.random() * 7
-  const anim = el.animate([{ transform: 'translateX(0)' }, { transform: `translateX(-${window.innerWidth + 200}px)` }], { duration: dur * 1000, easing: 'linear' })
-  anim.onfinish = () => el.remove()
+  el.style.color = pick(DM_COLORS)
+  // 速度跟窗口宽走：小窗慢一点才看得清，大窗快一点才不堆
+  const dist = window.innerWidth + 260
+  const dur = 7 + Math.random() * 5
+  el.style.setProperty('--dm-dist', `-${dist}px`)
+  el.style.setProperty('--dm-dur', `${dur}s`)
+  // 触发重排让 animation 重新开始（复用元素必须清掉再设）
+  el.style.animation = 'none'
+  void el.offsetWidth
+  el.style.animation = ''
+  el.style.display = 'block'
 }
+
 let dmTimer = null
-function setDanmaku(on) {
-  danmakuEl.style.display = on ? 'block' : 'none'
-  if (on && !dmTimer) {
-    for (let i = 0; i < 12; i++) spawnDanmaku(window.innerWidth - Math.random() * window.innerWidth * 0.7)
-    dmTimer = setInterval(() => spawnDanmaku(), 350 + Math.random() * 450)
-  } else if (!on && dmTimer) { clearInterval(dmTimer); dmTimer = null; danmakuEl.innerHTML = '' }
+/** 当前弹幕模式：'off' | 'local' | 'full' */
+let danmakuMode = 'off'
+
+function setDanmakuMode(mode, fromState) {
+  mode = (mode === 'full' || mode === 'local') ? mode : 'off'
+  if (mode === danmakuMode) return
+  danmakuMode = mode
+  state.cfg = state.cfg || {}
+  state.cfg.danmakuMode = mode
+  state.cfg.danmaku = (mode !== 'off')   // 兼容老字段
+  // ① 本窗口只画 local
+  if (mode === 'local') {
+    danmakuEl.style.display = 'block'
+    if (!dmTimer) {
+      for (let i = 0; i < 6; i++) spawnDanmaku(window.innerWidth - Math.random() * window.innerWidth * 0.6)
+      dmTimer = setInterval(() => spawnDanmaku(), 450 + Math.random() * 500)
+    }
+  } else {
+    danmakuEl.style.display = 'none'
+    danmakuEl.innerHTML = ''
+    if (dmTimer) { clearInterval(dmTimer); dmTimer = null }
+  }
+  // ② full 交给宿主的独立全屏窗（状态回灌时也要通知一遍，保证两端一致）
+  try { if (hasHost) window.chrome.webview.postMessage('pet:danmaku:' + mode) } catch { }
+  if (fromState) return   // 来自状态文件：不再回写 cmd（否则和 keeper 打架）
+  // ③ 记住选择（keeper 会写进配置，重启后保留）
+  cmdWrite({ danmakuMode: mode })
+  bubble(mode === 'full' ? '全屏弹幕，整个屏幕都是鱼的字！' :
+    mode === 'local' ? '弹幕开在她身边～' : '弹幕关了', 3000)
+}
+
+/** 老接口保留（按钮条那枚📺走循环切换） */
+function setDanmaku(on) { setDanmakuMode(on ? 'local' : 'off') }
+
+/** 换人格（二级菜单直选时调它） */
+function setPersona(id) {
+  if (!PERSONAS[id]) return
+  state.persona = id
+  cmdWrite({ petPersona: id })
+  bubble(`换人格：${PERSONAS[id].name}`, 4000)
+  try { if (hasHost) window.chrome.webview.postMessage('pet:persona:' + id) } catch { }
+}
+
+/* ⭐ 彩蛋：念日记（主人 2026-10-25：「日记功能我要的是彩蛋形式」）
+   ──────────────────────────────────────────────────────────────
+   点右键 →「📔 她的日记」→ 她把今天**最戳人的几句**一句一句念出来，
+   用逐字气泡，像真的在翻日记本。面板里不再放这个（保持干净）。
+   ⚠️ 没有日记时说一句可爱的，不装作有。 */
+async function openDiary() {
+  try {
+    const base = apiBase()
+    if (!base) throw new Error('no-api')
+    const r = await fetch(`${base}/pet/diary`)
+    const j = await r.json()
+    const items = Array.isArray(j.items) ? j.items : []
+    const stars = items.filter((x) => x.star)
+    if (!stars.length) {
+      bubble(items.length ? '今天没什么特别戳人的话…鱼都是随口说的' : '日记本还是空的，鱼今天还没想什么呢', 7000)
+      perform('sulk')
+      return
+    }
+    perform('happy')
+    // 一句一句念（最多 3 句，念多了烦）
+    const pick3 = stars.slice(0, 3)
+    let i = 0
+    const sayNext = () => {
+      if (i >= pick3.length) {
+        const rest = stars.length - pick3.length
+        bubble(rest > 0 ? `……还有 ${rest} 句，鱼自己留着` : '……就这些啦', 5000)
+        return
+      }
+      const t = String(pick3[i].text || '').trim()
+      i++
+      bubbleType(`「${t}」`, 55)
+      talkUntil = Date.now() + t.length * 65 + 1800
+      setTimeout(sayNext, t.length * 65 + 2600)
+    }
+    sayNext()
+  } catch (e) {
+    bubble('日记本打不开…鱼找不到它了', 5000)
+    console.warn('[diary]', e)
+  }
 }
 
 function feed() {
@@ -576,7 +952,86 @@ function feed() {
   bodyEl.classList.add('qbang')
 }
 
-/* 聊天（本地人格小脑） */
+/* ⭐ 聊天（真对话）：主人 2026-10-24
+   「我跟她说话你是怎么设计的，收到消息乱回？」
+   原因是原来只有 4 条正则 + `pick(P('chat_fallback'))` 随机兜底。
+   现在把话发给宿主的 /api/douyin-duty/pet/chat：
+     · 第一层本地意图（时间/日期/卖萌/跳舞/挥手/困/喂饭）→ 立刻回，0 token
+     · 第二层真模型（llm.stream）→ 人话回，且可能带一个动作
+   ⚠️ 拿不到接口（浏览器预览/宿主没起）时，才退回老的本地小脑。 */
+let chatBusy = false
+let chatQueue = []      // 她"在想"的时候先攒着，别让主人看见输入框空转
+
+// 🔴 2026-10-25 修复：apiBase() 原来只认 stateRead() 推来的 api 字段。
+//    一旦状态没推到（宿主/页面时序、宿主重启、状态文件缺失），它就返回 ''，
+//    于是 fetch('/pet/diary') 打到**页面自己的 origin** 上 → 404 →
+//    主人看到的就是「日记点击打不开」「对话没连上」。一次空值炸两个功能。
+//
+// 🔴🔴 而且就算 api 拿到了也还是打不通：页面在 127.0.0.1:8611（插件静态服务），
+//    接口在 127.0.0.1:50898（DSH 宿主）—— **两个 origin，浏览器按同源策略直接掐掉**，
+//    页面里只看到 "Failed to fetch"（实测 XHR/fetch 全挂，响应头里一条 CORS 都没有）。
+//    ✅ 正解：走宿主提供的**同源反向代理** `/api/dsh/*`（PetHost 的 TcpListener 里转发给 DSH）。
+//    这样页面和接口同一个 origin，跨域从根上消失，也不要求 DSH 发 CORS 头。
+const DEFAULT_API_BASE = 'http://127.0.0.1:50898/api/douyin-duty'
+// 同源代理前缀：页面自己这个 origin 下的 /api/dsh → DSH 的 /api
+const SAME_ORIGIN_PROXY = '/api/dsh/douyin-duty'
+let lastApiBase = ''
+
+function apiBase() {
+  const j = stateRead && stateRead()
+  const fromState = (j && j.api) || ''
+  // ① 宿主在（WebView2）⇒ 一律走同源代理：不受跨域影响，也不用猜端口
+  if (isWebView2) {
+    if (fromState) lastApiBase = fromState
+    return SAME_ORIGIN_PROXY
+  }
+  // ② 浏览器预览（没有代理）⇒ 只能直连，有跨域风险但至少能跑
+  if (fromState) { lastApiBase = fromState; return fromState }
+  if (lastApiBase) return lastApiBase
+  return DEFAULT_API_BASE
+}
+
+async function chatSend(text) {
+  if (chatBusy) return
+  chatBusy = true
+  // 先让她"想想"：气泡显示思考中，不是卡住
+  bubbleEl.classList.add('is-thinking')
+  bubbleEl.textContent = '嗯…鱼在想'
+  bubbleEl.style.display = 'block'
+  try {
+    const base = apiBase()
+    if (!base) throw new Error('no-api')
+    const r = await fetch(`${base}/pet/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    const j = await r.json()
+    bubbleEl.classList.remove('is-thinking')
+    if (!j.ok) throw new Error(j.error || 'bad')
+    const reply = String(j.say || '').trim() || '嗯！'
+    bubbleType(reply, 45)
+    talkUntil = Date.now() + reply.length * 60 + 900
+    if (j.anim) { try { perform(j.anim) } catch { } }
+    // 脸部情绪：真生气/真开心时跟一下
+    if (/哼|不理|讨厌|滚/.test(reply)) perform('sulk')
+    else if (/好呀|开心|喜欢|嘿嘿|耶/.test(reply)) perform('happy')
+    console.log('[chat]', j.brain, j.intent || '', '→', reply)
+    return j
+  } catch (e) {
+    bubbleEl.classList.remove('is-thinking')
+    // 接口不通 = 浏览器预览 / 宿主没起来 ⇒ 退回本地小脑（明确降级，不假装）
+    const reply = chatBrain(text)
+    bubbleType(reply, 45)
+    talkUntil = Date.now() + reply.length * 60 + 800
+    console.warn('[chat] 走本地小脑：', e?.message || e)
+    return { ok: false, brain: 'local', say: reply }
+  } finally {
+    chatBusy = false
+  }
+}
+
+/* 老的本地小脑（降级用；接口不通时才有机会跑） */
 function chatBrain(text) {
   const p = state.persona
   if (/你是谁|名字/.test(text)) {
@@ -605,11 +1060,16 @@ function chatToggle() {
   const bar = $('talkbar')
   state.chatOpen = !state.chatOpen
   bar.classList.toggle('on', state.chatOpen)
+  // 按钮条往上让一格，不和输入框抢位置
+  document.body.classList.toggle('talking', state.chatOpen)
   if (state.chatOpen) {
     bubble(pick(P('chat_greet')), 5000)
+    autoGrow()
     chatInput.focus()
+    requestFocus()          // 🔴 关键：分层窗要靠宿主 Activate 才拿得到键盘焦点
   } else {
     chatInput.blur()
+    try { if (hasHost) window.chrome.webview.postMessage('pet:blur') } catch { }
   }
 }
 /* 逐字冒字（whale-girl 式）：回复打进头顶泡泡 */
@@ -626,30 +1086,76 @@ function bubbleType(text, speed) {
   }
   step()
 }
-$('chat-send').addEventListener('click', () => {
-  const t = chatInput.value.trim(); if (!t) return
-  chatInput.value = ''
-  const reply = chatBrain(t)
-  bubbleType(reply, 40)
-  talkUntil = Date.now() + reply.length * 60 + 800   // 口型跟逐字同步
-  // 情绪动作联动：夸她=开心，骂她=委屈，问状态=待机回头
-  if (/谢谢|爱你|喜欢|厉害|棒/.test(t)) perform('happy')
-  if (/笨|傻|烦|滚/.test(t)) perform('sulk')
-})
-chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') $('chat-send').click() })
+/* ══════════════════════════════════════════════════════════════
+   文本框（主人 2026-10-25：「文本输入框点击之后，依旧没跟你对话」+
+     「文本框输入多了也有问题」）
+   ──────────────────────────────────────────────────────────────
+   两个问题两套解法：
+   ① 点进去打不了字 ⇒ **分层透明窗默认拿不到键盘焦点**（宿主 ShowActivated=false 时代
+      干脆是 WS_EX_NOACTIVATE）。解法：一聚焦就喊宿主 `pet:focus` 主动 Activate()。
+   ② 输入多了挤爆 ⇒ 换成 textarea + 按内容自动长高（最多 4 行 60px，再多内部滚动）。
+   ══════════════════════════════════════════════════════════════ */
+const chatSendBtn = $('chat-send')
 
-/* 右键菜单 */
+/** textarea 按内容自适应高度（1 行起，最多 max-height 顶住内部滚动） */
+function autoGrow() {
+  chatInput.style.height = 'auto'
+  const h = Math.min(chatInput.scrollHeight, 60)
+  chatInput.style.height = Math.max(26, h) + 'px'
+}
+
+/** 请求键盘焦点（分层窗必须让宿主 Activate 才行）。
+ *  🔴 2026-10-25 防死循环：宿主 Activate 后可能让输入框**再次触发 focus**，
+ *    而 focus 又发 pet:focus ⇒ 每秒几十次互相唤醒（实测刷满日志）。
+ *    加最小间隔 + 只在"还没拿到焦点"时发。 */
+let lastFocusReqAt = 0
+function requestFocus() {
+  const now = Date.now()
+  if (now - lastFocusReqAt < 800) return   // 800ms 内不重复发
+  lastFocusReqAt = now
+  try { if (hasHost) window.chrome.webview.postMessage('pet:focus') } catch { }
+}
+
+chatInput.addEventListener('focus', requestFocus)
+chatInput.addEventListener('input', autoGrow)
+// 已经拿到焦点就不必再请求（避免 Activate ↔ focus 互相触发）
+chatInput.addEventListener('blur', () => { lastFocusReqAt = 0 })
+
+function sendChat() {
+  const t = String(chatInput.value || '').replace(/\s+$/, '')
+  if (!t.trim()) return
+  chatInput.value = ''
+  autoGrow()
+  chatSend(t.trim())
+}
+chatSendBtn.addEventListener('click', sendChat)
+chatInput.addEventListener('keydown', (e) => {
+  // Enter 发送；Shift+Enter 换行（多行输入必须留这个口，否则写不了长句）
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault()
+    sendChat()
+  }
+  if (e.key === 'Escape') { chatInput.blur(); try { if (hasHost) window.chrome.webview.postMessage('pet:blur') } catch { } }
+})
+
+/* 右键菜单（v8）：宿主在 ⇒ 让宿主弹**原生 WPF 菜单**（页面内菜单会被窗口边界裁掉，
+   而且分层窗里 WPF ContextMenu 的层级比 WebView 表面高，看起来才正常）；
+   浏览器预览 ⇒ 退化成页面内菜单。两边动作都走同一个 doAction()。 */
 document.addEventListener('contextmenu', (e) => {
   e.preventDefault()
+  if (hasHost) {
+    try { window.chrome.webview.postMessage('pet:menu') } catch { }
+    return
+  }
   menuEl.style.display = 'block'
   menuEl.style.left = `${Math.min(e.clientX, window.innerWidth - 190)}px`
   menuEl.style.top = `${Math.min(e.clientY, window.innerHeight - 320)}px`
 })
 document.addEventListener('click', (e) => { if (!menuEl.contains(e.target)) menuEl.style.display = 'none' })
-menuEl.addEventListener('click', (e) => {
-  const act = e.target.dataset && e.target.dataset.act
+
+/* 🔴 v8：动作分发抽成一个函数，菜单项、按钮条、宿主原生菜单都走它 —— 加动作只改一处 */
+function doAction(act) {
   if (!act) return
-  menuEl.style.display = 'none'
   if (act === 'chat') chatToggle()
   if (act === 'feed') feed()
   if (act === 'play') perform(pick(CLICK_ACTIONS))
@@ -657,23 +1163,78 @@ menuEl.addEventListener('click', (e) => {
     state.repair = !state.repair
     bubble(state.repair ? P('repair')[0] : P('repair')[4], 6000)
   }
-  if (act === 'danmaku') {
-    const nv = !(state.cfg && state.cfg.danmaku)
-    cmdWrite({ danmaku: nv })
-    state.cfg = state.cfg || {}; state.cfg.danmaku = nv
-    setDanmaku(nv)
+  // ⭐ 弹幕（主人 2026-10-25：「我要的是全屏弹幕跟局域弹幕，
+  //    但是你好像都用一个窗口画了，属于局域内的窗口」）
+  //    三种模式：
+  //      full  = 全屏弹幕 → 通知宿主开**独立的全屏覆盖窗**（点击穿透），弹幕铺满整个屏幕
+  //      local = 局域弹幕 → 就在她自己这个窗口里飘（跟着她走）
+  //      off   = 关掉
+  if (act === 'danmaku-full' || act === 'danmaku-local' || act === 'danmaku-off') {
+    const mode = act === 'danmaku-full' ? 'full' : act === 'danmaku-local' ? 'local' : 'off'
+    setDanmakuMode(mode)
+    return
   }
-  if (act === 'walk') { const nv = !(state.cfg && state.cfg.walk); cmdWrite({ walk: nv }); state.cfg.walk = nv }
+  // 老的单一切换（按钮条上那枚📺）保留：off → local → full → off 循环
+  if (act === 'danmaku') {
+    const cur = (state.cfg && state.cfg.danmakuMode) || 'off'
+    const next = cur === 'off' ? 'local' : cur === 'local' ? 'full' : 'off'
+    setDanmakuMode(next)
+    return
+  }
+  // ⭐ 人格直选（主人 2026-10-25：「人格应该有二级选项可以选择」）
   if (act === 'persona') {
     const order = ['infp', 'entp', 'esfp', 'istj']
     const next = order[(order.indexOf(state.persona) + 1) % 4]
-    cmdWrite({ petPersona: next })
-    state.persona = next
-    bubble(`换人格：${PERSONAS[next].name}`, 4000)
+    setPersona(next)
+    return
   }
-  if (act === 'hide') { cmdWrite({ hide: true }); window.close && window.close() }
-  if (act === 'quit') { cmdWrite({ petOn: false }); window.close && window.close() }
+  if (act.startsWith('persona-')) {
+    const id = act.slice('persona-'.length)
+    if (PERSONAS[id]) setPersona(id)
+    return
+  }
+  // ⭐ 彩蛋：她的日记（主人 2026-10-25：「日记功能我要的是彩蛋形式，
+  //    只在右键宠物的时候有这个选项，插件面板要保持干净」）
+  if (act === 'diary') { openDiary(); return }
+  // 🔴 2026-10-24 主人「点退出没反应」的真因：
+  //    原来这两行都是 cmdWrite(...) 之后立刻 window.close()。
+  //    但 **WebView2 里 window.close() 对非脚本打开的页面是空操作** ——
+  //    页面关不掉；而且 postMessage 是异步的，close 抢先执行时消息可能还没送出去，
+  //    keeper 永远等不到那条指令 ⇒ 窗口一直在。
+  //    现在：先发命令，再显式通知宿主"我要下线了"，由宿主自己关窗（不靠页面 close）。
+  if (act === 'hide') {
+    cmdWrite({ hide: true })
+    try { window.chrome.webview && window.chrome.webview.postMessage('pet:hide') } catch { }
+    return
+  }
+  if (act === 'quit') {
+    cmdWrite({ petOn: false })
+    try { window.chrome.webview && window.chrome.webview.postMessage('pet:quit') } catch { }
+    return
+  }
+}
+// 宿主原生菜单点完回灌到这里（宿主 ExecuteScriptAsync 调 window.__petAct('feed')）
+window.__petAct = doAction
+
+menuEl.addEventListener('click', (e) => {
+  const act = e.target.dataset && e.target.dataset.act
+  if (!act) return
+  menuEl.style.display = 'none'
+  doAction(act)
 })
+
+/* 底部按钮条：和菜单同一套 act；点完不留焦点、不误触拖动 */
+const toolbarEl = $('toolbar')
+if (toolbarEl) {
+  toolbarEl.addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('.tb')
+    if (!btn) return
+    e.stopPropagation()
+    doAction(btn.dataset.act)
+  })
+  // 阻止按钮条上按下时被当成"拖她"
+  toolbarEl.addEventListener('mousedown', (e) => { e.stopPropagation() })
+}
 
 /* 点击她：Q 弹 + 音效 + 说话口型 */
 /* 点击她：随机小动作 + 水泡音效 + 台词（主人验收「动作这些你确定都弄好了吗」的动作入口） */
@@ -693,7 +1254,7 @@ requestAnimationFrame(frameLoop)
     await initModel(j.sprite_dir)
   } else {
     // 浏览器预览降级（http 服务插件根目录时可用）：页面在 /tools/pet-page/，往上两级才是插件根
-    state.cfg = { sprite_dir: '../../assets/pet/sprite', psd_url: '../../assets/pet/psd/model.psd', walk: true, danmaku: false, on: true, link: { state: 'idle' } }
+    state.cfg = { sprite_dir: '../../assets/pet/sprite', psd_url: '../../assets/pet/psd/model.psd', danmaku: false, on: true, link: { state: 'idle' } }
     await initModel(state.cfg.sprite_dir, state.cfg.psd_url)
   }
 })()

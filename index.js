@@ -36,9 +36,25 @@ import {
   loadCommentMemory, noteMyComment, markSeen,
   memoryStats, forgetDm, forgetAll,
 } from './lib/memory.mjs'
+// 🔴 她的脑子（对话 + 白名单动作）。主人 2026-10-24：不能"收到消息乱回"。
+import { matchLocalIntent, askModel, runAction, PET_ACTIONS } from './lib/pet-brain.mjs'
+// 🔴 她的眼睛（看主人在干什么）。主人：「要像人一样」。
+import { translateEvents } from './lib/pet-observe.mjs'
+// 🔴 她的日记（主人：「可以查看她今天写了什么感人的言论」）。
+import { diaryAdd, diaryRead, diaryDays, isTouching, todayKey } from './lib/pet-diary.mjs'
+// 🔴🔴 桌宠说的话怎么**真正送进 DSH 会话**（主人：「对话等同于我在文本框里打字」）。
+//    2026-10-25 前两版直接把消息 append 进会话日志，两次都把主人的会话写坏了
+//    （漏 source / 漏 id / 插在 tool-call 与 tool-result 中间 ⇒ 每轮 400）。
+//    现在逻辑在 lib/pet-relay.mjs，走 agent.followup()，并且有离线单测
+//    （tools/pet-relay-test.mjs 会用 DSH 自己的校验器验消息格式）。
+import { deliverToSession, makeUserMessage, relayLine } from './lib/pet-relay.mjs'
 
 export const name = 'douyin-scroll'
 export const inject = ['webServer', 'tools', 'settings']
+/** 🔴 2026-10-24：她的对话要用 ctx.get('llm') 调一次真模型。
+ *  不能放进 inject —— 那样没模型的环境整个插件都起不来；
+ *  用 optional 取，取不到就退回本地小脑（不静默降级：状态里会标 brain:'local'）。 */
+export const optional = ['llm']
 
 /**
  * 🔴 每个字段都要 `.extra('volatile', true)`：DSH 的 settings.update() 只认 volatile 字段
@@ -143,14 +159,18 @@ export const Config = !z ? undefined : z.object({
   chatWatchSec: z.natural().default(30).extra('volatile', true),
   /**
    * ⭐ 桌宠（2026-10-24 v5 从 dsh-deskpet 迁回：主人拍板「放到刷抖音面板里来」）。
-   *    petOn 总开关 / petPersona MBTI 人格 / petDanmaku 弹幕 / petWalk 走动。
+   *    petOn 总开关 / petPersona MBTI 人格 / petDanmaku + petDanmakuMode 弹幕（三态）。
    *    素材在 assets/pet/（主人私货，.gitignore 挡着）——没素材时窗口不拉起、面板提示。
    *    🔴 DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
    */
   petOn: z.boolean().default(true).extra('volatile', true),
   petPersona: z.string().default('infp').extra('volatile', true),
   petDanmaku: z.boolean().default(false).extra('volatile', true),
-  petWalk: z.boolean().default(true).extra('volatile', true),
+  /** ⭐ 2026-10-25 主人：「我要的是全屏弹幕跟局域弹幕，但是你好像都用一个窗口画了」
+   *  off   = 关
+   *  local = 局域弹幕（只在她自己那个窗口里飘，跟着她走）
+   *  full  = 全屏弹幕（宿主开独立的全屏覆盖窗，铺满整个屏幕、点击穿透） */
+  petDanmakuMode: z.string().default('off').extra('volatile', true),
   /**
    * ⭐ 2026-10-24 定稿（使用者：「我要的是迁移，不是开发新功能」）：
    *    聊天模式 = 今早实测那套的「读」半边（30 秒一读 + 通知 + 状态屏）。
@@ -264,7 +284,7 @@ export function apply(ctx, config) {
     // ⭐ 聊天模式（2026-10-24 定稿：默认开启，使用者拍板；要关就整个关掉）。
     //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
     chatWatch: true, chatWatchSec: 30,
-    petOn: true, petPersona: 'infp', petDanmaku: false, petWalk: true,
+    petOn: true, petPersona: 'infp', petDanmaku: false, petDanmakuMode: 'off',
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
@@ -2927,18 +2947,26 @@ export function apply(ctx, config) {
     try { return JSON.parse(readFileSync(petPersonaFile(p), 'utf8')) } catch { return { id: p, name: p } }
   }
   const petWinStateFile = join(stateDir, 'pet-window-state.json')
+  /** 🔴 2026-10-24 主人抓的「她的所思所想看不见」根因：
+   *  petWinWrite() 每 10 秒被 keeper 全量覆盖写，而它的字面量里**没有 activity**，
+   *  于是 petSay() 刚写进去的那句话最多 10 秒就被抹掉 —— 页面那头永远读到空。
+   *  修法：写之前先把旧的 activity / ts 捞出来带上，让覆盖变成"合并"。 */
   const petWinWrite = () => {
     try {
       let origin = ''
       try { origin = ctx.webServer?.getOrigin?.() || '' } catch { origin = '' }
+      const prev = readJson(petWinStateFile, null) || {}
       writeJson(petWinStateFile, {
         on: Boolean(cfg.petOn),
         persona: cfg.petPersona,
         danmaku: Boolean(cfg.petDanmaku),
-        walk: Boolean(cfg.petWalk),
+        danmakuMode: String(cfg.petDanmakuMode || 'off'),
         link: { state: petStateOf().state },
         sprite_dir: petSpriteDirOf(),
         api: origin + '/api/douyin-duty',
+        // ⭐ 保留她这一刻在干嘛（不保留就会被这一行覆盖逻辑吃掉）
+        activity: typeof prev.activity === 'string' ? prev.activity : '',
+        activityAt: Number(prev.activityAt) || 0,
         ts: Date.now(),
       })
     } catch { /* 写不进也不能出事 */ }
@@ -2946,13 +2974,21 @@ export function apply(ctx, config) {
   let petWinChild = null
   let petSpawningAt = 0
   let petOnPrev = null
+  // 她跟主人的对话上下文（内存，最多 8 条；不入盘，重启即清）
+  let petChatHistory = []
   const petHideFile = () => join(stateDir, 'pet-hide.json')
   /** 🔴 v5.5 拟人状态：把「这一刻在干嘛」用人话写进桌宠状态，她念出来。
-   *  只追加字段，不动其他键；写失败不影响正事。 */
+   *  只追加字段，不动其他键；写失败不影响正事。
+   *  ⚠️ 必须带 activityAt：页面靠它判断"这句话是不是新的"，不然同一条会一直闪。
+   *  ⭐ 2026-10-24 追加：同时记进**日记**（主人要「查看她今天写了什么感人的言论」）。
+   *     每句话都记，其中"感人"的标 star（判定见 lib/pet-diary.mjs）。 */
   const petSay = (text) => {
     try {
       const j = readJson(petWinStateFile, null)
-      writeJson(petWinStateFile, { ...(j || {}), activity: String(text || ''), ts: Date.now() })
+      const t = String(text || '')
+      if (!t) return
+      writeJson(petWinStateFile, { ...(j || {}), activity: t, activityAt: Date.now(), ts: Date.now() })
+      try { diaryAdd(stateDir, t, { kind: 'activity' }) } catch { /* 日记写不进不影响播报 */ }
     } catch { /* 播报是锦上添花，失败不碍事 */ }
   }
   /** 窗口意图文件：右键菜单写 pet-cmd.json，keeper 每拍应用（readJson 已剥 BOM——PS5.1 教训） */
@@ -2967,9 +3003,29 @@ export function apply(ctx, config) {
       if (!Number.isFinite(age) || age > 120_000) return   // 陈旧指令丢弃
       const patch = {}
       if (typeof c.danmaku === 'boolean') patch.petDanmaku = c.danmaku
-      if (typeof c.walk === 'boolean') patch.petWalk = c.walk
+      // ⭐ 2026-10-25 弹幕三态（主人要求区分全屏/局域）：off / local / full
+      if (typeof c.danmakuMode === 'string' && ['off', 'local', 'full'].includes(c.danmakuMode)) {
+        patch.petDanmakuMode = c.danmakuMode
+        patch.petDanmaku = c.danmakuMode !== 'off'   // 老字段跟着走，兼容旧窗口
+      }
       if (typeof c.petOn === 'boolean') patch.petOn = c.petOn
       if (typeof c.petPersona === 'string' && ENUMS.petPersona.includes(c.petPersona)) patch.petPersona = c.petPersona
+      // 🔴 2026-10-25 补：原来**完全没处理 hide**（「去休息」点了永远不生效），
+      //    也没处理 feed（「喂饭」同理）。主人抓的"点了没反应"有一半是这里。
+      if (c.hide === true) {
+        try { writeJson(petHideFile(), { at: new Date().toISOString(), why: 'page-menu' }); log('桌宠：主人让她去休息（写 pet-hide.json，keeper 会收窗口）') }
+        catch (e) { log(`桌宠：写休息标记失败 ${e?.message ?? e}`) }
+      }
+      if (c.feed === true) {
+        try {
+          const f = join(stateDir, 'pet-feed.json')
+          const cur = readJson(f, null) || {}
+          const today = dayKey()
+          const count = cur.date === today ? Number(cur.count || 0) : 0
+          writeJson(f, { date: today, count: count + 1, at: new Date().toISOString() })
+          log(`桌宠：喂了一碗大白饭（今天第 ${count + 1} 碗）`)
+        } catch (e) { log(`桌宠：喂饭失败 ${e?.message ?? e}`) }
+      }
       if (Object.keys(patch).length) {
         saveCfg(patch)
         log(`桌宠窗口指令已应用：${JSON.stringify(patch)}`)
@@ -3005,7 +3061,173 @@ export function apply(ctx, config) {
       }
     } catch { /* 坏文件不致命 */ }
   }
-  const petKeeperTick = () => {
+  /**
+   * ⭐⭐⭐ 把桌宠输入框里的话**当成主人真的在 DSH 里打字**送进当前会话。
+   * 主人 2026-10-25 原话：「对话等同于我现在在这个窗口跟你对话，
+   *   你怎么处理我的话就怎么处理我在上面文本框输入的话」
+   *
+   * 🔴 真正的实现搬进了 lib/pet-relay.mjs —— 原因是前两次把主人的会话写坏了，
+   *    而"写坏"这件事**只有下次打开会话才炸**，写完当场完全没反应。
+   *    所以现在投递逻辑必须能被离线单测（tools/pet-relay-test.mjs），
+   *    并且那个测试会用 DSH 自己的 adoptSessionEvent 验收消息格式。
+   *
+   * 这一版的关键改变：**不再自己往会话日志里 append**，改成 agent.followup()——
+   * 由 agent 循环在正确的边界（这一轮结束之后）自己落盘、自己排序。
+   * 结构上就不可能再拆开 tool-call/tool-result，也不可能再漏 id。
+   *
+   * 🔴 诚实说明（不许骗主人）：
+   *   ① 只能在他**这轮跑完之后**才真的开始处理（followup 的语义就是"下一轮"）
+   *   ② 只送顶层会话（子代理的会话没人读）
+   *   ③ 送进去了也不能说"他马上回答你" —— 她的台词只到"我把话带过去了"
+   */
+  const tryDeliverToSession = async (text) => {
+    try {
+      const agents = (() => { try { return ctx.get('agents') } catch { return null } })()
+      const mk = await loadLlmCreateUserMessage().catch(() => null)
+      const r = deliverToSession({ text, agents, createUserMessage: mk || undefined })
+      if (r.ok) {
+        log(`桌宠对话[投递·${r.mode}]：${String(text).slice(0, 30)} → agent ${r.sessionId}（${r.runningNow ? '他这轮在跑，排到下一轮' : '已排队，下一轮就读'}）`)
+      } else {
+        log(`桌宠对话[投递失败]：${r.reason}`)
+      }
+      return r
+    } catch (e) {
+      const reason = String(e?.message ?? e)
+      log(`桌宠对话[投递异常]：${reason}`)
+      return { ok: false, reason }
+    }
+  }
+
+  /**
+   * 取 @deepseek-ai/dsh-llm 的 createUserMessage（宿主那棵树里的那份）。
+   * 拿不到返回 null —— 上层自己造等价对象（**id 一定要有**）。
+   * ⚠️ 只 import 一次，结果缓存（每句话都 import 一次太浪费）。
+   */
+  let _mkUserMsgCache
+  const loadLlmCreateUserMessage = async () => {
+    if (_mkUserMsgCache !== undefined) return _mkUserMsgCache
+    _mkUserMsgCache = null
+    try {
+      const { candidateRoots } = await import('./lib/hostdeps.mjs')
+      const { existsSync, readFileSync } = await import('node:fs')
+      const { join } = await import('node:path')
+      const { pathToFileURL } = await import('node:url')
+      for (const root of candidateRoots()) {
+        const dir = join(root, 'dsh-llm')
+        const pkgFile = join(dir, 'package.json')
+        if (!existsSync(pkgFile)) continue
+        let rel = 'lib/index.js'
+        try {
+          const pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
+          const dot = pkg.exports?.['.']
+          const r = typeof dot === 'string' ? dot : (dot?.import || dot?.default || pkg.module || pkg.main)
+          if (r) rel = String(r).replace(/^\.\//, '')
+        } catch { /* 用默认 */ }
+        const file = join(dir, rel)
+        if (!existsSync(file)) continue
+        try {
+          const mod = await import(pathToFileURL(file).href)
+          if (typeof mod.createUserMessage === 'function') { _mkUserMsgCache = mod.createUserMessage; return _mkUserMsgCache }
+        } catch { /* 换下一个根 */ }
+      }
+    } catch { /* 拿不到就自己造 */ }
+    return _mkUserMsgCache
+  }
+
+  /** 从几句台词里随机挑一句（她自己的口吻，说"我正在干嘛"）。
+   *  ⚠️ 只用于桌宠播报，不参与任何业务判断。 */
+  const pickOf = (arr) => arr[Math.floor(Math.random() * arr.length)]
+
+  /**
+   * ⭐ 她的眼睛：看主人此刻在干什么（主人：「要像人一样」）。
+   * 用 sessionQuery 读**最近活跃的那个会话**的最新事件，翻译成鱼话。
+   *
+   * 🔴 红线：
+   *   · 只读，不改任何会话
+   *   · 只取最后 40 条事件的**类型和文件名**，不把主人说的话整段搬出去
+   *   · 读不到就返回 null（上层退回状态播报），绝不编
+   * ⚠️ 每 10 秒只读一次（keeper 节奏），失败缓存 30 秒别再撞。
+   */
+  let observeFailUntil = 0
+  let observeDiagN = 0   // 每 30 跳（约 5 分钟）记一次"看见了什么"，方便排障
+  /** 带超时的 Promise（读会话可能卡住，绝不能让它拖死 keeper）。 */
+  const withTimeout = (p, ms, label) => new Promise((resolve) => {
+    let done = false
+    const t = setTimeout(() => {
+      if (done) return
+      done = true
+      log(`${label} 超时 ${ms}ms -> 当作看不见`)
+      resolve(null)
+    }, ms)
+    t.unref?.()
+    Promise.resolve(p).then(
+      (v) => { if (!done) { done = true; clearTimeout(t); resolve(v) } },
+      (e) => { if (!done) { done = true; clearTimeout(t); log(`${label} 失败：${e?.message ?? e}`); resolve(null) } },
+    )
+  })
+  const observeMaster = async () => {
+    if (Date.now() < observeFailUntil) return null
+    const diag = (++observeDiagN % 30 === 1)   // 第一跳 + 每 30 跳记一次
+    try {
+      const sq = (() => { try { return ctx.get('sessionQuery') } catch { return null } })()
+      if (!sq || typeof sq.listSessions !== 'function') {
+        observeFailUntil = Date.now() + 60_000
+        if (diag) log('她的眼睛：sessionQuery 拿不到（宿主没提供这个服务）-> 退回状态播报')
+        return null
+      }
+      // 🔴 每一跳都必须有超时：listSessions / listEvents 都可能因为持久化层慢而挂很久，
+      //    而 keeper 是 10 秒一跳 —— 挂一次就会跟她整个失联（主人看到的就是"窗口关不掉/说话不动"）。
+      const recs = await withTimeout(sq.listSessions(), 4000, 'observe.listSessions')
+      if (!Array.isArray(recs) || !recs.length) {
+        if (diag) log('她的眼睛：listSessions 返回空（读不到任何会话）-> 退回状态播报')
+        return null
+      }
+      const cur = recs[0]
+      const sid = cur && cur.header && cur.header.id
+      if (!sid) {
+        if (diag) log('她的眼睛：第一个会话没有 header.id -> 退回状态播报')
+        return null
+      }
+      if (cur.header.origin === 'subagent') {
+        const root = recs.find((r) => r.header && r.header.origin !== 'subagent')
+        if (!root) return null
+        return await observeOne(sq, root.header.id, diag)
+      }
+      return await observeOne(sq, sid, diag)
+    } catch (e) {
+      observeFailUntil = Date.now() + 30_000
+      log(`桌宠看不见主人在干嘛（30 秒内不再试）：${e?.message ?? e}`)
+      return null
+    }
+  }
+  const observeOne = async (sq, sid, diag) => {
+    try {
+      const events = await withTimeout(sq.listEvents(sid), 4000, 'observe.listEvents')
+      if (!Array.isArray(events)) {
+        if (diag) log('她的眼睛：listEvents 不是数组 -> 退回状态播报')
+        return null
+      }
+      const t = translateEvents(events)
+      if (!t) {
+        if (diag) log(`她的眼睛：读了 ${events.length} 条事件，最近 40 条里没有能翻译的 -> 退回状态播报`)
+        return null
+      }
+      if (!t.say) {
+        if (diag) log(`她的眼睛：翻译出 ${t.kind}（这一步没什么好说的）-> 退回状态播报`)
+        return null
+      }
+      if (diag) log(`她的眼睛：看见了 ${t.kind} -> ${t.say}`)
+      return t
+    } catch { return null }
+  }
+  let petKeeperBusy = false
+  let petOnPrevState = null   // 上一跳的 petOn 值（用于"状态变了就强制写一次状态文件"）
+  const petKeeperTick = async () => {
+    // 🔴 2026-10-25：keeper 改成 async 之后，setInterval 每 10 秒都会新起一个 tick ——
+    //    如果上一跳还没跑完（读会话慢），就会越堆越多，最后把她整个拖死。
+    //    这里加互斥：上一跳没结束就直接跳过这一跳。
+    if (petKeeperBusy) { return }
+    petKeeperBusy = true
     try {
       petApplyCmd()
       if (petOnPrev === true && !cfg.petOn) { try { rmSync(petHideFile(), { force: true }) } catch { /* 无所谓 */ } }
@@ -3013,32 +3235,114 @@ export function apply(ctx, config) {
       const hidden = existsSync(petHideFile())
       const want = Boolean(cfg.petOn) && Boolean(petManifestOf()) && !hidden
       const alive = petWinChild && !petWinChild.killed
+      // 🔴🔴 2026-10-25 主人「点退出没反应」的**真正根因**（前面查错了两次，这条是实测确认的）：
+      //    原来 petWinWrite() 只在两处调用：① spawn 之前 ② `if (want)`。
+      //    而 want = cfg.petOn && ... —— **cfg.petOn 一旦变 false，want 就 false，就再也不写状态文件**。
+      //    宿主靠读状态文件里的 on 字段决定退不退出 ⇒ 它永远读不到 false ⇒ 永远不退。
+      //    这是个死锁：要靠状态文件的 on=false 才能关，而写 on=false 的条件是"已经关着"。
+      //    修法：**这一跳里状态变了就无条件写一次**（不挂 want 条件）。
+      if (want || petOnPrevState !== Boolean(cfg.petOn)) {
+        petWinWrite()
+      }
+      petOnPrevState = Boolean(cfg.petOn)
       if (want && !alive && Date.now() - petSpawningAt > 15_000) {
         petSpawningAt = Date.now()
+        const spawnAt = petSpawningAt
         petWinWrite()
-        const pwsh = process.env.ProgramFiles && existsSync(join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'))
-          ? join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe')
-          : 'powershell.exe'
-        petWinChild = spawn(pwsh, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(pluginDir, 'tools', 'pet-window.ps1')], {
-          windowsHide: true,   // 只藏 PowerShell 控制台；她的 WPF 窗口照常显示
-          stdio: 'ignore',
-          env: pyEnv({ DOUYIN_HOME: stateDir }),
-        })
+        // 🔴 v6（2026-10-24 主人令「我要的是 Anime2.5DRig 网页上传 PSD 的效果」）：
+        //    优先拉 WebView2 宿主（跑引擎页，参数驱动真动画）；宿主缺失才回退旧位图窗。
+        const hostExe = join(pluginDir, 'tools', 'pet-host', 'PetHost.exe')
+        const useHost = existsSync(hostExe)
+        if (useHost) {
+          petWinChild = spawn(hostExe, [], {
+            windowsHide: true,
+            stdio: 'ignore',
+            env: pyEnv({ DOUYIN_HOME: stateDir }),
+          })
+        } else {
+          const pwsh = process.env.ProgramFiles && existsSync(join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'))
+            ? join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe')
+            : 'powershell.exe'
+          petWinChild = spawn(pwsh, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(pluginDir, 'tools', 'pet-window.ps1')], {
+            windowsHide: true,   // 只藏 PowerShell 控制台；她的 WPF 窗口照常显示
+            stdio: 'ignore',
+            env: pyEnv({ DOUYIN_HOME: stateDir }),
+          })
+        }
         petWinChild.unref?.()
-        petWinChild.on('exit', () => { petWinChild = null })
-        log('桌宠窗口已拉起（置顶透明窗；右键有菜单，弹幕/喂饭/维修工都在里面）')
+        petWinChild.on('exit', (code, sig) => {
+          petWinChild = null
+          const lived = Date.now() - spawnAt
+          log(`桌宠窗口退出：${useHost ? 'WebView2宿主' : '位图窗'} code=${code} sig=${sig ?? '-'} 存活 ${Math.round(lived / 1000)}s`)
+          if (lived < 60_000 && code !== 0) {
+            try {
+              const dbgF = join(stateDir, useHost ? 'pet-host.log' : 'pet-window-debug.log')
+              const tail = readFileSync(dbgF, 'utf8').split('\n').filter(Boolean).slice(-3).join(' | ')
+              log(`桌宠黑匣子尾部：${tail}`)
+            } catch { /* 读不到就只有退出码 */ }
+          }
+        })
+        log(`桌宠窗口已拉起（${useHost ? 'WebView2 引擎宿主' : '旧位图窗'}；右键有菜单，弹幕/喂饭/维修工都在里面）`)
       } else if (!want && alive) {
         try { petWinChild.kill() } catch { /* 已经没了 */ }
         petWinChild = null
         log('桌宠已收（开关关 / 素材缺 / 她在休息）')
       }
-      if (want) petWinWrite()
+      // （状态文件已经在上面按"变了就写"统一处理过，这里不再重复写）
+      // ⭐ 主人的设计初衷：要**看见她在干嘛**，不是光看她动。
+      // 🔴 2026-10-24 二改：主人说「我的意思是要像人一样」——
+      //    光有随机台词不算像人，她得**真的看得见主人在干什么**。
+      //    所以优先读当前 DSH 会话的最新事件，翻译成鱼话；读不到才退回状态播报。
+      if (want) {
+        try {
+          const actAge = (() => {
+            const p = readJson(petWinStateFile, null) || {}
+            return Number(p.activityAt) || 0
+          })()
+          // 15 秒一条新话（比原来 45 秒更"活着"，但不会刷屏）
+          if (Date.now() - actAge > 15_000) {
+            let said = false
+            // ① 她在看主人干活（真事，优先）
+            try {
+              const ob = await observeMaster()
+              if (ob && ob.say) { petSay(ob.say); said = true }
+            } catch { /* 看不见就算了，走下面的状态播报 */ }
+            // ② 看不见（没会话/刚启动/服务不在）⇒ 说自己在干嘛
+            if (!said) {
+              const st = petStateOf().state
+              if (st === 'run' || st === 'watch') {
+                petSay(pickOf([
+                  '鱼在盯着抖音呢，有动静就喊主人～',
+                  '正一条条看视频文案，眼睛都花了…',
+                  '还在挑，别急呀，挑错了主人要骂鱼的',
+                ]))
+              } else if (st === 'error') {
+                petSay(pickOf(['诶…出岔子了，鱼在想办法', '刚才那步没成，鱼再试一次']))
+              } else {
+                petSay(pickOf([
+                  '鱼在发呆…顺便等主人叫我',
+                  '今天的大白饭还没着落 (｡•́︿•̀｡)',
+                  '尾巴摇一摇，没别的事干',
+                  '在这个角落待着，看主人忙',
+                  '有点困…但鱼不睡，鱼要看着',
+                  '刚吐了个泡泡，破了',
+                ]))
+              }
+            }
+          }
+        } catch { /* 播报失败不影响别的 */ }
+      }
     } catch (e) { log(`petKeeper 出错（已兜住）：${e?.message ?? e}`) }
+    finally { petKeeperBusy = false }
   }
   try {
-    const pk = setInterval(petKeeperTick, 10_000)
+    // 🔴 petKeeperTick 现在是 async（要 await 读会话看主人干嘛）。
+    //    setInterval 不 await，未捕获的 rejection 会**杀掉整个宿主进程** ——
+    //    所以两处调用都必须自己兜住。
+    const tickSafe = () => { petKeeperTick().catch((e) => log(`petKeeperTick 异步出错（已兜住）：${e?.message ?? e}`)) }
+    const pk = setInterval(tickSafe, 10_000)
     pk.unref?.()
-    petKeeperTick()
+    tickSafe()
     ctx.effect(() => () => { clearInterval(pk); try { petWinChild?.kill() } catch { /* 收摊 */ } }, 'douyin-duty: 桌宠窗口守护')
   } catch (e) { log(`petKeeper 没起来：${e?.message ?? e}`) }
 
@@ -3076,6 +3380,22 @@ export function apply(ctx, config) {
   } catch { /* 起不来就算了 */ }
 
   /* ─────────────── HTTP（设置页用） ─────────────── */
+  // 🔴🔴 2026-10-25 修复「日记点击打不开」「对话没连上」的最后一环：**跨域**。
+  //    桌宠页面是插件自己的静态服务器发的（127.0.0.1:8611），
+  //    而 JSON 接口挂在 DSH 宿主上（127.0.0.1:50898）—— 两个 origin，
+  //    浏览器按同源策略直接掐掉 fetch/XHR，报 "Failed to fetch"，
+  //    响应体根本到不了页面 ⇒ 主人看到的就是"点了没反应"。
+  //    ⚠️ 实测证据：带 Origin 头请求 /pet/diary，响应里一条 CORS 头都没有。
+  //    只对**本机回环**放开（不写 *），别把接口摊给外部网页。
+  const ALLOWED_ORIGIN_RE = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i
+  const applyCors = (req, res) => {
+    const origin = String(req?.headers?.origin || '')
+    res.setHeader('vary', 'Origin')
+    res.setHeader('access-control-allow-methods', 'GET,POST,OPTIONS')
+    res.setHeader('access-control-allow-headers', 'content-type')
+    res.setHeader('access-control-max-age', '600')
+    if (ALLOWED_ORIGIN_RE.test(origin)) res.setHeader('access-control-allow-origin', origin)
+  }
   const sendJson = (res, code, obj) => {
     res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
     res.end(JSON.stringify(obj))
@@ -3223,6 +3543,14 @@ export function apply(ctx, config) {
 
   const handle = async (req, res, url) => {
     refreshCfg()
+    // 跨域头先挂上（所有 /api/douyin-duty/* 响应都带，含错误响应）——
+    // 桌宠页面在另一个 origin 上，缺了它 fetch 会被浏览器直接掐掉。
+    try { applyCors(req, res) } catch { /* 头写不进去不该影响业务 */ }
+    // 预检：浏览器发不了自定义 POST 之前会先来一发 OPTIONS，必须直接答 204
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204)
+      return res.end()
+    }
     const path = url.pathname
     if (req.method === 'GET' && path === '/api/douyin-duty/status') return sendJson(res, 200, status())
     if (req.method === 'GET' && path === '/api/douyin-duty/config') {
@@ -3236,7 +3564,7 @@ export function apply(ctx, config) {
       if (patch.petOn === true) { try { rmSync(join(stateDir, 'pet-hide.json'), { force: true }) } catch { /* 无所谓 */ } }
       const { clean, host } = await persistCfg(patch)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
-      petKeeperTick()   // 桌宠开关变化立即反应（不等下一拍）
+      petKeeperTick().catch((e) => log(`petKeeperTick（开关变更）异步出错：${e?.message ?? e}`))   // 桌宠开关变化立即反应（不等下一拍）
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
     /**
@@ -3322,6 +3650,158 @@ export function apply(ctx, config) {
         return res.end(buf)
       } catch {
         return sendJson(res, 404, { ok: false, error: 'asset read failed' })
+      }
+    }
+
+    /* ── ⭐ 她的日记（主人：「可以查看她今天写了什么感人的言论」）
+     * GET  /pet/diary?day=YYYY-MM-DD   → 那天的日记（新的在前，star=感人）
+     * GET  /pet/diary/days             → 有日记的日子列表（往前翻）
+     * POST /pet/diary                  → 手动记一条（她主动想写的时候用）
+     * ── */
+    if (req.method === 'GET' && path === '/api/douyin-duty/pet/diary') {
+      const u = new URL(req.url, 'http://x')
+      const day = u.searchParams.get('day') || todayKey()
+      const r = diaryRead(stateDir, day)
+      return sendJson(res, 200, { ok: true, ...r, days: diaryDays(stateDir, 30) })
+    }
+    if (req.method === 'GET' && path === '/api/douyin-duty/pet/diary/days') {
+      return sendJson(res, 200, { ok: true, days: diaryDays(stateDir, 60) })
+    }
+    if (req.method === 'POST' && path === '/api/douyin-duty/pet/diary') {
+      let body = ''
+      try {
+        for await (const c of req) { body += c; if (body.length > 8192) break }
+        const o = JSON.parse(body || '{}')
+        const r = diaryAdd(stateDir, o.text, { kind: String(o.kind || 'manual') })
+        return sendJson(res, 200, { ok: r.ok, ...r })
+      } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) }) }
+    }
+
+    /* ── ⭐ 她的对话（主人 2026-10-24 的设计初衷）
+     * 「我跟她说话你是怎么设计的，收到消息乱回？」——原来只有 4 条正则 + 随机兜底。
+     * 现在两层：
+     *   ① 本地意图（时间/日期/卖萌/跳舞/挥手/困/喂饭）：0 延迟、0 token，直接做
+     *   ② 真模型 llm.stream()：带鱼人设、带最近几轮、带白名单动作标记
+     * 前端：tools/pet-page/pet.js 的 chatSend()
+     * ── */
+    if (req.method === 'POST' && path === '/api/douyin-duty/pet/chat') {
+      let body = ''
+      try {
+        for await (const c of req) { body += c; if (body.length > 8192) break }
+        const { text } = JSON.parse(body || '{}')
+        const q = String(text || '').trim().slice(0, 500)
+        if (!q) return sendJson(res, 200, { ok: false, error: '空的' })
+
+        /* ⭐⭐⭐ 2026-10-25 主人第三次强调（这次按他的原话做）：
+         *   「对话等同于我现在在这个窗口跟你对话，你怎么处理我的话就怎么处理我在上面文本框输入的话」
+         *
+         * 所以优先级改成：
+         *   ① **先送进当前 DSH 会话**（Session.append('user/message')）—— 这就是"你在跟我说话"，
+         *      我会像看到你在输入框打字一样来处理：该干活干活、该回答回答、该追问追问。
+         *      她只负责把话**转达**过来，然后把我看到消息这件事用鱼的方式说一声。
+         *   ② 送不进去（没有 live session / 通道不可用）才退回本地意图 + 小模型，
+         *      并且**如实标注**降级，绝不假装"我跟你说上话了"。
+         */
+        const delivered = await tryDeliverToSession(q)
+        if (delivered.ok) {
+          log(`桌宠对话[转达给DSH会话]：${q.slice(0, 40)} → session ${delivered.sessionId}（${delivered.mode}）`)
+          try { diaryAdd(stateDir, `主人通过小鱼说：${q}`, { kind: 'relay' }) } catch { /* 日记失败不影响 */ }
+          return sendJson(res, 200, {
+            ok: true, brain: 'session', relayed: true, mode: delivered.mode,
+            sessionId: delivered.sessionId,
+            queued: delivered.queued === true,
+            runningNow: delivered.runningNow === true,
+            // 她只是"传话"的那个，说一句就够，不要抢答主人要问我的事。
+            // 🔴 而且措辞要**如实**：我只保证"话排进去了"，
+            //    不保证"他正在回你"——他这一轮跑完才会读到。
+            say: relayLine(delivered.runningNow === true, pickOf),
+            anim: 'wave',
+          })
+        }
+        log(`桌宠对话[转达失败]：${delivered.reason || '未知'} → 退回本地脑`)
+
+        // ① 本地意图（送不进去时的兜底）
+        const local = matchLocalIntent(q)
+        if (local) {
+          log(`桌宠对话[本地]：${q.slice(0, 30)} → ${local.intent}`)
+          let anim = local.anim || ''
+          if (local.action === 'feed') {
+            try { writeJson(petCmdFile(), { feed: true, at: new Date().toISOString() }) } catch { /* 不影响回话 */ }
+          }
+          return sendJson(res, 200, {
+            ok: true, brain: 'local', intent: local.intent, degraded: true,
+            say: local.say || pickOf(['嗯！', '好哦～']), anim,
+          })
+        }
+
+        // ② 真模型（取不到 llm 就诚实说，不假装她听懂了）
+        const llm = (() => { try { return ctx.get('llm') } catch { return null } })()
+        if (!llm || typeof llm.stream !== 'function') {
+          return sendJson(res, 200, {
+            ok: true, brain: 'local', intent: 'fallback',
+            say: pickOf(['这句鱼没听懂…主人再说一次？', '（歪头）鱼在想…', '嗯嗯，鱼在听']),
+            anim: 'sulk',
+          })
+        }
+        // 模型路由：优先用默认选择，失败退回第一个 provider
+        let route = null
+        try {
+          const sel = ctx.get('agentDefaultModel')?.currentSelection?.()
+          if (sel && sel.provider && sel.model) route = { provider: sel.provider, model: sel.model }
+        } catch { /* 没这个服务就退 */ }
+        if (!route) {
+          try {
+            const ps = llm.listProviders?.() || []
+            if (ps.length) route = { provider: ps[0].id, model: ps[0].defaultModel || '' }
+          } catch { /* 退不下去就诚实失败 */ }
+        }
+        if (!route || !route.model) {
+          return sendJson(res, 200, { ok: true, brain: 'local', intent: 'no-route', say: '鱼现在脑子空空的…', anim: 'sulk' })
+        }
+
+        const t0 = Date.now()
+        let r
+        try {
+          r = await askModel({ llm, route, text: q, history: petChatHistory, maxTokens: 320 })
+        } catch (e) {
+          log(`桌宠对话[模型]失败：${e?.message ?? e}`)
+          return sendJson(res, 200, {
+            ok: true, brain: 'local', intent: 'model-error',
+            say: pickOf(['脑子卡住了…鱼重想一下', '诶，刚才那下没接上']), anim: 'sulk',
+          })
+        }
+        // 记上下文（最多留 8 条，别无限涨）
+        petChatHistory.push({ role: 'user', content: q })
+        if (r.say) petChatHistory.push({ role: 'assistant', content: r.say })
+        if (petChatHistory.length > 8) petChatHistory = petChatHistory.slice(-8)
+        // ⭐ 她跟主人说的话也进日记（日记里 star 会挑出"感人"的那些）
+        try { if (r.say) diaryAdd(stateDir, r.say, { kind: 'chat' }) } catch { /* 日记失败不影响回话 */ }
+
+        let anim = ''
+        let extraSay = ''
+        if (r.act) {
+          const a = runAction(r.act)
+          anim = a.anim || ''
+          extraSay = a.say || ''
+          log(`桌宠动作[模型要的]：${r.act}`)
+        }
+        log(`桌宠对话[模型]：${q.slice(0, 30)} → ${String(r.say).slice(0, 40)} (${Date.now() - t0}ms)`)
+        // 🔴 2026-10-25：模型吐空串（实测有过）时，**不许**兜成「嗯！」假装她答了。
+        //    空 ⇒ 如实标 empty，并用一句"她没接上"的口吻，让主人知道刚才是空的。
+        if (r.empty || (!r.say && !extraSay)) {
+          log(`桌宠对话[模型]：空回复（${Date.now() - t0}ms）—— 如实告诉她没接上`)
+          return sendJson(res, 200, {
+            ok: true, brain: 'model', intent: r.act || '', empty: true,
+            say: pickOf(['诶…鱼刚才走神了，主人再说一次？', '（甩甩尾巴）没听清…', '鱼在想别的事，没接上话']),
+            anim: anim || 'sulk',
+          })
+        }
+        return sendJson(res, 200, {
+          ok: true, brain: 'model', intent: r.act || '',
+          say: (r.say || extraSay), anim,
+        })
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
       }
     }
 

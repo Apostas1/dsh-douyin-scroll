@@ -1,45 +1,160 @@
-/* dsh-deskpet 网页桌宠样式（Anime2.5DRig 引擎版 v2）
-   聊天改为脚下台词条（不遮人不挡拖动）；新增小动作系统 */
+/* dsh-deskpet 网页桌宠样式（Anime2.5DRig 引擎版 v7）
+   🔴 2026-10-24 宿主换成 WebView2CompositionControl（v7），走**逐像素真透明**：
+   页面底色就是 transparent，宿主分层窗也是全透明 ⇒ 桌面上只看见她本人。
+   （v6 的洋红 #FF00FF 色键方案已废弃——WPF 会在 Show 后把 EX 样式刷回去，
+     SetLayeredWindowAttributes 恒返回 False，色键根本抠不掉。）
+   ⚠️ 因此这里**不许**再出现任何整块不透明的底板色，否则就是"背景不透明"。 */
 * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
-html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+/* 预览时想看"白底效果"可以加 ?bg=white —— 只是调试用，不影响宿主 */
+html.debug-white, html.debug-white body { background: #f5f5f5; }
+/* 🔴 比例修正：canvas 保持 1:1 原始纵横比，按**画布区**缩放，绝不拉伸。
+   ⚠️ 2026-10-25：窗口结构是「气泡带 + 画布 + 脚位」（见 PetHost.cs），
+   所以画布要**贴在脚位之上**（bottom = --foot-gap），不是贴窗口底。
+   写 width:100% 会按窗口宽撑大、人物变大且与命中区错位，所以用 --canvas-w。 */
+#gl { position: fixed; left: 50%; bottom: var(--foot-gap, 34px); transform: translateX(-50%);
+  width: var(--canvas-w, 100%); height: auto; aspect-ratio: 1 / 1; z-index: 2; }
 
-#gl { position: fixed; inset: 0; width: 100%; height: 100%; }
+/* ── 弹幕层 ──
+   🔴 2026-10-25 主人：「弹幕有点卡顿，运行不流畅」
+   修法：从 Web Animations（每个弹幕一个动画对象 + onfinish 主线程回调 + 每帧时间轴调度）
+   换成**纯 CSS animation**：只动 transform（合成器直接做，不重排不重绘），
+   配 will-change + contain 让每条独立成层；距离/时长由 JS 注入 --dm-dist / --dm-dur。 */
+#danmaku { position: fixed; inset: 0; overflow: hidden; pointer-events: none; display: none; z-index: 30;
+  contain: layout style; }
+.dm {
+  position: absolute; left: 100vw; white-space: nowrap; font-weight: 700;
+  text-shadow: 0 0 4px rgba(0,0,0,.85), 0 1px 2px rgba(0,0,0,.9);
+  will-change: transform; contain: layout style;
+  animation: dmSlide var(--dm-dur, 8s) linear forwards;
+}
+@keyframes dmSlide {
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(var(--dm-dist, -100vw), 0, 0); }
+}
 
-/* ── 弹幕层 ── */
-#danmaku { position: fixed; inset: 0; overflow: hidden; pointer-events: none; display: none; z-index: 30; }
-.dm { position: absolute; left: 100vw; white-space: nowrap; font-weight: bold;
-  text-shadow: 0 0 4px rgba(0,0,0,.8), 0 1px 2px rgba(0,0,0,.9); will-change: transform; }
+/* ── 她本体容器 ──
+   🔴 跟着 canvas 缩放：canvas 是 1:1 贴在底部居中的，这里用同样的盒子规则
+   （宽 = min(100vw, 100vh)，aspect-ratio 1/1，贴底居中），内部全部用百分比，
+   这样无论窗口多大，热区/泡泡/台词条都跟画面里的人对齐。
 
-/* ── 她本体容器 ── */
-#pet { position: fixed; width: 200px; height: 300px; cursor: grab; z-index: 5; }
+   🔴🔴 2026-10-25 主人「文本框显示不完全」的修法：
+   窗口现在**不是正方形**，而是「上面一条气泡带 + 下面一个正方形画布」（见 PetHost.cs
+   的 BubbleBand）。所以：
+     · #pet 仍然占**底部那个正方形**（bottom:0，宽 min(100vw,100vh)）—— 人物对齐不变
+     · #pet-bubble 允许**长出 #pet 的顶边**（不再被 #pet 的高度裁），
+       因为它所在的父级 #pet 没有 overflow:hidden，气泡顶到窗口顶部那条带子里
+   把气泡的 bottom 从 82% 改成 100%（贴着她头顶），再给 max-height 兜住极端长句。 */
+#pet { position: fixed; left: 50%; bottom: var(--foot-gap, 34px); transform: translateX(-50%);
+  width: var(--canvas-w, 100%); aspect-ratio: 1 / 1; cursor: grab; z-index: 5; }
 #pet:active { cursor: grabbing; }
-/* 泡泡：头顶上方；逐字输出用 */
-#pet-bubble { position: absolute; bottom: 246px; left: 50%; transform: translateX(-50%);
-  max-width: 220px; min-height: 17px; padding: 8px 11px; border-radius: 12px; font-size: 12px; line-height: 17px;
-  background: rgba(30,32,40,.92); color: #fff; border: 1px solid rgba(255,255,255,.16);
-  box-shadow: 0 4px 16px rgba(0,0,0,.35); white-space: pre-wrap; word-break: break-all;
-  animation: pop .25s ease-out; pointer-events: none; display: none; z-index: 6; }
+/* 泡泡：头顶上方；逐字输出用（百分比定位，随画布缩放） */
+#pet-bubble { position: absolute; bottom: 100%; margin-bottom: 4px;
+  left: 50%; transform: translateX(-50%);
+  /* 🔴 2026-10-25 修「宽度只有一半」：绝对定位元素默认"收缩到内容宽"，
+     max-width 只是上限、不会主动撑开 ⇒ 中文按最短换行，竖着长成一长条。
+     用 width:max-content + max-width 顶住：短句按内容宽（居中好看），
+     长句撑到上限再换行，横向铺满、行数少、不容易被窗口顶边裁。 */
+  width: max-content;
+  max-width: 96vw; min-width: 90px; min-height: 17px;
+  padding: 8px 11px; border-radius: 12px; font-size: 12px; line-height: 17px;
+  background: rgba(30,32,40,.94); color: #fff; border: 1px solid rgba(255,255,255,.16);
+  box-shadow: 0 4px 16px rgba(0,0,0,.35); white-space: pre-wrap; word-break: break-word;
+  animation: pop .25s ease-out; pointer-events: none; display: none; z-index: 6;
+  /* 极端长句也不许被窗口切：超了就内部滚动（气泡自己不会动，滚动条隐藏） */
+  max-height: 78vh; overflow: hidden; }
 #pet-bubble::after { content: ''; position: absolute; bottom: -6px; left: 26px; width: 10px; height: 10px;
   border-radius: 50%; background: inherit; border: inherit; border-top: 0; border-left: 0; }
 @keyframes pop { from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(.92); } }
+/* ⭐ 她的「所思所想」常驻气泡（主人 2026-10-24 定的设计初衷）
+   和普通泡泡的区别：**不自动消失**，因为主人要的是"持续看见她在干嘛"，
+   一闪就没等于没做。说话口吻的宽度也给足，别把一句话挤成两行截断。 */
+#pet-bubble.is-activity {
+  /* 🔴 2026-10-25：这里原来是 max-width:88% —— 88% 是相对 #pet（画布宽）算的，
+     一句话稍微长点就换行、再长就被窗口裁。现在气泡有专门的顶部带子可以长，
+     所以给足宽度（96vw，几乎顶满窗口），只为"别贴边"留一点余量。 */
+  max-width: 96vw; min-width: 96px;
+  padding: 9px 13px; font-size: 12.5px; line-height: 19px;
+  background: rgba(22, 26, 36, .96);
+  border: 1px solid rgba(120, 180, 255, .38);
+  box-shadow: 0 6px 22px rgba(0,0,0,.42), 0 0 0 1px rgba(120,180,255,.10) inset;
+  color: #eaf2ff;
+  animation: actIn .3s cubic-bezier(.2,.9,.3,1.2);
+}
+/* 思考中：左侧一个小呼吸点，让人一眼看出"她还在动脑" */
+#pet-bubble.is-activity::before {
+  content: ''; position: absolute; left: -4px; top: 50%; width: 7px; height: 7px;
+  margin-top: -3.5px; border-radius: 50%; background: #6cb6ff;
+  box-shadow: 0 0 8px #6cb6ff; animation: actPulse 1.4s ease-in-out infinite;
+}
+@keyframes actIn { from { opacity: 0; transform: translateX(-50%) translateY(8px) scale(.9); } }
+@keyframes actPulse { 0%,100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
+/* 太久没更新（>90s）：颜色收敛成灰，别假装她还在忙 */
+#pet-bubble.is-activity.is-stale {
+  border-color: rgba(255,255,255,.16); color: #9aa3b2;
+}
+#pet-bubble.is-activity.is-stale::before { background: #6b7280; box-shadow: none; animation: none; opacity: .5; }
 /* 命中热区（她躯干范围；泡泡和台词条各自独立接管点击） */
-#pet-body { position: absolute; top: 46px; left: 25px; right: 25px; bottom: 60px; }
+#pet-body { position: absolute; top: 15%; left: 12%; right: 12%; bottom: 20%; }
 
-/* ── 台词条（脚下）：聊天输入，跟着她走 ── */
-#talkbar { position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
-  width: 196px; display: none; gap: 4px; z-index: 8; cursor: default; }
+/* ── 台词条（脚下）：聊天输入 ──
+   🔴 2026-10-25 主人两条反馈一起改：
+     「下方的菜单栏有点挡脚了」+「文本框输入多了也有问题」
+   ① 不再塞进 #pet 里（那样必然压脚）：改成独立定位，放在**画布下方预留的脚位**里
+      （宿主给的 --foot-gap，默认 44px）；
+   ② input 换 textarea：输入多了自动长高（最多 4 行），到顶就内部滚动，不再把字挤出框。 */
+#talkbar {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--foot-gap, 44px) * 0.06);
+  width: calc(var(--canvas-w, 100%) * 0.96);
+  display: none; align-items: flex-end; gap: 4px; z-index: 20; cursor: default;
+}
 #talkbar.on { display: flex; }
-#chat-input { flex: 1; min-width: 0; font-size: 11px; padding: 5px 8px; border-radius: 8px;
-  border: 1px solid rgba(255,255,255,.22); background: rgba(30,32,40,.94); color: #fff; outline: none;
-  user-select: text; cursor: text; }
-#chat-input:focus { border-color: #3b82f6; }
-#chat-send { font-size: 12px; padding: 4px 9px; border: 0; border-radius: 8px; cursor: pointer;
+#chat-input {
+  flex: 1; min-width: 0;
+  font: inherit; font-size: 11.5px; line-height: 15px;
+  padding: 5px 8px; border-radius: 9px;
+  border: 1px solid rgba(255,255,255,.24);
+  background: rgba(24,27,34,.96); color: #fff; outline: none;
+  user-select: text; cursor: text;
+  resize: none; overflow-y: auto; max-height: 60px;
+  scrollbar-width: none;
+}
+#chat-input::-webkit-scrollbar { display: none; }
+#chat-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,.22); }
+#chat-send { flex: 0 0 auto; height: 26px; min-width: 30px; font-size: 13px;
+  padding: 0 8px; border: 0; border-radius: 9px; cursor: pointer;
   background: #3b82f6; color: #fff; }
+#chat-send:hover { background: #2563eb; }
 
-/* ── 右键菜单 ── */
+/* ── 右键菜单（浏览器预览兜底；WebView2 宿主里走原生 WPF 菜单）── */
 #menu { position: fixed; display: none; min-width: 180px; background: rgba(30,32,40,.97);
   border: 1px solid rgba(255,255,255,.18); border-radius: 10px; padding: 5px; z-index: 40;
   box-shadow: 0 8px 28px rgba(0,0,0,.5); }
 #menu .mi { font-size: 12px; color: #eee; padding: 7px 12px; border-radius: 7px; cursor: pointer; }
 #menu .mi:hover { background: rgba(255,255,255,.12); }
 #menu .sep { height: 1px; background: rgba(255,255,255,.12); margin: 4px 6px; }
+
+/* ── 底部按钮条（v9）──
+   🔴 2026-10-25 主人：「下方的菜单栏有点挡脚了」
+   真因：原来 fixed bottom:6px —— 而她的脚就在画布最底边，必然压脚。
+   现在：画布下面单独留了一条**脚位缝**（宿主给的 --foot-gap，默认 34px），
+   按钮条放进这条缝里垂直居中，做成很窄一条、默认 30% 透明。
+   ⚠️ 这里绝不能有整块不透明底板（会变成"背景不透明"）。 */
+#toolbar {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: max(1px, calc((var(--foot-gap, 34px) - 25px) / 2));
+  display: flex; gap: 3px; z-index: 35;
+  padding: 2px 4px; border-radius: 10px;
+  background: rgba(18,20,26,.50); border: 1px solid rgba(255,255,255,.08);
+  opacity: .30; transition: opacity .16s ease, background .16s ease;
+  cursor: default; }
+#toolbar:hover { opacity: 1; background: rgba(18,20,26,.92); }
+#toolbar .tb { width: 21px; height: 21px; padding: 0; font-size: 11px; line-height: 1;
+  border: 0; border-radius: 6px; cursor: pointer; color: #fff;
+  background: rgba(255,255,255,.10); transition: background .12s ease, transform .12s ease; }
+#toolbar .tb:hover { background: rgba(255,255,255,.26); transform: translateY(-1px); }
+#toolbar .tb:active { transform: translateY(0) scale(.94); }
+#toolbar .tb-danger:hover { background: #e5484d; }
+/* 输入框开着时按钮条再往上让一格，绝不同时占底部 */
+body.talking #toolbar { bottom: calc(var(--foot-gap, 34px) + 2px); opacity: .55; }

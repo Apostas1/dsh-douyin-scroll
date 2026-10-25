@@ -69,3 +69,26 @@ _scratch/
 # ─────────────────────────────────────────────────────────────
 assets/pet/
 
+
+# ─────────────────────────────────────────────────────────────
+# 桌宠 WebView2 宿主（tools/pet-host/）
+#   历史教训（2026-10-25 查出来）：子目录里的 .gitignore，模式是**相对该子目录**
+#   的 —— 原来写 `tools/pet-host/*.exe` 等于去找 `tools/pet-host/tools/pet-host/*.exe`，
+#   一条都匹配不到，exe / 微软的 DLL / 800MB 的 WebView2 用户目录全都变成"可提交"。
+#   所以这些规则**必须写在根 .gitignore**（这里），用根相对路径。
+#   进仓库的只有我们自己写的源码：PetHost.cs / build-host.ps1 / launch*.cmd / 探针脚本。
+# ─────────────────────────────────────────────────────────────
+tools/pet-host/*.exe
+tools/pet-host/*.exe.bak
+tools/pet-host/*.pdb
+tools/pet-host/*.dll
+tools/pet-host/*.config
+tools/pet-host/trace.txt
+tools/pet-host/pet-host-boot.log
+tools/pet-host/*.log
+tools/pet-host/pet-udf/
+tools/pet-host/*-udf/
+tools/pet-host/*-udf-*/
+tools/pet-host/comp-probe/
+tools/pet-host/v7-test/
+tools/pet-host/dll-2903-bak/

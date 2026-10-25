@@ -1,0 +1,289 @@
+/**
+ * tools/pet-session-repair.mjs —— 修「历史加载失败：lacks an identified message」
+ * ============================================================================
+ * 什么时候需要跑这个：
+ *   0.6.0 及更早的版本里，桌宠对话框说的话是**直接 append 进会话日志**的，
+ *   而且手写的消息**漏了 `id` 字段**（DSH 的 createUserMessage 会自动生成，
+ *   当时是自己拼对象，漏了）。于是会话里留下一批"没有身份"的 user 消息。
+ *
+ *   症状：打开那个会话就报
+ *     stored session "..." failed validation:
+ *       Error: session event at seq NNNN lacks an identified message
+ *    而且**每一轮都报**，会话等于废了。
+ *
+ *   为什么会这样：校验器只在**读**的时候拦（adoptSessionEvent），写的时候不拦
+ *   ⇒ 写坏的当场毫无反应，等下次打开会话才炸。
+ *
+ * 修法（最小改动，只补一个字段）：
+ *   给那些缺 id 的 user/message 补上 UUID，
+ *   **不动 seq、不动顺序、不动其它任何事件**。
+ *   为什么不「删掉 + 重编号」：重编号要 remap surfaceOp / shadowedSeqs /
+ *   sourceEventSeqs 等所有引用，动整个几万条的文件 —— 收益（少几条噪音）
+ *   远小于风险（把会话彻底搞死）。安全优先。
+ *
+ * 验证（必须全绿才会写盘）：
+ *   ① DSH 自己的 adoptSessionEvent 逐条过（权威，不自己猜规则）
+ *   ② seq 连续 0..N-1
+ *   ③ foldSurface + deriveEventMessage 之后，tool-call 与 tool-result 严格相邻
+ *   ④ 往返编解码逐行字节一致
+ *
+ * 用法：
+ *   node tools/pet-session-repair.mjs <会话文件>            只看不做（dry run）
+ *   node tools/pet-session-repair.mjs <会话文件> --apply    真写（自动先备份）
+ *
+ * 会话文件在哪：
+ *   <DSH_HOME>/sessions/<工作目录 slug>/session-<id>/session.v4.jsonl.zstd
+ *   动手前**先把 DSH 关掉**（它会用旧内容覆盖回去）。
+ * ============================================================================
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import zlib from 'node:zlib'
+import { constants } from 'node:zlib'
+import { randomUUID } from 'node:crypto'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { pathToFileURL } from 'node:url'
+
+const SRC = process.argv[2]
+const APPLY = process.argv.includes('--apply')
+if (!SRC) {
+  console.error('用法: node tools/pet-session-repair.mjs <session.v4.jsonl.zstd> [--apply]')
+  process.exit(2)
+}
+
+/* ── 找宿主那棵树里的 @deepseek-ai/dsh-session（权威校验器）──
+ * ⚠️ 不能写死路径：别人的安装位置跟我不一样（npm 全局 / 桌面版 / 别的盘）。
+ *    这里按可能性逐个试，找到一个能 import 的就用。
+ */
+function candidateModulesRoots() {
+  const out = []
+  const push = (p) => { if (p && !out.includes(p)) out.push(p) }
+  push(process.env.DSH_HOST_MODULES)
+  // 桌面版：<安装目录>/resources/app.asar.unpacked/dsh/node_modules
+  push(process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs'))
+  // npm 全局
+  if (process.env.APPDATA) {
+    const npm = path.join(process.env.APPDATA, 'npm', 'node_modules')
+    push(path.join(npm, '@deepseek-ai', 'dsh', 'node_modules'))
+    push(path.join(npm, '@deepseek-ai', 'dsh-desktop', 'node_modules'))
+    push(npm)
+  }
+  push('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules')
+  // profile 树（插件就是从这儿拿宿主的包）
+  try {
+    const dshHome = process.env.DSH_HOME || path.join(homedir(), '.dsh')
+    for (const p of readdirSync(path.join(dshHome, 'profiles'))) {
+      push(path.join(dshHome, 'profiles', p, 'node_modules'))
+    }
+    // 桌面版把 asar 解开放在 dsh-data/extracted-asar 的情况（本机就是）
+    push(path.join(dshHome, 'extracted-asar', 'dsh', 'node_modules'))
+    push(path.join(dshHome, 'extracted-asar', 'node_modules'))
+  } catch { /* 没有就算了 */ }
+  // 从"这个脚本自己所在的位置"往上找：插件装在 profile 里时，宿主包常在同一棵树里
+  try {
+    let d = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+    for (let i = 0; i < 8 && d; i++) {
+      push(path.join(d, 'node_modules'))
+      const up = path.dirname(d)
+      if (up === d) break
+      d = up
+    }
+  } catch { /* 无所谓 */ }
+  return out
+}
+
+async function loadSessionLib() {
+  for (const root of candidateModulesRoots()) {
+    const file = path.join(root, '@deepseek-ai', 'dsh-session', 'lib', 'index.js')
+    if (!existsSync(file)) continue
+    try {
+      const mod = await import(pathToFileURL(file).href)
+      if (typeof mod.adoptSessionEvent === 'function') {
+        console.log('校验器来源：' + file)
+        return mod
+      }
+    } catch { /* 换下一个 */ }
+  }
+  return null
+}
+
+const sess = await loadSessionLib()
+if (!sess) {
+  console.error('❌ 找不到 @deepseek-ai/dsh-session（宿主的会话校验器）')
+  console.error('   试过这些位置：')
+  for (const r of candidateModulesRoots()) console.error('     ' + r)
+  console.error('   如果 DSH 装在别处，可以设环境变量 DSH_HOST_MODULES=<那个 node_modules 目录> 再跑。')
+  process.exit(3)
+}
+const { adoptSessionEvent, foldSurface, deriveEventMessage } = sess
+
+/* ── zstd 帧扫描（Node 的 zstdDecompressSync 只吃单帧，得先切）── */
+const MAGIC = 0xfd2fb528;
+function frameEnd(b, start) {
+  let p = start + 4;
+  const d = b[p++];
+  const fcs = (d >> 6) & 3, ss = (d >> 5) & 1, cs = (d >> 2) & 1, df = d & 3;
+  if (!ss) p += 1;
+  p += [0, 1, 2, 4][df];
+  p += fcs === 0 ? (ss ? 1 : 0) : [0, 2, 4, 8][fcs];
+  for (;;) { const h = b[p] | (b[p + 1] << 8) | (b[p + 2] << 16); p += 3; const last = h & 1, bt = (h >> 1) & 3, bs = h >>> 3; p += bt === 1 ? 1 : bs; if (last) break; }
+  if (cs) p += 4;
+  return p;
+}
+function decodeAll(buf) {
+  const frames = []; let pos = 0;
+  while (pos + 4 <= buf.length) {
+    if (buf.readUInt32LE(pos) !== MAGIC) throw new Error('bad zstd magic at ' + pos);
+    const end = frameEnd(buf, pos);
+    frames.push(zlib.zstdDecompressSync(buf.subarray(pos, end)).toString('utf8'));
+    pos = end;
+  }
+  if (pos !== buf.length) throw new Error('trailing bytes after last frame');
+  return frames;
+}
+
+/* ── 1. 解出所有帧 ── */
+const buf = fs.readFileSync(SRC);
+const frames = decodeAll(buf);
+const headerLines = frames[0].split('\n').filter((x) => x);
+if (headerLines.length !== 1) throw new Error('first frame must be exactly one header line');
+const batchSizes = frames.slice(1).map((t) => t.split('\n').filter((x) => x).length);
+const events = [];
+for (let i = 1; i < frames.length; i++) for (const l of frames[i].split('\n')) if (l) events.push(JSON.parse(l));
+console.log(`文件      : ${SRC}`);
+console.log(`帧        : ${frames.length}（1 个 header + ${batchSizes.length} 个批次）`);
+console.log(`事件      : ${events.length}`);
+for (let i = 0; i < events.length; i++) if (events[i].seq !== i) throw new Error(`seq != index at ${i}（原文件就已经乱序，停下）`);
+console.log('seq       : 连续 0..' + (events.length - 1) + ' ✓');
+
+/* ── 2. 找病灶：缺 id 的 user/message ── */
+const broken = [];
+for (const ev of events) {
+  if (ev.type !== 'user/message') continue;
+  const d = ev.data;
+  if (!d || typeof d.id === 'string' && d.id !== '') continue;
+  broken.push(ev);
+}
+console.log(`\n缺 id 的 user/message：${broken.length} 条`);
+if (!broken.length) { console.log('没有要修的 —— 这个文件已经是好的'); process.exit(0) }
+const bySource = new Map();
+for (const ev of broken) {
+  const k = `${ev.data?.source?.kind}/${String(ev.data?.source?.rpcId ?? '').split('-')[0]}`;
+  bySource.set(k, (bySource.get(k) || 0) + 1);
+}
+for (const [k, n] of bySource) console.log(`  ${n} 条  source=${k}`);
+console.log(`  seq 范围：${broken[0].seq} .. ${broken[broken.length - 1].seq}`);
+
+/* ── 3. 修：只补 id（顺带确认它们的其它字段本来就是合法的）── */
+let patched = 0;
+for (const ev of broken) {
+  const d = ev.data;
+  // 先自己兜一层：role / source / content 必须本来就对，否则补 id 也救不回来
+  if (d.role !== 'user') throw new Error(`seq ${ev.seq}: role 不是 user，超出本次修复范围`);
+  if (!d.source || typeof d.source.kind !== 'string' || !d.source.kind) throw new Error(`seq ${ev.seq}: source 坏了，超出范围`);
+  if (!Array.isArray(d.content)) throw new Error(`seq ${ev.seq}: content 坏了，超出范围`);
+  d.id = randomUUID();
+  patched++;
+}
+console.log(`\n已补 id：${patched} 条（每条的 id 都是新 UUID，不动 seq / 顺序 / 其它事件）`);
+
+/* ── 4. 全量校验 ①：DSH 自己的 adoptSessionEvent 逐条过 ── */
+const stillBad = [];
+for (const ev of events) {
+  try { adoptSessionEvent(structuredClone(ev)) }
+  catch (e) { stillBad.push({ seq: ev.seq, type: ev.type, err: String(e.message).slice(0, 200) }) }
+}
+console.log(`\n① adoptSessionEvent 校验：${stillBad.length} 条不合法 ${stillBad.length ? '❌' : '✓'}`);
+for (const b of stillBad.slice(0, 10)) console.log(`   seq ${b.seq} ${b.type}: ${b.err}`);
+if (stillBad.length) { console.log('\nABORT：补完还有坏事件，不写'); process.exit(1) }
+
+/* ── 5. 全量校验 ②：seq 仍然连续 ── */
+for (let i = 0; i < events.length; i++) if (events[i].seq !== i) throw new Error('seq 被破坏了 at ' + i);
+console.log(`② seq 连续 0..${events.length - 1} ✓（没动过）`);
+
+/* ── 6. 全量校验 ③：tool-call 与 tool-result 严格相邻 ── */
+function project(seq, bySeq) {
+  const e = bySeq.get(seq);
+  if (!e) return null;
+  if (e.type === 'user/message') return { role: 'user', seq, e };
+  if (e.type === 'tool/result') return { role: 'tool', seq, e };
+  if ((e.data?.message?.content ?? []).length === 0) return null;
+  return { role: e.type.replace('/message', ''), seq, e };
+}
+const folded = foldSurface(events);
+const bySeq = new Map(events.map((e) => [e.seq, e]));
+const msgs = [];
+for (const seq of folded.nodes) {
+  const ev = events[seq];
+  const m = deriveEventMessage(ev, folded.projectedMessages);
+  if (m !== null) msgs.push({ seq, m });
+}
+const viol = [];
+for (let i = 0; i < msgs.length; i++) {
+  const { seq, m } = msgs[i];
+  if (m.role !== 'assistant') continue;
+  const calls = (m.content ?? []).filter((b) => b.type === 'tool-call');
+  if (!calls.length) continue;
+  for (let k = 0; k < calls.length; k++) {
+    const next = msgs[i + 1 + k];
+    if (!next) { viol.push({ kind: 'missing', callSeq: seq, id: calls[k].id }); continue }
+    if (next.m.role !== 'tool') { viol.push({ kind: 'order', callSeq: seq, id: calls[k].id, betweenRole: next.m.role, betweenSeq: next.seq }); continue }
+    if (next.m.toolCallId !== calls[k].id) viol.push({ kind: 'id', callSeq: seq, want: calls[k].id, got: next.m.toolCallId });
+  }
+}
+console.log(`③ tool-call/result 配对：surface ${folded.nodes.length} 个节点 / 模型消息 ${msgs.length} 条；违规 ${viol.length} ${viol.length ? '❌' : '✓'}`);
+for (const v of viol.slice(0, 10)) console.log('   ', JSON.stringify(v));
+if (viol.length) { console.log('\nABORT：配对有问题，不写'); process.exit(1) }
+
+/* ── 7. 重新编码（按原来的 batchSizes 切，保持帧结构）── */
+const plainLines = events.map((e) => JSON.stringify(e));
+const CHECKSUM = { params: { [constants.ZSTD_c_checksumFlag]: 1 } };
+const enc = (s) => zlib.zstdCompressSync(Buffer.from(s, 'utf8'), CHECKSUM);
+const chunks = [enc(headerLines[0] + '\n')];
+let cursor = 0;
+for (const n of batchSizes) {
+  if (n <= 0) continue;
+  const slice = plainLines.slice(cursor, cursor + n);
+  cursor += n;
+  if (slice.length !== n) throw new Error(`batch short: got ${slice.length} want ${n}`);
+  chunks.push(enc(slice.join('\n') + '\n'));
+}
+if (cursor !== plainLines.length) throw new Error(`wrote ${cursor} of ${plainLines.length} lines`);
+const outBuf = Buffer.concat(chunks);
+console.log(`\n编码：${chunks.length} 帧 / ${outBuf.length} 字节（原 ${buf.length}）`);
+
+/* ── 8. 往返校验：解回来必须和 plainLines 逐行一模一样 ── */
+{
+  const rtFrames = decodeAll(outBuf);
+  if (rtFrames[0].indexOf('\n') !== rtFrames[0].length - 1) throw new Error('header frame must be exactly one line');
+  const rtLines = [];
+  for (let i = 1; i < rtFrames.length; i++) for (const l of rtFrames[i].split('\n')) if (l) rtLines.push(l);
+  if (rtLines.length !== plainLines.length) throw new Error(`roundtrip count ${rtLines.length} != ${plainLines.length}`);
+  for (let i = 0; i < rtLines.length; i++) {
+    if (rtLines[i] !== plainLines[i]) throw new Error('roundtrip content mismatch at ' + i);
+    if (JSON.parse(rtLines[i]).seq !== i) throw new Error('roundtrip seq mismatch at ' + i);
+  }
+  console.log(`④ 往返编解码：${rtLines.length} 条逐行字节一致 ✓ / ${rtFrames.length} 帧`);
+}
+
+if (!APPLY) { console.log('\nDRY RUN —— 没写任何文件。加 --apply 才真写（会自动先备份）'); process.exit(0) }
+
+/* ── 9. 备份 + 写回 ── */
+const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
+const bak = `${SRC}.bak-repair-${stamp}`;
+fs.copyFileSync(SRC, bak);
+console.log(`\n备份：${bak}`);
+const tmp = `${SRC}.tmp-${process.pid}`;
+fs.writeFileSync(tmp, outBuf);
+// 再核一次写出去的字节
+{
+  const check = decodeAll(fs.readFileSync(tmp));
+  const ls = [];
+  for (let i = 1; i < check.length; i++) for (const l of check[i].split('\n')) if (l) ls.push(l);
+  if (ls.length !== plainLines.length) throw new Error('写出去的字节不对：条数不符');
+  for (let i = 0; i < ls.length; i++) if (ls[i] !== plainLines[i]) throw new Error('写出去的字节不对 at ' + i);
+}
+fs.renameSync(tmp, SRC);
+console.log(`已写回：${SRC}`);
+console.log('\nDONE —— 重开 DSH 那个会话试试');

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>她的日记本</title>
+<!--
+  tools/pet-page/diary.html —— 她的日记本（主人 2026-10-25 的交代）
+  ============================================================
+  主人原话：「日记要不要弄个简单的阅读页面弄成日记本的形状，便于阅读」（seq 40201）。
+
+  设计取舍（都围着"便于阅读"）：
+    ① **真的做成本子**：牛皮纸封面 + 中缝装订线 + 页面左右两栏（左页/右页），
+       像摊开的一本手写本子 —— 不是一张网页卡片列表。
+    ② **不臃肿**：一屏就是"一摊"两页，能上下滚；左右页按序号交替装内容。
+    ③ **彩蛋感**：右键才进得来，面板里没有入口（主人要求面板保持干净）。
+    ④ 没日记的时候说人话（"这本子还是空的"），不装作有。
+
+  数据：GET {api}/pet/diary?day=YYYY-MM-DD → { ok, day, items[], stars, days[] }
+        items 新的在前；每项 { at, text, star, kind }
+  ⚠️ 页面 origin 与 API origin 不同（8611 vs 50898）⇒ 靠宿主侧 CORS 放行本机回环。
+-->
+<style>
+  :root {
+    --paper: #f6efdd;
+    --paper-edge: #e8dcc2;
+    --ink: #4a3f31;
+    --ink-soft: #7d6e5a;
+    --star: #d98a3d;
+    --gutter: #cbb894;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: radial-gradient(circle at 50% 0%, #3b332b 0%, #241f1a 70%);
+    font-family: "Kaiti SC", "STKaiti", "KaiTi", "Noto Serif SC", serif;
+    color: var(--ink);
+    overflow: hidden;
+  }
+  /* 整本摊开的桌子 */
+  #desk {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    padding: 22px;
+  }
+  /* 本子本体：封面边缘 + 书脊阴影 */
+  #book {
+    position: relative;
+    width: min(1000px, 100%);
+    height: min(680px, 100%);
+    background:
+      linear-gradient(90deg, rgba(0,0,0,.10) 0%, rgba(0,0,0,0) 6%, rgba(0,0,0,0) 94%, rgba(0,0,0,.10) 100%),
+      var(--paper);
+    border-radius: 8px;
+    box-shadow:
+      0 26px 60px rgba(0,0,0,.55),
+      0 0 0 1px rgba(0,0,0,.35),
+      inset 0 0 60px rgba(150,120,70,.10);
+    overflow: hidden;
+  }
+  /* 牛皮纸纹理（纯 CSS，不引外部图） */
+  #book::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      repeating-linear-gradient(0deg, rgba(120,95,55,.045) 0 1px, transparent 1px 3px),
+      repeating-linear-gradient(90deg, rgba(120,95,55,.035) 0 1px, transparent 1px 4px);
+  }
+  /* 中缝：装订线 */
+  #fold {
+    position: absolute; left: 50%; top: 0; bottom: 0; width: 34px;
+    transform: translateX(-50%);
+    background: linear-gradient(90deg, rgba(0,0,0,0) 0%, rgba(120,95,55,.16) 42%, rgba(120,95,55,.30) 50%, rgba(120,95,55,.16) 58%, rgba(0,0,0,0) 100%);
+    pointer-events: none;
+  }
+  #fold::after {
+    /* 装订线本身 */
+    content: ""; position: absolute; left: 50%; top: 12px; bottom: 12px;
+    width: 1px; transform: translateX(-50%);
+    background: repeating-linear-gradient(180deg, var(--gutter) 0 7px, transparent 7px 15px);
+    opacity: .75;
+  }
+  /* 页眉 */
+  #head {
+    position: absolute; left: 0; right: 0; top: 0; height: 62px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 26px; z-index: 3;
+    border-bottom: 1px dashed rgba(120,95,55,.28);
+    background: linear-gradient(180deg, rgba(246,239,221,.98), rgba(246,239,221,.80));
+  }
+  #title { font-size: 19px; letter-spacing: 2px; color: var(--ink); }
+  #title small { font-size: 12px; color: var(--ink-soft); margin-left: 10px; letter-spacing: 0; }
+  #nav { display: flex; align-items: center; gap: 8px; }
+  button {
+    font-family: inherit; font-size: 13px;
+    color: var(--ink); background: rgba(255,255,255,.55);
+    border: 1px solid rgba(120,95,55,.35); border-radius: 5px;
+    padding: 5px 11px; cursor: pointer;
+  }
+  button:hover { background: #fff; }
+  button:disabled { opacity: .38; cursor: default; }
+  #dayLbl { font-size: 13px; color: var(--ink-soft); min-width: 92px; text-align: center; }
+
+  /* 两栏正文 */
+  #spread {
+    position: absolute; left: 0; right: 0; top: 62px; bottom: 0;
+    display: flex; z-index: 2;
+  }
+  .page {
+    width: 50%; height: 100%; overflow-y: auto;
+    padding: 20px 30px 40px 30px;
+    scrollbar-width: thin;
+  }
+  .page::-webkit-scrollbar { width: 8px; }
+  .page::-webkit-scrollbar-thumb { background: rgba(120,95,55,.35); border-radius: 4px; }
+  .page.left { padding-right: 34px; }
+  .page.right { padding-left: 34px; }
+
+  /* 一条日记 */
+  .entry { margin: 0 0 16px 0; padding: 0 0 12px 0; border-bottom: 1px dotted rgba(120,95,55,.22); }
+  .entry:last-child { border-bottom: 0; }
+  .entry time { display: block; font-size: 11px; color: var(--ink-soft); letter-spacing: .5px; margin-bottom: 4px; }
+  .entry p { margin: 0; font-size: 16px; line-height: 1.85; }
+  /* 有感的那句：横线像本子里划出来的重点 */
+  .entry.star p {
+    background: linear-gradient(180deg, transparent 62%, rgba(217,138,61,.26) 62%, rgba(217,138,61,.26) 88%, transparent 88%);
+  }
+  .entry.star time::after { content: " ✦"; color: var(--star); }
+
+  /* 空/错状态 */
+  #empty {
+    position: absolute; inset: 62px 0 0 0; z-index: 2;
+    display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px;
+    color: var(--ink-soft); text-align: center; padding: 30px;
+  }
+  #empty .big { font-size: 17px; color: var(--ink); }
+  #empty .small { font-size: 13px; }
+  #empty button { margin-top: 8px; }
+  /* 页脚页码 */
+  #folio {
+    position: absolute; bottom: 8px; left: 0; right: 0; text-align: center;
+    font-size: 11px; color: var(--ink-soft); letter-spacing: 1px; z-index: 3; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="desk">
+  <div id="book">
+    <div id="fold"></div>
+    <div id="head">
+      <div id="title">她的日记 <small id="sub"></small></div>
+      <div id="nav">
+        <button id="prevDay" title="前一天">◀ 前一天</button>
+        <span id="dayLbl"></span>
+        <button id="nextDay" title="后一天">后一天 ▶</button>
+        <button id="todayBtn" title="回到今天">今天</button>
+      </div>
+    </div>
+    <div id="spread">
+      <div class="page left" id="pageL"></div>
+      <div class="page right" id="pageR"></div>
+    </div>
+    <div id="empty">
+      <div class="big" id="emptyBig">这本子还是空的</div>
+      <div class="small" id="emptySmall">鱼今天还没想什么呢</div>
+      <button id="emptyToday" style="display:none">回到今天</button>
+    </div>
+    <div id="folio"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var state = { day: '', days: [], items: [], stars: 0 };
+
+  // ── 找后端 ──
+  // 本页由宿主的静态服务发出（127.0.0.1:8611 一类），JSON 接口在 DSH 宿主上。
+  // 🔴 两者不同 origin ⇒ 浏览器按同源策略掐掉 fetch（"Failed to fetch"）。
+  //    所以默认走**同源反向代理** /api/dsh/*（PetHost 的 TcpListener 转发给 DSH）。
+  //    只有拿不到代理（浏览器预览）才退回直连绝对地址。
+  var DEFAULT_API = 'http://127.0.0.1:50898/api/douyin-duty';
+  var SAME_ORIGIN_PROXY = '/api/dsh/douyin-duty';
+
+  function apiFromQuery() {
+    try {
+      var u = new URL(location.href);
+      return u.searchParams.get('api') || '';
+    } catch (e) { return ''; }
+  }
+  function isWebViewHost() {
+    try { return !!(window.chrome && window.chrome.webview); } catch (e) { return false; }
+  }
+  function apiBase() {
+    // ① 宿主里 ⇒ 同源代理（免跨域）
+    if (isWebViewHost()) return SAME_ORIGIN_PROXY;
+    // ② 浏览器预览 ⇒ 直连（有跨域风险，但至少能跑）
+    var q = apiFromQuery();
+    if (q) return q.replace(/\/+$/, '');
+    try {
+      if (window.__petApi) return String(window.__petApi).replace(/\/+$/, '');
+    } catch (e) { }
+    return DEFAULT_API;
+  }
+
+  function el(id) { return document.getElementById(id); }
+
+  function fmtTime(iso) {
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '';
+      return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    } catch (e) { return ''; }
+  }
+
+  function render() {
+    var L = el('pageL'), R = el('pageR');
+    L.innerHTML = ''; R.innerHTML = '';
+    var frag_l = document.createDocumentFragment();
+    var frag_r = document.createDocumentFragment();
+    var n = 0;
+    state.items.forEach(function (it) {
+      var div = document.createElement('div');
+      div.className = 'entry' + (it.star ? ' star' : '');
+      var t = document.createElement('time');
+      t.textContent = fmtTime(it.at);
+      var p = document.createElement('p');
+      p.textContent = String(it.text || '');
+      div.appendChild(t); div.appendChild(p);
+      // 左右按页高交替装：先估算，简单起见偶数条进左页
+      if (n % 2 === 0) frag_l.appendChild(div); else frag_r.appendChild(div);
+      n++;
+    });
+    L.appendChild(frag_l); R.appendChild(frag_r);
+
+    var has = state.items.length > 0;
+    el('empty').style.display = has ? 'none' : 'flex';
+    el('spread').style.display = has ? 'flex' : 'none';
+    if (!has) {
+      el('emptyBig').textContent = '这本子还是空的';
+      el('emptySmall').textContent = '鱼今天还没想什么呢 (｡•́︿•̀｡)';
+      el('emptyToday').style.display = 'none';
+    }
+
+    el('dayLbl').textContent = state.day || '';
+    el('sub').textContent = has
+      ? ('共 ' + state.items.length + ' 条 · 有感 ' + state.stars + ' 条')
+      : '';
+    el('folio').textContent = has ? '— 不要笑鱼写字丑 —' : '';
+
+    var i = state.days.indexOf(state.day);
+    el('prevDay').disabled = !(i >= 0 && i < state.days.length - 1);
+    el('nextDay').disabled = !(i > 0);
+    el('todayBtn').disabled = (i === 0);
+  }
+
+  function fail(msg) {
+    el('empty').style.display = 'flex';
+    el('spread').style.display = 'none';
+    el('emptyBig').textContent = msg || '本子打不开…';
+    el('emptySmall').textContent = 'API：' + apiBase();
+    el('emptyToday').style.display = 'block';
+    el('folio').textContent = '';
+  }
+
+  function load(day) {
+    var url = apiBase() + '/pet/diary' + (day ? ('?day=' + encodeURIComponent(day)) : '');
+    return fetch(url, { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (j) {
+        if (!j || !j.ok) throw new Error((j && j.error) || 'bad payload');
+        state.day = j.day || day || '';
+        state.items = Array.isArray(j.items) ? j.items : [];
+        state.stars = typeof j.stars === 'number' ? j.stars : state.items.filter(function (x) { return x.star; }).length;
+        state.days = Array.isArray(j.days) && j.days.length ? j.days : [state.day];
+        if (state.days.indexOf(state.day) < 0) state.days = [state.day].concat(state.days);
+        render();
+        return true;
+      })
+      .catch(function (e) { fail('本子打不开…鱼找不到它了'); console.warn('[diary]', e); return false; });
+  }
+
+  function shiftDay(delta) {
+    var i = state.days.indexOf(state.day);
+    if (i < 0) return;
+    var j = i + delta;
+    if (j < 0 || j >= state.days.length) return;
+    load(state.days[j]);
+  }
+
+  el('prevDay').addEventListener('click', function () { shiftDay(1); });   // days 新的在前
+  el('nextDay').addEventListener('click', function () { shiftDay(-1); });
+  el('todayBtn').addEventListener('click', function () { if (state.days.length) load(state.days[0]); });
+  el('emptyToday').addEventListener('click', function () { if (state.days.length) load(state.days[0]); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { try { window.chrome.webview.postMessage('diary:close'); } catch (_) { window.close(); } }
+    if (e.key === 'ArrowLeft') shiftDay(1);
+    if (e.key === 'ArrowRight') shiftDay(-1);
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>

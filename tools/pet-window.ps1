@@ -298,7 +298,10 @@ function Load-All-Layers($spriteDir) {
     $img.Source = Build-Bitmap (Join-Path $spriteDir ("layers\" + $f + ".png"))
     $lt = New-Object System.Windows.Media.TranslateTransform
     $lr = New-Object System.Windows.Media.RotateTransform
-    $lr.CenterX = 0.5; $lr.CenterY = 1.0   # 绕图层底部转（≈脖颈位置，小角度近似统一枢轴）
+    # 🔴 v5.6 枢轴修正：RenderTransformOrigin 是相对元素的（0.5,1.0=底部中点）。
+    #    之前把它错设进 RotateTransform.CenterX/Y（那是绝对像素）——150 图上等于
+    #    绕 (0.5,1.0) 像素转 = 疯转/消失。现在给 RotateTransform 设相对原点，层自身再各自设。
+    $img.RenderTransformOrigin = '0.5,0.9'
     $lg = New-Object System.Windows.Media.TransformGroup
     [void]$lg.Children.Add($lt); [void]$lg.Children.Add($lr)
     $img.RenderTransform = $lg
@@ -350,11 +353,25 @@ function Set-Prop([string]$set) {
 }
 
 function Set-Bubble([string]$text) {
+  # 🔴 v5.6：打字机往 $bt 里塞过 Run（Inlines）——WPF 里 Text 与 Inlines 互斥，
+  #    不清空就设 Text 会抛异常 ⇒ 打过一次字之后所有台词全哑（主人抓的
+  #    「打字互动几次就不对劲」的真凶之一）。每次先清 Inlines。
+  try { $bt.Inlines.Clear() } catch {}
   if ($text) {
     $bt.Text = $text
     $bubble.Visibility = [System.Windows.Visibility]::Visible
     $script:holdUntil = ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds + 4.5
   } else { $bt.Text = ''; $bubble.Visibility = [System.Windows.Visibility]::Collapsed }
+}
+
+# 🔴 v5.6 黑匣子：关键事件写 pet-window-debug.log（追加落盘，进程死了也能看到
+#    死前最后一步）。文件超过 256KB 开局截断。
+function Write-Dbg([string]$what) {
+  try {
+    $f = Join-Path $home_ 'pet-window-debug.log'
+    if ((Test-Path $f) -and (Get-Item $f).Length -gt 256KB) { Set-Content $f '--- 截断 ---' -Encoding UTF8 }
+    Add-Content -Path $f -Value ("[" + (Get-Date -Format 'HH:mm:ss') + "] " + $what) -Encoding UTF8
+  } catch {}
 }
 
 # ── 动画（人格节奏）──
@@ -492,6 +509,9 @@ $script:lastStateKey = ''
 $script:lastAutoAt = 0
 $poll.Add_Tick({
   try {
+    # 🔴 v5.6 黑匣子：每 30 拍（约 1 分钟）报一次活
+    $script:pollN = ([int]$script:pollN) + 1
+    if (($script:pollN % 30) -eq 1) { Write-Dbg "poll alive #$($script:pollN)" }
     # 🔴 v5.5 留守模式（主人抓的「重启面板她就消失」）：宿主重启要一两分钟，
     #    以前 90 秒没状态她就自杀——主人回来她没了。现在改成：状态断了先说一句
     #    人话（"主人去忙了吧，鱼在这里等"），然后**安静留守 30 分钟**；
@@ -597,7 +617,7 @@ $poll.Add_Tick({
       $script:lastActivityAt = $nowSec
       Set-Bubble $act
     }
-  } catch {}
+  } catch { Write-Dbg ("poll EXC: " + $_.Exception.Message + " @L" + $_.InvocationInfo.ScriptLineNumber) }
 })
 $poll.Start()
 
@@ -820,17 +840,18 @@ function Apply-ActionFrame($f) {
     }
     if ($f.PSObject.Properties['mouth']) { Set-Mouth ([double]$f.mouth) }
     else { Set-Mouth 0 }
-  } catch {}
+  } catch { Write-Dbg ("frame EXC: " + $_.Exception.Message + " @L" + $_.InvocationInfo.ScriptLineNumber) }
 }
 function Start-Action([string]$name) {
   $a = $script:actionTable[$name]
-  if (-not $a) { return }
+  if (-not $a) { Write-Dbg "action $name 不存在"; return }
   $nowSec = ([DateTime]::UtcNow - [DateTime]::new(1970,1,1)).TotalSeconds
   if ($nowSec -lt $script:actionUntil) { return }
   $script:actionFrames = $a.frames
   $script:actionIdx = 0
   $script:actionUntil = $nowSec + $a.dur + 0.2
   if ($a.say) { Set-Bubble $a.say }
+  Write-Dbg "action $name ($($a.frames.Count) 帧, layerT=$($script:layerT.Count) 层)"
   $script:actionTimer.Start()
 }
 $script:actionTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -855,7 +876,7 @@ $script:actionTimer.Add_Tick({
     }
     $f = $a[$script:actionIdx]; $script:actionIdx++
     Apply-ActionFrame $f
-  } catch { try { $script:actionTimer.Stop(); $script:actionFrames = $null } catch {} }
+  } catch { Write-Dbg ("action EXC: " + $_.Exception.Message + " @L" + $_.InvocationInfo.ScriptLineNumber); try { $script:actionTimer.Stop(); $script:actionFrames = $null } catch {} }
 })
 function Chat-Brain([string]$text) {
   $p = [string]$script:cfg.persona
@@ -1143,6 +1164,9 @@ try {
 } catch {}
 
 $win.Add_Closed({ $poll.Stop(); $top.Stop(); $blinkTimer.Stop(); $gaze.Stop(); $walk.Stop(); $quip.Stop(); Stop-Danmaku })
+
+# 🔴 v5.6 黑匣子埋点
+Write-Dbg "start ok (pid=$PID, persona=$([string]$script:cfg.persona), win=$($win.Width)x$($win.Height))"
 
 Set-Motion ([string]$script:cfg.persona)
 $blinkTimer.Start(); $gaze.Start(); $walk.Start()

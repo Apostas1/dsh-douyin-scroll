@@ -261,7 +261,127 @@ let allText = flat.filter((n) => n.tag === '#text').map((n) => n.text).join(' | 
 
 let fail = 0
 
-console.log('【没登录时】—— 新手看到的第一屏')
+/* ══════════════════════════════════════════════════════════════════════════
+ * ⭐ 面板三组（2026-10-25 重排）：20+ 张卡压成 7 张 —— 组 ①永远是三张卡（不折叠），
+ *    组 ②「出问题才看」/ 组 ③「一次配好」**默认收起**。
+ *    折叠是设计的一部分，不是"渲染丢了" ⇒ 这里先验「默认确实收着」，
+ *    再**点开折叠组**，后面所有老断言照旧在展开后的树上跑（一条都不删、不弱化）。
+ *
+ *    ⚠️ 为什么必须点开：组 ②③ 里的按钮（检查更新 / 看接入方式 / 看今天的报告 /
+ *       检查环境 / 从我的会话里选 / 看记忆 / 看看谁找我…）收起来时根本不在 DOM 里，
+ *       不点开就找不到 —— 那是设计如此，不是缺功能。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 组标题：[{ name, btn }]，btn 非空 = 这一组能折叠（组 ① 是纯标题 div，没有按钮）
+ *  ⚠️ 结构是 h('div', {'data-dy-group':''}, h('button', {'data-dy-groupbtn':''}, …))，
+ *     所以「能折叠」的标志是组里有 data-dy-groupbtn 的按钮，不是容器自己是不是 button。 */
+const groupInfo = (f) => {
+  const out = []
+  f.forEach((n, i) => {
+    if (!(n.props && 'data-dy-groupname' in n.props)) return
+    // 紧跟其后的第一个文本节点就是组名
+    let j = i + 1
+    while (j < f.length && f[j].tag !== '#text') j++
+    const name = j < f.length ? f[j].text : ''
+    // 在整棵树里找带 data-dy-groupbtn 的按钮，用它的 toggle 闭包区分子组
+    // （该按钮的 onClick 是这一组自己的；面板只有两个折叠组，按出现顺序配给
+    //   「出问题才看」「一次配好」）
+    out.push({ name })
+  })
+  const btns = f.filter((n) => n.tag === 'button' && n.props && 'data-dy-groupbtn' in n.props)
+  // 折叠组按钮按文档顺序出现，且只属于可折叠的两组
+  let bi = 0
+  for (const g of out) {
+    if (g.name === '出问题才看' || g.name === '一次配好') g.btn = btns[bi++] || null
+    else g.btn = null
+  }
+  return out
+}
+
+/** 把还没展开的折叠组点开（幂等；最多 4 轮，防手滑写出死循环） */
+const openAllGroups = async (why) => {
+  for (let round = 0; round < 4; round++) {
+    hookIdx = 0
+    const t = render(React.createElement(Registered, {}))
+    await flush()
+    const f = walk(t)
+    const closed = groupInfo(f).filter((g) => g.btn && g.btn.props['data-open'] === undefined)
+    if (!closed.length) return t
+    try {
+      closed[0].btn.props.onClick({ target: { value: '' } })
+    } catch (e) {
+      console.log(`  ❌ 点开组「${closed[0].name}」抛错：${e?.message ?? e}`); fail++
+      return t
+    }
+    await flush()
+  }
+  console.log(`  ❌ 折叠组点不开（${why}）`); fail++
+  return render(React.createElement(Registered, {}))
+}
+
+/** 展开后重新取树 / 拍平 / 拼全文 */
+const expandAndFlatten = async (why) => {
+  const t = await openAllGroups(why)
+  const f = walk(t)
+  return { tree: t, flat: f, text: f.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ') }
+}
+
+/* ── ① 默认状态：三个组标题都在，组 ②③ 收着 ── */
+console.log('【折叠组 · 默认收起】')
+{
+  const gi = groupInfo(flat)
+  const names = gi.map((g) => g.name)
+  for (const want of ['常开必看', '出问题才看', '一次配好']) {
+    if (names.includes(want)) console.log(`  ✅ 有组标题「${want}」`)
+    else { console.log(`  ❌ 缺组标题「${want}」（实际：${JSON.stringify(names)}）`); fail++ }
+  }
+  const folds = gi.filter((g) => g.btn)
+  if (folds.length === 2) console.log('  ✅ 「出问题才看」「一次配好」两个组可折叠')
+  else { console.log(`  ❌ 可折叠组应为 2 个，实际 ${folds.length}`); fail++ }
+  const opened = folds.filter((g) => g.btn.props['data-open'] !== undefined)
+  if (!opened.length) console.log('  ✅ 两个折叠组默认都是收起的')
+  else { console.log(`  ❌ 这些组默认就展开了：${opened.map((g) => g.name).join('、')}`); fail++ }
+  // 收起时：组 ①的三张卡在，组 ②③ 的内容不在（这才是"收起来了"）
+  const cardsNow = flat.filter((n) => n.props && 'data-dy-card' in n.props).length
+  if (cardsNow === 3) console.log('  ✅ 收起时只有「常开必看」那 3 张卡')
+  else { console.log(`  ❌ 收起时卡片数应为 3，实际 ${cardsNow}`); fail++ }
+  for (const hidden of ['检查环境', '刷什么', '看看谁找我']) {
+    if (!allText.includes(hidden)) console.log(`  ✅ 收起时看不到「${hidden}」（在折叠组里）`)
+    else { console.log(`  ❌ 收起时仍然显示了「${hidden}」—— 折叠没生效`); fail++ }
+  }
+}
+
+/* ── ② 点开两个折叠组 → 全展开，后面所有断言都在这个状态上跑 ── */
+console.log('\n【折叠组 · 点开之后】')
+{
+  const r = await expandAndFlatten('默认收起状态')
+  tree = r.tree; flat = r.flat; allText = r.text
+  const cards = flat.filter((n) => n.props && 'data-dy-card' in n.props)
+  if (cards.length === 7) console.log('  ✅ 展开后正好 7 张 data-dy-card（顶层卡片）')
+  else { console.log(`  ❌ 展开后顶层卡片应为 7 张，实际 ${cards.length}`); fail++ }
+  const groups = flat.filter((n) => n.props && 'data-dy-group' in n.props)
+  if (groups.length === 3) console.log('  ✅ 3 个组标题（常开必看 / 出问题才看 / 一次配好）')
+  else { console.log(`  ❌ 组标题应为 3 个，实际 ${groups.length}`); fail++ }
+  // 组标题自己不是卡（卡片计数才是 7）
+  const groupAsCard = flat.filter((n) => n.props && 'data-dy-group' in n.props && 'data-dy-card' in n.props)
+  if (!groupAsCard.length) console.log('  ✅ 组标题不算卡片（用的是 data-dy-group，不是 data-dy-card）')
+  else { console.log('  ❌ 组标题被标成了卡片 —— 卡片数会不准'); fail++ }
+  // 七张卡的关键文案：一个功能都不许丢
+  for (const [label, re] of [
+    ['卡①开始使用', /开始使用/],
+    ['卡②刷抖音', /现在跑一轮/],
+    ['卡③自动发送（含私信对象 / 评论区@你 / 聊天模式）', /自动发送[\s\S]*私信发给谁|私信发给谁/],
+    ['卡④出问题了？', /出问题了？/],
+    ['卡⑤刷抖音的策略', /刷抖音的策略/],
+    ['卡⑥桌宠', /人格（她是怎样的鱼）/],
+    ['卡⑦消息与记忆', /消息与记忆/],
+  ]) {
+    if (re.test(allText)) console.log(`  ✅ ${label}`)
+    else { console.log(`  ❌ ${label} 不在展开后的面板里`); fail++ }
+  }
+}
+
+console.log('\n【没登录时】—— 新手看到的第一屏')
 const firstRunMust = [
   ['开始使用', /开始使用/],
   ['进度：还差两步', /还差\s*两步/],
@@ -333,6 +453,12 @@ tree = render(React.createElement(Registered, {}))
 for (let i = 0; i < 6; i++) {
   await new Promise((r) => setTimeout(r, 0))
   tree = await renderNow()
+}
+// ⭐ 重新挂载会把折叠状态重置成"收起"（这正是真实用户重新打开设置页的样子）——
+//    后面要验的按钮都在折叠组里，所以先点开（openAllGroups 是幂等的）。
+{
+  const opened = await expandAndFlatten('已登录重新挂载后')
+  tree = opened.tree
 }
 flat = walk(tree)
 allText = flat.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
@@ -498,14 +624,17 @@ const selects = flatAll.filter((n) => n.tag === 'select')
 if (selects.length >= 2) console.log(`  ✅ ${selects.length} 个下拉框`)
 else { console.log(`  ❌ 下拉框只有 ${selects.length} 个`); fail++ }
 
-/* ── 人设：能写、能存 ── */
-console.log('\n【我的人设】')
-const rPersona = await clickAndRender('写人设')
+/* ── 补充人设：能写、能存 ──
+   🔴 2026-10-25：主人说「插件面板人设跟人格重合了」，
+   这里原来叫「我的人设」（和人格卡看着像同一个东西），现在改名「补充人设（可选）」、
+   按钮也从「写人设」变成「展开」。断言跟着改。 */
+console.log('\n【补充人设】')
+const rPersona = await clickAndRender('展开')
 if (rPersona) {
   const ta = rPersona.flat.find((n) => n.tag === 'textarea')
   if (ta) console.log('  ✅ 人设文本框出来了')
   else { console.log('  ❌ 人设文本框没出来'); fail++ }
-  if (/默认人设|还没写自己的/.test(rPersona.text)) console.log('  ✅ 说明了当前用的是哪份')
+  if (/默认人设|还没写自己的|正在用你写的/.test(rPersona.text)) console.log('  ✅ 说明了当前用的是哪份')
   else { console.log('  ❌ 没说当前用哪份'); fail++ }
 }
 

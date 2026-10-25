@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -16,26 +16,50 @@
   <div id="pet">
     <div id="pet-bubble"></div>
     <div id="pet-body" title=""></div>
-    <!-- 台词输入框：在她脚下，像对话条。她被拖动时跟着走（#pet 的子元素） -->
-    <div id="talkbar">
-      <input id="chat-input" type="text" placeholder="跟她说话…（Enter）">
-      <button id="chat-send">➤</button>
-    </div>
   </div>
 
-  <!-- 右键菜单 -->
+  <!-- 台词输入框：独立定位（不塞进 #pet 底部，否则会压住她的脚）
+       🔴 2026-10-25 主人：「下方的菜单栏有点挡脚了」+「文本框输入多了也有问题」
+       两条一起改：
+         · 台词条移到**画布下方预留的输入区**（宿主给窗口留了脚位），不再压脚
+         · input 换成 **textarea**：输入多了会自动长高（最多 4 行），不再挤出框外 -->
+  <div id="talkbar">
+    <textarea id="chat-input" rows="1" placeholder="跟她说句话…（Enter 发送 / Shift+Enter 换行）"></textarea>
+    <button id="chat-send" title="发送">➤</button>
+  </div>
+
+  <!-- 右键菜单（浏览器预览时用；WebView2 宿主里走原生 WPF 菜单，这个是兜底） -->
   <div id="menu">
     <div class="mi" data-act="chat">💬 跟她聊天</div>
     <div class="mi" data-act="feed">🍚 喂饭（大白饭）</div>
     <div class="mi" data-act="repair">🔧 维修工模式</div>
     <div class="sep"></div>
     <div class="mi" data-act="play">🎬 逗她（随机小动作）</div>
-    <div class="mi" data-act="danmaku">📺 弹幕模式</div>
-    <div class="mi" data-act="walk">🚶 走动</div>
-    <div class="mi" data-act="persona">🎭 人格：下一任</div>
+    <div class="mi" data-act="danmaku-full">📺 全屏弹幕（铺满整屏）</div>
+    <div class="mi" data-act="danmaku-local">📺 局域弹幕（她身边）</div>
+    <div class="mi" data-act="danmaku-off">📴 关掉弹幕</div>
+    <div class="sep"></div>
+    <div class="mi" data-act="persona-infp">🎭 人格：INFP 治愈小鱼</div>
+    <div class="mi" data-act="persona-entp">🎭 人格：ENTP 毒舌本鱼</div>
+    <div class="mi" data-act="persona-esfp">🎭 人格：ESFP 元气小鱼</div>
+    <div class="mi" data-act="persona-istj">🎭 人格：ISTJ 维修工小鱼</div>
     <div class="sep"></div>
     <div class="mi" data-act="hide">😪 去休息（面板可叫回）</div>
     <div class="mi" data-act="quit">🚪 退出（关掉她）</div>
+  </div>
+
+  <!-- 🔴 底部按钮条（WebView2 宿主里右键菜单不一定弹得出来，这里给固定入口）
+       🔴 2026-10-25 主人：「下方的菜单栏有点挡脚了」
+       真因：按钮条贴窗口最底（bottom:6px），而她的脚就在画布最底 ⇒ 必然压脚。
+       修法：窗口给画布底部预留 FOOT_GAP（宿主留的脚位），按钮条放**脚下面那条缝**里，
+       并且做成很小的一条（24px 高、默认 30% 透明），不显眼、不压脚。 -->
+  <div id="toolbar">
+    <button class="tb" data-act="chat" title="跟她聊天">💬</button>
+    <button class="tb" data-act="feed" title="喂饭">🍚</button>
+    <button class="tb" data-act="play" title="逗她">🎬</button>
+    <button class="tb" data-act="danmaku" title="弹幕（局域→全屏→关）">📺</button>
+    <button class="tb" data-act="hide" title="去休息">😪</button>
+    <button class="tb tb-danger" data-act="quit" title="退出">🚪</button>
   </div>
 
   <!-- 引擎库（Anime2.5DRig，MIT）+ 本页逻辑 -->

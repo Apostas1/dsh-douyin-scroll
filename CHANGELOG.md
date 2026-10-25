@@ -5,6 +5,123 @@
 
 ---
 
+## 未发布 — 2026-10-25
+
+> ⚠️ 这一批还没发版本号（等主人拍板）。下面全是**实测过的**，证据写在每节末尾。
+
+### 🔴🔴 严重：桌宠对话框说的话**根本进不了会话**，而且会把会话写坏
+
+三段独立的坑，串在一起：
+
+1. **中文全变成问号**
+   宿主 `PetHost.cs` 里手写的 TcpListener 用 `Encoding.ASCII.GetString()` 解**整个请求**。
+   中文一个字都不剩，全成 `?`。所以桌宠说的话进会话是「?????????」，
+   连她自己说的话都不能是中文（日记 / 聊天全受影响）。
+   → 现在：**头按 ASCII、体按 UTF-8 分开解**，并按 `Content-Length` 把请求体读全。
+
+2. **消息没有 id，把会话写坏了（最严重）**
+   旧代码手写 `session.append('user/message', {role, content, source})`，
+   **漏了 `id`**。DSH 的 `createUserMessage()` 会自动生成 id，手拼对象就漏了。
+   于是会在会话里留下 41 条"没有身份"的消息 ⇒ 打开会话直接报
+   `session event at seq 40214 lacks an identified message`，4 万条的会话整个读不开。
+   ⚠️ 校验器**只在读的时候拦**，写坏的当场毫无反应，下次开会话才炸。
+
+3. **插在 tool-call 和 tool-result 中间**
+   直接 append 会把消息塞进「assistant 已发 tool-call / tool/result 还没回来」的空隙，
+   送给模型的 transcript 变成 `assistant(tool-call) → user → tool`，
+   而服务端要求 tool-call 后必须紧跟 tool-result ⇒ **之后每一轮都 400**。
+
+**现在的做法（换通道，不再自己碰日志）**：
+改成 `agent.followup(message)` —— 消息排到下一轮，由 agent 循环在**正确的边界**
+自己落盘、自己排序。结构上不可能再拆开 tool-call/tool-result，也不可能再漏 id。
+逻辑抽到 `lib/pet-relay.mjs`，并且有**离线单测** `tools/pet-relay-test.mjs`
+（会调用 DSH 自己的 `adoptSessionEvent` 验收消息格式 —— 22 项全过）。
+
+### 🩹 已经中招的人怎么修（`0.6.0` 及更早用过桌宠对话的）
+
+```bash
+# 1. 先关掉 DSH（不关的话它会把旧内容盖回去）
+# 2. 先看会改什么，不写盘
+node tools/pet-session-repair.mjs "<DSH_HOME>/sessions/<工作目录>/session-<id>/session.v4.jsonl.zstd"
+# 3. 确认没问题再真写（自动先备份）
+node tools/pet-session-repair.mjs "<那个文件>" --apply
+# 4. 复核（四项全绿才算好）
+node tools/pet-session-verify.mjs "<那个文件>"
+```
+
+修法是**只给缺 id 的消息补一个 UUID**，不动 seq、不动顺序、不动其它事件 ——
+不搞「删掉重编号」（那要 remap surfaceOp / shadowedSeqs / sourceEventSeqs，
+动整个几万条的文件，风险远大于收益）。
+
+### 📓 右键「她的日记」点了没反应
+
+现在实测是好的：日记窗 1000×700 打开 → `diary.html` 加载成功 →
+页面真的请求到 `/pet/diary` → DOM 里渲染出条目（`entries:2 stars:1 emptyShown:false`）。
+四项证据都在 `tools/pet-host/probe-diary.ps1` 里，随时可复验。
+
+为了让这条**可验证**，宿主加了一个排障通道：家目录写 `pet-test.txt`，
+- 内容是 `act:<动作>` ⇒ 走**和真人点右键菜单完全相同**的路径
+- 内容是 `diaryjs:<js>` ⇒ 在**日记窗**里跑这段 JS 并回读结果
+这样"宿主动作"（不开页面、宿主自己开窗）也能被自动验证，不用靠手点。
+
+### 🐟 关闭 DSH 时，她不跟着关
+
+父进程监视实测通过：父进程活着她活着；父进程一退，她 **1 秒内**退出；
+而且她解析到的父 pid 是**正确的那个**（`tools/pet-host/probe-parent-watch.ps1`）。
+
+### 🧹 面板：20+ 张卡 → 3 组 / 7 张卡
+
+按「**常开必看 / 出问题才看 / 一次配好**」重排：
+
+- **常开必看**（永远展开）：① 开始使用（装环境 + 扫码登录 + 二维码）② 刷抖音（状态 + 现在跑一轮 + 看日志）③ 自动发送（含「在评论区 @ 你」+「私信发给谁」+「聊天模式」）
+- **出问题才看**（默认收起）：④ 出问题了？（体检 + dsh 入口 + 关于/检查更新 + MCP）
+- **一次配好**（默认收起）：⑤ 策略（关键词/时段/配额/日报/通知）⑥ 桌宠（开关/人格/弹幕/补充人设）⑦ 消息与记忆
+
+`PetActivityStatus` / `ChatWatchStatus` 原来内部也返回 `data-dy-card`，
+算进去卡片永远 ≥9 —— 现在它们的容器标记换成 `data-dy-inner`（视觉不变，内部逻辑一行没动）。
+
+实测：收起时 3 张卡 / 展开后正好 7 张 / 3 个组标题；`panel-render-check` 全部通过。
+
+### 🔴🔴 顺带挖出来：发布包会泄露主人的浏览记录
+
+`npm pack --dry-run` 实测原来打出来 **312 MB / 1637 个文件**，其中 **604 个是垃圾**：
+
+- `tools/pet-host/pet-udf*/` —— **WebView2 的浏览器 profile**：
+  `Cookies` / `History` / `Login Data` / `Local Storage` 全在里面。
+  这是主人的真实浏览痕迹，发出去等于把"他浏览过什么"一起发给全世界。
+- 微软的 WebView2 DLL（版权不是我们的）
+- `tools/pet-shell/node_modules/electron/dist/electron.exe` 一个文件 **180 MB** ——
+  而且那个 Electron 壳是**已经放弃的方案**（全档位都崩，见 `tools/pet-shell/NOTES.md`）
+
+**为什么会漏**：`package.json` 的 `files` 里有 `"tools"`，而
+**根 `.npmignore` 覆盖不了 `files` 字段**，只有**子目录的 `.npmignore` 可以**。
+所以之前写根 `.npmignore` 完全无效。
+
+还有一个更隐蔽的：`tools/pet-host/.gitignore` 里写的是 `tools/pet-host/*.exe`，
+但**子目录 .gitignore 的模式是相对该子目录的** ⇒ 等价于找
+`tools/pet-host/tools/pet-host/*.exe` ⇒ 一条都匹配不到，
+exe / DLL / 800MB 的 UDF 全都被列为"可提交"，随时可能手滑推进公开仓库。
+→ git 规则挪到**仓库根 `.gitignore`**（根相对路径），并用 `git check-ignore` 实证过。
+
+**结果：312 MB → 2.48 MB，1637 文件 → 97 文件，危险文件 0 个。**
+
+### 🛡️ 防回归
+
+`selfcheck.mjs` 新增两段，专门守这次踩的坑：
+
+- **4j-2**：投递链路必须走 `followup`、`index.js` 不许再出现
+  `append('user/message')`、消息自检必须覆盖 `id/role/source/content` 四个字段
+- **4j-3**：`PetHost.cs` 不许再整包 ASCII 解请求、必须有 `HttpReadRequest`、
+  必须按 `Content-Length` 读全、代理必须转发原始字节；
+  三个探针脚本（编码 / 日记本 / 父进程监视）必须在
+
+⚠️ 两段的断言都只查**代码行、跳过注释** —— 因为这项目习惯在注释里贴旧代码当证据，
+直接正则整文件会把证据误判成"还在用"（第一次写就误报了 2 项）。
+
+`结果：322 通过 / 0 失败`
+
+---
+
 ## 0.4.0 — 2026-10-24
 
 ### 🐟 桌宠：她住进右下角（使用者拍板：窗口宠 + 纸娃娃分层）

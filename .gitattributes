@@ -3,6 +3,12 @@
 #   而且跨平台协作时 diff 会全是换行符噪音）
 * text=auto eol=lf
 
+# 🔴 例外：Windows 批处理必须 CRLF。
+#    cmd.exe 读 LF-only 的 .cmd 时，标签跳转 / 多行块容易错位，
+#    表现是"脚本看着对、跑起来只执行一半"。这类文件不该被统一成 LF。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
 # 二进制文件不要碰
 *.png binary
 *.jpg binary

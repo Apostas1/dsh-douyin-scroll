@@ -1,4 +1,4 @@
-/**
+﻿/**
  * dsh-douyin-scroll —— 浏览器半端（设置在「设置」里的一页，中文名「刷抖音」）
  * ============================================================================
  * 2026-10-22 从零重写的最小可用版：先确保**面板一定能显示**，再谈功能。
@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
      *    对一下面板右上角显示的 `v<版本>·b<N>` 就知道。
      */
-    const PANEL_BUILD = 20
+    const PANEL_BUILD = 21
 
     const asJson = async (res) => {
       if (res.ok) return res.json()
@@ -129,6 +129,36 @@ window.__ModuleLoader__.load({
 [data-dy-bubble][data-mine]{align-self:flex-end;background:rgba(59,130,246,.22);}
 [data-dy-bubble][data-them]{align-self:flex-start;background:rgba(128,128,128,.24);}
 [data-dy-bubble-text]{white-space:pre-wrap;word-break:break-word;}
+/* ── 面板三组（2026-10-25 重排）：20+ 张卡压成 7 张，分「常开必看 / 出问题才看 / 一次配好」──
+ * 实际 DOM 结构（两层，别忘了）：
+ *   div[data-dy-group]                 组容器（一组一行，flex）
+ *     ├─ span[data-dy-groupname]       组名（常开必看 / 出问题才看 / 一次配好）
+ *     └─ button[data-dy-groupbtn]      **只有折叠组有**：能点，带 data-open / aria-expanded
+ *          └─ span[data-dy-groupchev]  「展开看 ▼ / 收起 ▲」或组①的提示文字
+ * 组容器自己**不**带 data-dy-card ⇒ 卡片计数才正好 7。
+ * [data-dy-subblock] 合并进同一张卡里的子块（带上分隔线；卡里第一块不出线）
+ * [data-dy-inner]    原本就嵌在卡里的透明小卡（不参与顶层卡片计数）
+ * [data-dy-subflat]  那两个状态屏（她的所思所想 / 聊天模式状态）的虚线框 */
+[data-dy-group]{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;
+  letter-spacing:.04em;color:var(--dsw-alias-label-secondary,#c9ccd1);}
+div[data-dy-group]{padding:2px 4px 0;}
+/* 折叠组：整行做成一颗大按钮，一眼看得出能点 */
+button[data-dy-groupbtn]{width:100%;box-sizing:border-box;text-align:left;padding:10px 12px;
+  border-radius:10px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;
+  letter-spacing:.04em;display:flex;align-items:center;gap:8px;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.12));
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.08));color:inherit;}
+button[data-dy-groupbtn]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.2));}
+button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-dy-grouphint]{font-size:11px;font-weight:400;letter-spacing:0;
+  color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-dy-groupchev]{margin-left:auto;font-size:11px;font-weight:400;letter-spacing:0;
+  color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-dy-inner]{display:flex;flex-direction:column;gap:10px;}
+[data-dy-subblock]{display:flex;flex-direction:column;gap:10px;margin-top:10px;padding-top:10px;
+  border-top:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08));}
+[data-dy-subblock]:first-child{margin-top:0;padding-top:0;border-top:0;}
+[data-dy-subflat]{display:flex;flex-direction:column;border-radius:10px;box-sizing:border-box;}
 /* （旧版 GUI 浮层小宠的样式已随 v3 迁往 dsh-deskpet 删除） */
 `
 
@@ -138,6 +168,75 @@ window.__ModuleLoader__.load({
         disabled: Boolean(disabled),
         onClick: () => { if (!disabled) onChange(!on) },
       }, h('i'))
+    }
+
+    /**
+     * ⭐ 她的「所思所想」状态屏（主人 2026-10-24 定的设计初衷）
+     *
+     * 主人原话：「设计的初衷是为了看见这个宠物，就是你，在干嘛，光看你思考干活，
+     *            但是不知道在干嘛，所以才让她有个文本框用拟人的口吻在显示你在干嘛」
+     *        →「我的意思是要像人一样」
+     *
+     * 数据源和桌面上的她**是同一份**（pet-window-state.json 的 activity 字段），
+     * 所以面板里读到的话，跟桌面上气泡里说的是同一句 —— 不会两边各说各的。
+     *
+     * 显示原则（像人）：
+     *   · 先给她一个**动作**（正在干什么），再给一句**人话**，最后才是技术参数（小字）
+     *   · 时间感：刚说的 / 几分钟前说的，语气不一样（人不会假装十分钟前的事刚发生）
+     *   · 超过 90 秒没更新 ⇒ 她在发呆，如实说，不假装还忙着
+     */
+    function PetActivityStatus() {
+      const [s, setS] = React.useState(null)
+      const [, forceTick] = React.useState(0)
+      React.useEffect(() => {
+        let alive = true
+        const pull = async () => {
+          try { const r = await jget('/pet/state'); if (alive && r) setS(r) } catch { /* 等下一拍 */ }
+        }
+        pull()
+        const t = setInterval(pull, 5_000)
+        const t2 = setInterval(() => forceTick((x) => x + 1), 1000)   // 让"几秒前"动起来
+        return () => { alive = false; clearInterval(t); clearInterval(t2) }
+      }, [])
+      if (!s) return h('div', { 'data-dy-sub': '' }, '🐟 小鱼正在游过来…')
+      const act = String(s.activity || '').trim()
+      const at = Number(s.activityAt) || 0
+      const age = at ? Math.round((Date.now() - at) / 1000) : null
+      // 她说这句话时在干什么（从状态文件里的 link.state 推）
+      const st = (s.link && s.link.state) || 'idle'
+      const doing = st === 'run' || st === 'watch' ? '在刷抖音'
+        : st === 'error' ? '出了点岔子'
+        : '在发呆'
+      const EMOJI = { run: '🐟💨', watch: '🐟👀', error: '🐟💥', idle: '🐟💤', sleep: '🐟😴' }
+      const emo = EMOJI[st] || '🐟'
+      // 时间感：像人一样，不说"刚刚"如果已经过去很久
+      let agoText = ''
+      if (age !== null) {
+        if (age < 8) agoText = '刚说的'
+        else if (age < 60) agoText = `${age} 秒前说的`
+        else if (age < 3600) agoText = `${Math.round(age / 60)} 分钟前说的`
+        else agoText = '很久没吭声了'
+      }
+      const stale = age !== null && age > 90
+      // 没 activity 时也要说话（她不能是空白）
+      const line = act || (stale || !at
+        ? `${emo} 小鱼${doing}，没在说话…`
+        : `${emo} 小鱼${doing}`)
+      return h('div', {
+        'data-dy-inner': '', 'data-dy-subflat': '',
+        style: {
+          background: 'transparent',
+          border: `1px dashed ${stale ? 'rgba(255,255,255,.12)' : 'rgba(120,180,255,.38)'}`,
+          padding: '8px 10px', gap: '4px',
+          opacity: stale ? '.65' : '1',
+          transition: 'opacity .3s, border-color .3s',
+        },
+      },
+        // 第一行：她此刻的动作 + 她说的那句人话（最像人的部分）
+        h('div', { 'data-dy-sub': '', style: { opacity: '.98', lineHeight: '1.5' } }, line),
+        // 第二行：时间感 + 技术参数（小字，排障用，不抢戏）
+        h('div', { 'data-dy-sub': '', style: { opacity: '.62', fontSize: '11px' } },
+          `${agoText || '还没开口'} · ${doing}${stale ? '（可能卡住了）' : ''}`))
     }
 
     /**
@@ -176,7 +275,7 @@ window.__ModuleLoader__.load({
         skip_no_login: `🫥 小鱼进不去抖音——还没登录（先扫码）`,
       }
       const line = FISH[s.lastResult] || `🐟 小鱼状态：${s.lastResult || '刚下水，还没跑第一拍'}`
-      return h('div', { 'data-dy-card': '', style: { background: 'transparent', border: '1px dashed var(--dsw-alias-border-l2,rgba(255,255,255,.14))', padding: '8px 10px', gap: '4px' } },
+      return h('div', { 'data-dy-inner': '', 'data-dy-subflat': '', style: { background: 'transparent', border: '1px dashed var(--dsw-alias-border-l2,rgba(255,255,255,.14))', padding: '8px 10px', gap: '4px' } },
         h('div', { 'data-dy-sub': '', style: { opacity: '.95' } }, line),
         h('div', { 'data-dy-sub': '', style: { opacity: '.7' } },
           `每 ${sec} 秒看一眼「${s.to || '私信对象'}」· 走 ${s.via || 'http'} · 已看 ${s.checks || 0} 次 · 提醒过 ${s.notified || 0} 条`))
@@ -254,6 +353,13 @@ window.__ModuleLoader__.load({
       const [cwSecDraft, setCwSecDraft] = React.useState(null)
       // dsh 入口路径（输入框草稿）—— 2026-10-23 加，见「出问题了？」卡片
       const [dshBinDraft, setDshBinDraft] = React.useState(null)
+      /* ⭐ 面板三组折叠（2026-10-25 重排）—— 两个状态，默认都收起。
+       * 🔴 必须放在这里（和其它 useState 一起、在 `if (!st || !cfg) return` 之前），
+       *    绝不能塞进条件分支：React 的 hook 顺序一变，整页就白。
+       *    · foldErr = 「出问题才看」（体检 / dsh 入口 / 关于 / MCP）
+       *    · foldCfg = 「一次配好」（策略 / 桌宠 / 消息与记忆） */
+      const [foldErr, setFoldErr] = React.useState(false)
+      const [foldCfg, setFoldCfg] = React.useState(false)
 
       const say = (t, tone) => { setMsg(t); setMsgTone(tone || '') }
 
@@ -702,735 +808,826 @@ window.__ModuleLoader__.load({
 
       const kwText = kws !== null ? kws : (Array.isArray(cfg.keywords) ? cfg.keywords.join('\n') : '')
 
+      /* ════════════════════════════════════════════════════════════════════════
+       * 面板结构（2026-10-25 重排：20+ 张卡 → 3 组 / 7 张卡）
+       *   组 ①「常开必看」永远展开 —— 卡①开始使用 / 卡②刷抖音 / 卡③自动发送
+       *   组 ②「出问题才看」默认收起 —— 卡④出问题了？（体检 / dsh 入口 / 报告 / MCP / 关于）
+       *   组 ③「一次配好」默认收起 —— 卡⑤刷抖音的策略 / 卡⑥桌宠 / 卡⑦消息与记忆
+       *   组标题用 data-dy-group（**不是** data-dy-card），所以卡片计数正好 7。
+       *   折叠状态 = Panel 顶部那两个 useState（foldErr / foldCfg）。
+       *   ⚠️ 这里的 h(...) 里**不许加 hook** —— 条件分支里加 hook 会让整页白屏。
+       * ════════════════════════════════════════════════════════════════════════ */
       return h('div', { 'data-dy-page': '' },
 
-        /* ── 开始使用：三步装机 + 扫码登录（⭐ 2026-10-24 主人令：放最上面，
-         *    已登录时这里带「退出登录」按钮；第二个才是「刷抖音」状态卡）──
-         * 🔴 2026-10-22：以前这里只写一句「命令行跑 node tools/qr-login.mjs start」——
-         *    对新手等于"你自己去折腾"。现在做成**点按钮 → 出二维码 → 手机扫 → 点我扫完了**。
-         *    进度条按状态自己算：没环境 → 没登录 → 能用了。 */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '开始使用'),
-              h('div', { 'data-dy-sub': '' },
-                st.venvReady && st.loggedIn
-                  ? '✅ 都装好了，可以直接用'
-                  : `还差 ${!st.venvReady ? '两步' : '一步'} —— 跟着数字点就行`)),
-            h('span', {
-              'data-dy-badge': '',
-              'data-on': (st.venvReady && st.loggedIn) ? '' : undefined,
-            }, (st.venvReady && st.loggedIn) ? '就绪' : '未就绪')),
+        /* ══════ 组 ①「常开必看」—— **永远展开**（新手上手先看这三张，不折叠）══════ */
+        h('div', { 'data-dy-group': '' },
+          h('span', { 'data-dy-groupname': '' }, '常开必看'),
+          h('span', { 'data-dy-grouphint': '' }, '装好之后天天要用的三张')),
 
-          /* 第 ① 步 */
-          h('div', { 'data-dy-row': '' },
-            h('span', { 'data-dy-step': '', 'data-done': st.venvReady ? '' : undefined }, st.venvReady ? '✓' : '1'),
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-sub': '' }, st.venvReady ? '运行环境好了' : '装运行环境（约 30 秒，一次就够）')),
-            st.venvReady
-              ? null
-              : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'install', onClick: onInstall },
-                busy === 'install' ? '装着…' : '装环境')),
-
-          /* 第 ② 步 —— 扫码登录（新手最容易卡的地方，做成主按钮） */
-          h('div', { 'data-dy-row': '' },
-            h('span', { 'data-dy-step': '', 'data-done': st.loggedIn ? '' : undefined }, st.loggedIn ? '✓' : '2'),
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-sub': '' }, st.loggedIn ? '已登录，可以刷了' : '扫码登录抖音（用手机抖音扫一下）')),
-            st.loggedIn
-              ? h('button', { 'data-dy-btn': '', disabled: busy === 'login', onClick: onLogout }, '退出登录')
-              : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'login', onClick: onQr },
-                busy === 'login' ? '准备中…' : '扫码登录')),
-
-          /* 二维码区：只在没登录时出现 */
-          !st.loggedIn
-            ? h('div', { 'data-dy-loginbox': '' },
-              qr && qr.url
-                ? h('div', { 'data-dy-row': '', style: { flexDirection: 'column', alignItems: 'center', gap: '10px', padding: '6px 0' } },
-                  h('img', {
-                    'data-dy-qr': '', src: qr.url, alt: '抖音登录二维码',
-                    style: { width: '190px', height: '190px', borderRadius: '10px', background: '#fff', padding: '6px' },
-                  }),
-                  h('div', { 'data-dy-sub': '', style: { textAlign: 'center' } },
-                    '手机抖音 → 右上角「≡」→ 扫一扫'),
-                  h('div', { 'data-dy-row': '' },
-                    h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'wait', onClick: onWaitLogin },
-                      busy === 'wait' ? '等你扫…' : '我扫完了'),
-                    h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: () => onQr(true) }, '重新出码'),
-                    h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: onCloseLogin }, '关掉窗口')),
-                  h('div', { 'data-dy-sub': '', style: { textAlign: 'center', maxWidth: '420px' } },
-                    '扫完如果抖音还弹「短信验证码」或「拖动滑块」—— 在那个弹出的浏览器窗口里做完，再点「我扫完了」。不用重新扫。'))
-                : h('div', { 'data-dy-sub': '' },
-                  qrHint || '点上面的「扫码登录」，会弹出一个浏览器窗口显示二维码，手机扫一下就行。'))
-            : null),
-
-        /* ── 状态 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '刷抖音'),
-              h('div', { 'data-dy-sub': '' },
-                '峰谷时段自动刷一轮，把值得看的挑出来写成日报。不催你、不刷屏。')),
-            h('button', { 'data-dy-mini': '', disabled: busy === 'guide', onClick: toggleGuide },
-              guide === null ? '怎么用？' : '收起说明'),
-            /* ⭐ 面板构建号 —— 改完面板对一下这个数，就知道浏览器有没有拿到新代码 */
-            h('span', {
-              'data-dy-badge': '', title: '面板构建版本（改完面板对一下这个数）',
-              style: { fontVariantNumeric: 'tabular-nums' },
-            }, 'v' + (st.version || '?') + '·b' + PANEL_BUILD)),
-          h('div', { 'data-dy-row': '' },
-            h('span', {
-              'data-dy-badge': '',
-              'data-on': st.loggedIn ? '' : undefined,
-              'data-off': st.loggedIn ? undefined : '',
-            }, st.loggedIn ? '已登录' : '未登录'),
-            /* ⭐ 登录的是哪个号 —— 只显示昵称就够（ID 太长，对用户没用） */
-            st.loggedIn && acc && acc.nick
-              ? h('span', { 'data-dy-account': '' }, '👤 ' + acc.nick)
-              : (st.loggedIn
-                ? h('span', { 'data-dy-sub': '' }, acc && acc.failed ? '（昵称没查到，不影响用）' : '正在查登录的号…')
-                : null),
-            h('span', {
-              'data-dy-badge': '',
-              'data-on': st.venvReady ? '' : undefined,
-              'data-off': st.venvReady ? undefined : '',
-            }, st.venvReady ? '环境就绪' : '环境未装'),
-            h('span', { 'data-dy-badge': '' },
-              '今天 ' + (st.pickedToday != null ? st.pickedToday : 0) + ' / ' + (cfg.perDay != null ? cfg.perDay : 0)),
-            h('div', { 'data-dy-grow': '' }),
-            h('button', {
-              'data-dy-btn': '', 'data-primary': '',
-              disabled: busy === 'run', onClick: onRun,
-            }, busy === 'run' ? '跑着呢…' : '现在跑一轮')),
-          msg ? h('div', {
-            'data-dy-msg': '',
-            'data-good': msgTone === 'good' ? '' : undefined,
-            'data-warn': msgTone === 'warn' ? '' : undefined,
-          }, msg) : null,
-          /* ⭐ 「看日志」—— 点一轮没反应时，让用户能自己看清发生了什么 */
-          h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-mini': '', disabled: busy === 'log', onClick: loadRunLog },
-              runLog === null ? '看日志（跑一轮没反应就点这）' : '收起日志')),
-          runLog !== null
-            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '6px' } },
-              h('div', { 'data-dy-kv': '' },
-                `上次跑：${runLog.lastRunAt ? new Date(runLog.lastRunAt).toLocaleString('zh-CN') : '从没跑过'}`
-                + `　今天已挑 ${runLog.pickedToday || 0} / ${runLog.perDay || 0}`),
-              runLog.canRun === false
-                ? h('div', { 'data-dy-msg': '', 'data-warn': '' },
-                  runLog.roundActive ? '⚠️ 上一轮还在跑 —— 等它结束再点'
-                    : (runLog.pickedToday >= runLog.perDay ? '⚠️ 今天的配额用完了（改「每天挑几条」或等明天）' : '现在不能跑'))
-                : null,
-              h('pre', { 'data-dy-pre': '', style: { maxHeight: '300px' } }, runLog.tail || '(日志是空的)'))
-            : null,
-          guide !== null
-            ? h('pre', { 'data-dy-pre': '', style: { maxHeight: '380px' } }, guide)
-            : null),
-
-        /* ── 自动发送开关（放在**最上面**，别埋在长面板底部） ── */
-        h('div', { 'data-dy-card': '', 'data-dy-highlight': cfg.autoSend ? '' : undefined },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '自动发送'),
-              h('div', { 'data-dy-sub': '' },
-                (cfg.autoSend
-                  ? '✅ 开着（默认）：插件自己跑一轮时，会把值得的视频发给你'
-                    + (cfg.autoComment ? '，也会发评论' : '') + '。'
-                  : '关着：插件自己跑一轮只写报告 + 弹通知，不往抖音发任何东西。'))),
-            h(Switch, {
-              on: Boolean(cfg.autoSend),
-              onChange: (v) => patch({ autoSend: v }, v
-                ? '✅ 已打开自动发送'
-                : '已关闭自动发送 —— 后台跑一轮只写报告'),
-            })),
-          h('div', { 'data-dy-row': '' },
-            h('span', { 'data-dy-badge': '', 'data-on': cfg.autoSend ? '' : undefined, 'data-off': cfg.autoSend ? undefined : '' },
-              cfg.autoSend ? '会自动发' : '只写报告'),
-            h('span', { 'data-dy-sub': '' },
-              '发给：' + (cfg.dmTo ? cfg.dmTo : '（还没选私信对象，去下面「私信发给谁」选一个）'))),
-          h('div', { 'data-dy-sub': '' },
-            '⚠️ 只管「插件自己在后台跑的轮次」。你当场在对话里让它发，不受这个开关影响。'),
-
-          /* ⭐⭐ 「在评论区 @ 你」—— 用户 2026-10-22 要求，加在自动发送下面 */
-          h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '在评论区 @ 你'),
-              h('div', { 'data-dy-sub': '' },
-                (cfg.commentAtMe
-                  ? '✅ 开着：挑到最值得的那条时，会在它的评论区发一条 @ 你的评论 —— 你刷抖音就能看到通知。'
-                  : '关着：不往评论区发任何东西。'))),
-            h(Switch, {
-              on: Boolean(cfg.commentAtMe),
-              disabled: !cfg.autoSend,
-              onChange: (v) => patch({ commentAtMe: v }, v
-                ? '✅ 已打开「在评论区 @ 你」'
-                : '已关闭「在评论区 @ 你」'),
-            })),
-          !cfg.autoSend
-            ? h('div', { 'data-dy-sub': '' }, '（先打开上面的「自动发送」，这个才有用）')
-            : null,
-          cfg.commentAtMe && cfg.autoSend
-            ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px' } },
-              '会在**最值得的那一条**下发一次，提醒内容以「@你的昵称」开头。'
-              + (cfg.commentSelfName ? `（会 @「${cfg.commentSelfName}」）` : '（会 @ 你登录的这个号）'))
-            : null,
-          /* 🔴 2026-10-23：使用者反馈「@ 不出来」—— 这里必须讲清楚真 @ 的前提 */
-          cfg.commentAtMe && cfg.autoSend
-            ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px', opacity: '.78' } },
-              '💡 真 @ 需要起无头 Chrome 走「点选弹层」流程（约 20-40 秒）：'
-              + '① 电脑上要装了 Chrome；② 要 @ 的昵称必须能在弹层里搜到（一般是关注/互关的人）；'
-              + '③ 只写「@昵称」文字、没走点选的评论，对方收不到通知 —— 这是抖音的限制，不是插件偷懒。')
-            : null,
-          /* 想 @ 别的号才需要填 */
-          cfg.commentAtMe
-            ? h('div', { 'data-dy-row': '' },
-              h('input', {
-                'data-dy-input': '', style: { flex: '1' },
-                placeholder: '想 @ 别的号才填昵称（留空 = @ 你登录的这个号）',
-                value: atMeDraft !== null ? atMeDraft : String(cfg.commentSelfName || ''),
-                onChange: (e) => setAtMeDraft(e.target.value),
-              }),
-              h('button', {
-                'data-dy-mini': '', disabled: Boolean(busy) || atMeDraft === null,
-                onClick: async () => { await patch({ commentSelfName: String(atMeDraft || '').trim() }, '已保存要 @ 的昵称'); setAtMeDraft(null) },
-              }, '保存'))
-            : null,
-
-          /* ⭐⭐ 聊天模式（2026-10-24）：使用者实测的「会话模式」进插件。
-           *   每 N 秒静默读一次私信对象的会话（HTTP 快路径，不起浏览器），
-           *   他来新消息就弹 Windows 通知。回话还是你来（或叫值班轮）。 */
-          h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '聊天模式'),
-              h('div', { 'data-dy-sub': '' },
-                (cfg.chatWatch
-                  ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息（不弹桌面通知，状态屏和值班回话就是反馈）。不起浏览器，很轻。`
-                  : '关着（默认是开的）。想恢复再打开。'))),
-            h(Switch, {
-              on: Boolean(cfg.chatWatch),
-              disabled: !cfg.dmToId || busy === 'patch',
-              onChange: (v) => patch({ chatWatch: v }, v
-                ? '✅ 已打开聊天模式（静默盯消息）'
-                : '已关闭聊天模式'),
-            })),
-          busy === 'patch'
-            ? h('div', { 'data-dy-sub': '' }, '保存中…')
-            : null,
-          !cfg.dmToId
-            ? h('div', { 'data-dy-sub': '' }, '（先在下面「私信发给谁」选好对象，这个才有用）')
-            : null,
-          cfg.chatWatch
-            ? h('div', { 'data-dy-row': '' },
-              h('span', { 'data-dy-sub': '' }, '看消息的间隔（秒，10–300）'),
-              h('input', {
-                'data-dy-input': '', style: { width: '90px' }, type: 'number', min: 10, max: 300,
-                value: cwSecDraft !== null ? cwSecDraft : String(cfg.chatWatchSec || 30),
-                onChange: (e) => setCwSecDraft(e.target.value),
-              }),
-              h('button', {
-                'data-dy-mini': '', disabled: Boolean(busy) || cwSecDraft === null,
-                onClick: async () => {
-                  const n = Math.max(10, Math.min(Number(cwSecDraft) || 30, 300))
-                  await patch({ chatWatchSec: n }, `聊天模式间隔已存：${n} 秒`)
-                  setCwSecDraft(null)
-                },
-              }, '保存'))
-            : null,
-          /* ⭐ 实时状态屏（2026-10-24 使用者要求：「我哪知道它有什么用、错在哪了」）：
-           *    开着聊天模式时每 15 秒拉一次后端状态，显示几秒前看过、结果、通知弹没弹。 */
-          cfg.chatWatch ? h(ChatWatchStatus, { key: 'cw-status' }) : null),
-
-        /* ── 桌宠（2026-10-24 v5 从 dsh-deskpet 迁回：主人拍板放回面板）── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '桌宠'),
-              h('div', { 'data-dy-sub': '' },
-                (cfg.petOn
-                  ? '✅ 她浮在桌面上（所有窗口之上）。右键她有菜单：聊天 / 喂饭 / 维修工 / 弹幕 / 走动 / 人格 / 休息 / 退出。'
-                  : '关着。打开她就飘回来（休息中也会被叫回）。')),
-            h(Switch, {
-              on: cfg.petOn !== false,
-              disabled: busy === 'patch',
-              onChange: (v) => patch({ petOn: v }, v ? '✅ 她回来了' : '她去休息了（面板随时叫回）'),
-            }))),
-          h('div', { 'data-dy-title': '' }, '人格（MBTI）'),
-          h('div', { 'data-dy-personas': '' },
-            [
-              ['infp', 'INFP · 治愈小鱼', '温柔安静，共情力满'],
-              ['entp', 'ENTP · 毒舌本鱼', '嘴毒手勤倒反天罡（红瞳紫雾）'],
-              ['esfp', 'ESFP · 元气小鱼', '自来熟表演家，走路最多'],
-              ['istj', 'ISTJ · 维修工小鱼', '一丝不苟，引导体检'],
-            ].map(([id, name, desc]) =>
-              h('button', {
-                key: id, 'data-dy-pcard': '', 'data-on': cfg.petPersona === id ? '' : undefined,
-                disabled: busy === 'patch',
-                onClick: () => patch({ petPersona: id }, '人格已切：' + name),
-              },
-                h('div', { 'data-dy-pcard-name': '' }, name),
-                h('div', { 'data-dy-pcard-desc': '' }, desc)))),
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-sub': '' }, '弹幕模式：满屏吐槽（穿透窗不挡点击）')),
-            h(Switch, { on: cfg.petDanmaku === true, onChange: (v) => patch({ petDanmaku: v }, v ? '弹幕开火' : '弹幕关了') })),
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-sub': '' }, '走动：在桌面上溜达（眼随鼠标一直开着）')),
-            h(Switch, { on: cfg.petWalk !== false, onChange: (v) => patch({ petWalk: v }, v ? '她开始溜达' : '她定住了') }))),
-
-        /* ── 环境体检 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '出问题了？'),
-              h('div', { 'data-dy-sub': '' }, '点一下，9 项环境逐个查，哪项红了直接告诉你怎么办')),
-            h('button', { 'data-dy-btn': '', disabled: busy === 'doctor', onClick: onDoctor },
-              busy === 'doctor' ? '查着…' : '检查环境')),
-          doctor
-            ? h('div', { 'data-dy-kv': '' },
-              (doctor.items || []).map((it, i) => h('div', { key: 'd' + i },
-                (it.state === 'ok' ? '✅ ' : it.state === 'warn' ? '⚠️ ' : '❌ ')
-                + it.item + '：' + it.detail)))
-            : null,
-          h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-mini': '', disabled: busy === 'report', onClick: onShowReport }, '看今天的报告')),
-
-          /**
-           * ⭐⭐ 2026-10-23 加：**dsh 入口路径**（起因：使用者反馈「总是显示找不到 dsh」）
-           * 🔴 桌面版不是 npm 全局装的，插件以前只能猜路径；猜不到就报"找不到 dsh"，
-           *    而面板上**根本没有地方填** —— 使用者彻底卡死。
-           *    现在：自动探测（多半能中）+ 这里可手填兜底 + 「自动找」清空回到探测。
-           */
-          h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, 'dsh 入口（后台跑一轮要用）'),
-              h('div', { 'data-dy-sub': '' },
-                cfg.dshBin
-                  ? '已手填路径。点「自动找」清空，回到自动探测。'
-                  : '留空 = 自动找（桌面版会去 app.asar 里找，一般能中）。只有报「找不到 dsh」时才需要填。'))),
-          h('div', { 'data-dy-row': '' },
-            h('input', {
-              'data-dy-input': '', style: { flex: '1' },
-              placeholder: '…\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js',
-              value: dshBinDraft !== null ? dshBinDraft : String(cfg.dshBin || ''),
-              onChange: (e) => setDshBinDraft(e.target.value),
-            }),
-            h('button', {
-              'data-dy-mini': '', disabled: Boolean(busy) || dshBinDraft === null,
-              onClick: async () => { await patch({ dshBin: String(dshBinDraft || '').trim() }, '已保存 dsh 入口路径'); setDshBinDraft(null) },
-            }, '保存'),
-            h('button', {
-              'data-dy-mini': '', disabled: Boolean(busy),
-              onClick: async () => { await patch({ dshBin: '' }, '已清空 ⇒ 回到自动探测'); setDshBinDraft(null) },
-            }, '自动找')),
-          h('div', { 'data-dy-sub': '', style: { opacity: '.78' } },
-            '填这两个之一：<安装目录>\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\'
-            + 'dsh-desktop-host\\lib\\cli.js 或 …\\@deepseek-ai\\dsh\\lib\\bin.js')),
-
-        /* ── 私信发给谁（点选，不用手填 sec_uid） ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '私信发给谁'),
-              h('div', { 'data-dy-sub': '' },
-                cfg.dmTo
-                  ? `现在是「${cfg.dmTo}」${cfg.dmToId ? '' : '（⚠️ 没记下稳定 id，重名时可能选错）'}`
-                  : '想让插件把好玩的发给你，先在这里选一个人。不选也行 —— 那就只写日报，不发私信。')),
-            h('button', {
-              'data-dy-btn': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
-            }, busy === 'people' ? '读取中…' : (people === null ? '从我的会话里选' : '重新读取'))),
-
-          !st.loggedIn
-            ? h('div', { 'data-dy-sub': '' }, '（要先在上面扫码登录，才能读到你的人）')
-            : null,
-
-          people && people.length
-            ? h('div', { 'data-dy-people': '' },
-              people.map((p, i) => h('button', {
-                key: 'p' + i,
-                'data-dy-person': '',
-                'data-picked': (cfg.dmToId && p.sec_uid && cfg.dmToId === p.sec_uid)
-                  || (!cfg.dmToId && cfg.dmTo === p.nick) ? '' : undefined,
-                disabled: Boolean(busy),
-                onClick: () => pickPerson(p),
-              },
-                h('span', { 'data-dy-person-name': '' }, p.nick),
-                p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
-                p.preview ? h('span', { 'data-dy-person-sub': '' }, p.preview) : null,
-                ((cfg.dmToId && p.sec_uid && cfg.dmToId === p.sec_uid) || (!cfg.dmToId && cfg.dmTo === p.nick))
-                  ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已选')
-                  : null)))
-            : null,
-
-          people && !people.length
-            ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, peopleHint || '会话列表是空的')
-            : null,
-          peopleHint && people && people.length
-            ? h('div', { 'data-dy-sub': '' }, peopleHint)
-            : null,
-
-          /* ⭐ 也可以自己写 —— 不想从会话里选，或者那个人不在最近会话里 */
-          h('div', { 'data-dy-row': '' },
-            h('button', {
-              'data-dy-mini': '',
-              onClick: () => setManualDm(manualDm === null ? { nick: cfg.dmTo || '', id: cfg.dmToId || '' } : null),
-            }, manualDm === null ? '自己写' : '收起')),
-          manualDm !== null
-            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
-              h('div', { 'data-dy-sub': '' }, '昵称（显示用）'),
-              h('input', {
-                'data-dy-input': '', value: manualDm.nick, placeholder: '比如：示例好友',
-                onChange: (e) => setManualDm({ ...manualDm, nick: e.target.value }),
-              }),
-              h('div', { 'data-dy-sub': '' }, '稳定 ID（可选 —— 重名时才有用；从「从我的会话里选」拿最方便）'),
-              h('input', {
-                'data-dy-input': '', value: manualDm.id, placeholder: 'MS4wLjABAAAA…（可以留空）',
-                onChange: (e) => setManualDm({ ...manualDm, id: e.target.value }),
-              }),
-              h('div', { 'data-dy-row': '' },
-                h('button', {
-                  'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy),
-                  onClick: async () => {
-                    await patch({ dmTo: manualDm.nick.trim(), dmToId: manualDm.id.trim() },
-                      manualDm.nick.trim() ? `已保存「${manualDm.nick.trim()}」` : '已清空私信对象')
-                    setManualDm(null)
-                  },
-                }, '保存'),
-                h('div', { 'data-dy-sub': '' }, '留空 = 不发私信，只写日报')))
-            : null),
-
-        /* ── 刷什么 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-title': '' }, '刷什么'),
-          h('div', { 'data-dy-sub': '' }, '关注关键词，一行一个（留空 = 用内置默认那几组）'),
-          h('textarea', {
-            'data-dy-input': '', rows: 5, value: kwText,
-            placeholder: '搞笑\n美食\n猫',
-            onChange: (e) => setKws(e.target.value),
-          }),
-          h('div', { 'data-dy-row': '' },
-            h('button', {
-              'data-dy-btn': '', 'data-primary': '',
-              disabled: Boolean(busy), onClick: saveKws,
-            }, '保存'))),
-
-        /* ── 什么时候跑 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '什么时候自己跑'),
-              h('div', { 'data-dy-sub': '' }, '只在谷时跑（便宜）。全关 = 只在你点「现在跑一轮」时跑。'))),
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-sub': '' }, '中午谷时 12:00–14:00')),
-            h(Switch, {
-              on: Boolean(cfg.noon),
-              onChange: (v) => patch({ noon: v }, v ? '中午自动跑：开' : '中午自动跑：关'),
-            })),
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-sub': '' }, '晚上谷时 18:00–次日 09:00')),
-            h(Switch, {
-              on: Boolean(cfg.night),
-              onChange: (v) => patch({ night: v }, v ? '晚上自动跑：开' : '晚上自动跑：关'),
-            })),
-
-          /* ⭐ 自定义时段：和上面两个开关**叠加**（任意一个命中就跑），每个时段每天只跑一次 */
-          h('div', { 'data-dy-sub': '', style: { marginTop: '4px' } }, '自定义时段（可选，跟上面两个叠加）'),
-          winList.length
-            ? winList.map((w, i) => h('div', { 'data-dy-wrow': '', key: 'w' + i },
-              h('input', {
-                'data-dy-time': '', type: 'time', value: String(w.start || ''),
-                onChange: (e) => setWinAt(i, 'start', e.target.value),
-              }),
-              h('span', { 'data-dy-sep': '' }, '→'),
-              h('input', {
-                'data-dy-time': '', type: 'time', value: String(w.end || ''),
-                onChange: (e) => setWinAt(i, 'end', e.target.value),
-              }),
-              h('input', {
-                'data-dy-input': '', style: { flex: '1', minWidth: '60px' },
-                placeholder: '备注（可空）', value: String(w.label || ''),
-                onChange: (e) => setWinAt(i, 'label', e.target.value),
-              }),
-              h('button', { 'data-dy-mini': '', 'data-danger': '', onClick: () => delWin(i) }, '删')))
-            : null,
-          h('div', { 'data-dy-row': '' },
-            h('button', { 'data-dy-mini': '', onClick: addWin }, '+ 加一个时段'),
-            winList.length
-              ? h('button', {
-                'data-dy-mini': '', 'data-primary': '',
-                disabled: Boolean(busy), onClick: saveWins,
-              }, '保存时段')
-              : null,
-            h('div', { 'data-dy-grow': '' }),
-            winList.length
-              ? h('span', { 'data-dy-sub': '' }, '跨零点也行（23:00 → 02:00）')
-              : null),
-
-          h('div', { 'data-dy-sub': '' }, '两个都关 = 只在点「现在跑一轮」时跑。')),
-
-        /* ── 每天挑几条 / 日报多细 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-title': '' }, '每天挑几条'),
-          h('div', { 'data-dy-sub': '' },
-            '全天总量（不是每轮）。0 = 不自动刷，只在你点「现在跑一轮」时跑。'),
-          h('div', { 'data-dy-row': '' },
-            h('input', {
-              'data-dy-time': '', type: 'number', min: 0, max: 300,
-              style: { width: '72px' },
-              value: String(perDayDraft !== null ? perDayDraft : (cfg.perDay != null ? cfg.perDay : 5)),
-              onChange: (e) => setPerDayDraft(e.target.value),
-            }),
-            h('span', { 'data-dy-sub': '' }, '条 / 天'),
-            h('div', { 'data-dy-grow': '' }),
-            h('button', {
-              'data-dy-mini': '', 'data-primary': '',
-              disabled: Boolean(busy) || perDayDraft === null,
-              onClick: async () => {
-                const n = Math.max(0, Math.min(Number(perDayDraft) || 0, 300))
-                await patch({ perDay: n }, `每天最多 ${n} 条`)
-                setPerDayDraft(null)
-              },
-            }, '保存')),
-          h('div', { 'data-dy-row': '' },
-            h('span', { 'data-dy-sub': '' }, '日报写多细：'),
-            h('select', {
-              'data-dy-input': '', style: { flex: '1', maxWidth: '180px' },
-              value: String(cfg.reportLevel || 'full'),
-              onChange: (e) => patch({ reportLevel: e.target.value }, '日报详细程度已保存'),
-            },
-              h('option', { value: 'full' }, '完整版（为什么值得 + 一句话）'),
-              h('option', { value: 'brief' }, '薄版（每条一两行）'),
-              h('option', { value: 'off' }, '不写日报')),
-
-            h('span', { 'data-dy-sub': '', style: { marginLeft: '12px' } }, '通知：'),
-            h('select', {
-              'data-dy-input': '', style: { flex: '1', maxWidth: '150px' },
-              value: String(cfg.notifyMode || 'toast'),
-              onChange: (e) => patch({ notifyMode: e.target.value }, '通知方式已保存'),
-            },
-              h('option', { value: 'toast' }, '弹 Windows 通知'),
-              h('option', { value: 'file' }, '只写文件（不打扰）'),
-              h('option', { value: 'webhook' }, '推 webhook'),
-              h('option', { value: 'both' }, '通知 + webhook')))),
-
-        /* ── 消息：评论区 @ 我 + 谁私信我 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '消息'),
-              h('div', { 'data-dy-sub': '' },
-                '谁在评论区 @ 了你、谁最近给你发了私信。点一条就能回。')),
-            h('button', { 'data-dy-btn': '', disabled: busy === 'inbox' || !st.loggedIn, onClick: loadInbox },
-              busy === 'inbox' ? '读取中…' : (inbox === null ? '看看谁找我' : '收起'))),
-          !st.loggedIn ? h('div', { 'data-dy-sub': '' }, '（要先扫码登录）') : null,
-
-          inbox !== null && inbox.ok
-            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '10px' } },
-              /* 评论区 @ */
-              h('div', { 'data-dy-sub': '' }, `评论区 @ 我：${inbox.at_n || 0} 条`),
-              (inbox.at || []).length
-                ? h('div', { 'data-dy-people': '' },
-                  inbox.at.map((a, i) => h('div', { key: 'at' + i, 'data-dy-msgrow': '' },
-                    h('div', { 'data-dy-row': '' },
-                      h('span', { 'data-dy-person-name': '' }, a.nickname || '（不知道是谁）'),
-                      h('span', { 'data-dy-tag': '', ...(a.before === '回过' ? { 'data-ok': '' } : {}) }, a.before),
-                      h('div', { 'data-dy-grow': '' }),
-                      a.video_url
-                        ? h('a', { href: a.video_url, target: '_blank', rel: 'noreferrer', 'data-dy-mini': '', style: { textDecoration: 'none' } }, '看视频')
-                        : null),
-                    h('div', { 'data-dy-person-sub': '', style: { whiteSpace: 'normal', marginTop: '2px' } }, a.content || ''),
-                    a.my_comments_here && a.my_comments_here.length
-                      ? h('div', { 'data-dy-sub': '', style: { marginTop: '2px' } },
-                        '我在这条视频下说过：' + a.my_comments_here[a.my_comments_here.length - 1].text.slice(0, 40))
-                      : null)))
-                : h('div', { 'data-dy-sub': '' }, (inbox.at_n ? '都回过了' : '最近没有人在评论区 @ 你')),
-
-              /* 私信 */
-              h('div', { 'data-dy-sub': '', style: { marginTop: '6px' } }, `最近私信：${inbox.dm_n || 0} 个可能要回`),
-              (inbox.dm || []).length
-                ? h('div', { 'data-dy-people': '' },
-                  inbox.dm.map((p, i) => h('button', {
-                    key: 'dm' + i, 'data-dy-person': '', 'data-dy-inbox-dm': '', disabled: Boolean(busy),
-                    onClick: () => openChat(p),
-                  },
-                    h('span', { 'data-dy-person-name': '' }, p.nick),
-                    p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
-                    p.needs_reply ? h('span', { 'data-dy-tag': '' }, '该回了') : null,
-                    h('span', { 'data-dy-person-sub': '' },
-                      (p.their_last ? '他：' + String(p.their_last.text).slice(0, 26) : (p.preview || ''))),
-                    h('span', { 'data-dy-tag': '' }, `记 ${p.remembered || 0}`))))
-                : h('div', { 'data-dy-sub': '' }, '最近没有私信'),
-              (inbox.errors && inbox.errors.length)
-                ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, '有些读不到：' + inbox.errors.join('；'))
-                : null)
-            : null,
-          inbox !== null && !inbox.ok
-            ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, (inbox.errors || []).join('；') || '读不到消息')
-            : null),
-
-        /* ── 聊天（带记忆） ── */
-        chat !== null
-          ? h('div', { 'data-dy-card': '' },
+        /* ── 卡 ① 开始使用 ── */
+  /* ── 开始使用：三步装机 + 扫码登录（⭐ 2026-10-24 主人令：放最上面，
+           *    已登录时这里带「退出登录」按钮；第二个才是「刷抖音」状态卡）──
+           * 🔴 2026-10-22：以前这里只写一句「命令行跑 node tools/qr-login.mjs start」——
+           *    对新手等于"你自己去折腾"。现在做成**点按钮 → 出二维码 → 手机扫 → 点我扫完了**。
+           *    进度条按状态自己算：没环境 → 没登录 → 能用了。 */
+          h('div', { 'data-dy-card': '' },
             h('div', { 'data-dy-row': '' },
               h('div', { 'data-dy-grow': '' },
-                h('div', { 'data-dy-title': '' }, '跟 ' + chat.who.nick + ' 聊'),
+                h('div', { 'data-dy-title': '' }, '开始使用'),
                 h('div', { 'data-dy-sub': '' },
-                  chat.data.context && chat.data.context.facts && chat.data.context.facts.length
-                    ? '记得关于他的：' + chat.data.context.facts.join('、')
-                    : (chat.data.context && chat.data.context.note) ? chat.data.context.note : '记忆里还没有这个人')),
-              h('button', { 'data-dy-mini': '', onClick: () => { setChat(null); setChatText('') } }, '关掉')),
+                  st.venvReady && st.loggedIn
+                    ? '✅ 都装好了，可以直接用'
+                    : `还差 ${!st.venvReady ? '两步' : '一步'} —— 跟着数字点就行`)),
+              h('span', {
+                'data-dy-badge': '',
+                'data-on': (st.venvReady && st.loggedIn) ? '' : undefined,
+              }, (st.venvReady && st.loggedIn) ? '就绪' : '未就绪')),
 
-            /* 消息气泡 */
-            h('div', { 'data-dy-chat': '' },
-              (chat.data.messages || []).map((m, i) => h('div', {
-                key: 'm' + i,
-                'data-dy-bubble': '',
-                'data-mine': m.from === 'me' ? '' : undefined,
-                'data-them': m.from === 'them' ? '' : undefined,
-              },
-                h('div', { 'data-dy-bubble-text': '' }, String(m.text || '').slice(0, 300)),
-                m.awe === 800 ? h('div', { 'data-dy-tag': '' }, '分享卡片') : null))),
-
-            /* 输入 */
+            /* 第 ① 步 */
             h('div', { 'data-dy-row': '' },
-              h('input', {
-                'data-dy-input': '', style: { flex: '1' },
-                placeholder: '说点什么…（发出去会进记忆）',
-                value: chatText,
-                onChange: (e) => setChatText(e.target.value),
-                onKeyDown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() } },
-              }),
+              h('span', { 'data-dy-step': '', 'data-done': st.venvReady ? '' : undefined }, st.venvReady ? '✓' : '1'),
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-sub': '' }, st.venvReady ? '运行环境好了' : '装运行环境（约 30 秒，一次就够）')),
+              st.venvReady
+                ? null
+                : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'install', onClick: onInstall },
+                  busy === 'install' ? '装着…' : '装环境')),
+
+            /* 第 ② 步 —— 扫码登录（新手最容易卡的地方，做成主按钮） */
+            h('div', { 'data-dy-row': '' },
+              h('span', { 'data-dy-step': '', 'data-done': st.loggedIn ? '' : undefined }, st.loggedIn ? '✓' : '2'),
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-sub': '' }, st.loggedIn ? '已登录，可以刷了' : '扫码登录抖音（用手机抖音扫一下）')),
+              st.loggedIn
+                ? h('button', { 'data-dy-btn': '', disabled: busy === 'login', onClick: onLogout }, '退出登录')
+                : h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'login', onClick: onQr },
+                  busy === 'login' ? '准备中…' : '扫码登录')),
+
+            /* 二维码区：只在没登录时出现 */
+            !st.loggedIn
+              ? h('div', { 'data-dy-loginbox': '' },
+                qr && qr.url
+                  ? h('div', { 'data-dy-row': '', style: { flexDirection: 'column', alignItems: 'center', gap: '10px', padding: '6px 0' } },
+                    h('img', {
+                      'data-dy-qr': '', src: qr.url, alt: '抖音登录二维码',
+                      style: { width: '190px', height: '190px', borderRadius: '10px', background: '#fff', padding: '6px' },
+                    }),
+                    h('div', { 'data-dy-sub': '', style: { textAlign: 'center' } },
+                      '手机抖音 → 右上角「≡」→ 扫一扫'),
+                    h('div', { 'data-dy-row': '' },
+                      h('button', { 'data-dy-btn': '', 'data-primary': '', disabled: busy === 'wait', onClick: onWaitLogin },
+                        busy === 'wait' ? '等你扫…' : '我扫完了'),
+                      h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: () => onQr(true) }, '重新出码'),
+                      h('button', { 'data-dy-btn': '', disabled: Boolean(busy), onClick: onCloseLogin }, '关掉窗口')),
+                    h('div', { 'data-dy-sub': '', style: { textAlign: 'center', maxWidth: '420px' } },
+                      '扫完如果抖音还弹「短信验证码」或「拖动滑块」—— 在那个弹出的浏览器窗口里做完，再点「我扫完了」。不用重新扫。'))
+                  : h('div', { 'data-dy-sub': '' },
+                    qrHint || '点上面的「扫码登录」，会弹出一个浏览器窗口显示二维码，手机扫一下就行。'))
+              : null),
+
+        /* ── 卡 ② 刷抖音（状态 / 现在跑一轮 / 看日志 / 怎么用 / 已登录账号）── */
+  /* ── 状态 ── */
+          h('div', { 'data-dy-card': '' },
+            h('div', { 'data-dy-row': '' },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, '刷抖音'),
+                h('div', { 'data-dy-sub': '' },
+                  '峰谷时段自动刷一轮，把值得看的挑出来写成日报。不催你、不刷屏。')),
+              h('button', { 'data-dy-mini': '', disabled: busy === 'guide', onClick: toggleGuide },
+                guide === null ? '怎么用？' : '收起说明'),
+              /* ⭐ 面板构建号 —— 改完面板对一下这个数，就知道浏览器有没有拿到新代码 */
+              h('span', {
+                'data-dy-badge': '', title: '面板构建版本（改完面板对一下这个数）',
+                style: { fontVariantNumeric: 'tabular-nums' },
+              }, 'v' + (st.version || '?') + '·b' + PANEL_BUILD)),
+            h('div', { 'data-dy-row': '' },
+              h('span', {
+                'data-dy-badge': '',
+                'data-on': st.loggedIn ? '' : undefined,
+                'data-off': st.loggedIn ? undefined : '',
+              }, st.loggedIn ? '已登录' : '未登录'),
+              /* ⭐ 登录的是哪个号 —— 只显示昵称就够（ID 太长，对用户没用） */
+              st.loggedIn && acc && acc.nick
+                ? h('span', { 'data-dy-account': '' }, '👤 ' + acc.nick)
+                : (st.loggedIn
+                  ? h('span', { 'data-dy-sub': '' }, acc && acc.failed ? '（昵称没查到，不影响用）' : '正在查登录的号…')
+                  : null),
+              h('span', {
+                'data-dy-badge': '',
+                'data-on': st.venvReady ? '' : undefined,
+                'data-off': st.venvReady ? undefined : '',
+              }, st.venvReady ? '环境就绪' : '环境未装'),
+              h('span', { 'data-dy-badge': '' },
+                '今天 ' + (st.pickedToday != null ? st.pickedToday : 0) + ' / ' + (cfg.perDay != null ? cfg.perDay : 0)),
+              h('div', { 'data-dy-grow': '' }),
               h('button', {
                 'data-dy-btn': '', 'data-primary': '',
-                disabled: busy === 'send' || !String(chatText || '').trim(),
-                onClick: sendChat,
-              }, busy === 'send' ? '发送中…' : '发送')),
+                disabled: busy === 'run', onClick: onRun,
+              }, busy === 'run' ? '跑着呢…' : '现在跑一轮')),
+            msg ? h('div', {
+              'data-dy-msg': '',
+              'data-good': msgTone === 'good' ? '' : undefined,
+              'data-warn': msgTone === 'warn' ? '' : undefined,
+            }, msg) : null,
+            /* ⭐ 「看日志」—— 点一轮没反应时，让用户能自己看清发生了什么 */
+            h('div', { 'data-dy-row': '' },
+              h('button', { 'data-dy-mini': '', disabled: busy === 'log', onClick: loadRunLog },
+                runLog === null ? '看日志（跑一轮没反应就点这）' : '收起日志')),
+            runLog !== null
+              ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '6px' } },
+                h('div', { 'data-dy-kv': '' },
+                  `上次跑：${runLog.lastRunAt ? new Date(runLog.lastRunAt).toLocaleString('zh-CN') : '从没跑过'}`
+                  + `　今天已挑 ${runLog.pickedToday || 0} / ${runLog.perDay || 0}`),
+                runLog.canRun === false
+                  ? h('div', { 'data-dy-msg': '', 'data-warn': '' },
+                    runLog.roundActive ? '⚠️ 上一轮还在跑 —— 等它结束再点'
+                      : (runLog.pickedToday >= runLog.perDay ? '⚠️ 今天的配额用完了（改「每天挑几条」或等明天）' : '现在不能跑'))
+                  : null,
+                h('pre', { 'data-dy-pre': '', style: { maxHeight: '300px' } }, runLog.tail || '(日志是空的)'))
+              : null,
+            guide !== null
+              ? h('pre', { 'data-dy-pre': '', style: { maxHeight: '380px' } }, guide)
+              : null),
+
+        /* ── 卡 ③ 自动发送（含「私信发给谁」）────────────────────────────────
+         *    把原来的「自动发送」（内含「在评论区 @ 你」+「聊天模式」）
+         *    和「私信发给谁」合成一张 —— 它们本来就是一件事：发给谁、发什么、发不发。
+         *    2026-10-25 重排：20+ 张卡压成 7 张，功能一个不删，只合并。 */
+        h('div', { 'data-dy-card': '', 'data-dy-highlight': cfg.autoSend ? '' : undefined },
+          /* 合并卡的总标题：说清这张里装了什么（不然只见「自动发送」，找不到私信对象） */
+          h('div', { 'data-dy-title': '' }, '自动发送（发给谁 · 评论区 @ 你 · 聊天模式）'),
+          /* ── 自动发送开关（放在**最上面**，别埋在长面板底部） ── */
+          h('div', { 'data-dy-subblock': '', 'data-dy-highlight': cfg.autoSend ? '' : undefined },
+            h('div', { 'data-dy-row': '' },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, '自动发送'),
+                h('div', { 'data-dy-sub': '' },
+                  (cfg.autoSend
+                    ? '✅ 开着（默认）：插件自己跑一轮时，会把值得的视频发给你'
+                      + (cfg.autoComment ? '，也会发评论' : '') + '。'
+                    : '关着：插件自己跑一轮只写报告 + 弹通知，不往抖音发任何东西。'))),
+              h(Switch, {
+                on: Boolean(cfg.autoSend),
+                onChange: (v) => patch({ autoSend: v }, v
+                  ? '✅ 已打开自动发送'
+                  : '已关闭自动发送 —— 后台跑一轮只写报告'),
+              })),
+            h('div', { 'data-dy-row': '' },
+              h('span', { 'data-dy-badge': '', 'data-on': cfg.autoSend ? '' : undefined, 'data-off': cfg.autoSend ? undefined : '' },
+                cfg.autoSend ? '会自动发' : '只写报告'),
+              h('span', { 'data-dy-sub': '' },
+                '发给：' + (cfg.dmTo ? cfg.dmTo : '（还没选私信对象，去下面「私信发给谁」选一个）'))),
             h('div', { 'data-dy-sub': '' },
-              '发出去的话会记进记忆，下次打开就知道聊到哪了。'))
+              '⚠️ 只管「插件自己在后台跑的轮次」。你当场在对话里让它发，不受这个开关影响。'),
+
+            /* ⭐⭐ 「在评论区 @ 你」—— 用户 2026-10-22 要求，加在自动发送下面 */
+            h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, '在评论区 @ 你'),
+                h('div', { 'data-dy-sub': '' },
+                  (cfg.commentAtMe
+                    ? '✅ 开着：挑到最值得的那条时，会在它的评论区发一条 @ 你的评论 —— 你刷抖音就能看到通知。'
+                    : '关着：不往评论区发任何东西。'))),
+              h(Switch, {
+                on: Boolean(cfg.commentAtMe),
+                disabled: !cfg.autoSend,
+                onChange: (v) => patch({ commentAtMe: v }, v
+                  ? '✅ 已打开「在评论区 @ 你」'
+                  : '已关闭「在评论区 @ 你」'),
+              })),
+            !cfg.autoSend
+              ? h('div', { 'data-dy-sub': '' }, '（先打开上面的「自动发送」，这个才有用）')
+              : null,
+            cfg.commentAtMe && cfg.autoSend
+              ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px' } },
+                '会在**最值得的那一条**下发一次，提醒内容以「@你的昵称」开头。'
+                + (cfg.commentSelfName ? `（会 @「${cfg.commentSelfName}」）` : '（会 @ 你登录的这个号）'))
+              : null,
+            /* 🔴 2026-10-23：使用者反馈「@ 不出来」—— 这里必须讲清楚真 @ 的前提 */
+            cfg.commentAtMe && cfg.autoSend
+              ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px', opacity: '.78' } },
+                '💡 真 @ 需要起无头 Chrome 走「点选弹层」流程（约 20-40 秒）：'
+                + '① 电脑上要装了 Chrome；② 要 @ 的昵称必须能在弹层里搜到（一般是关注/互关的人）；'
+                + '③ 只写「@昵称」文字、没走点选的评论，对方收不到通知 —— 这是抖音的限制，不是插件偷懒。')
+              : null,
+            /* 想 @ 别的号才需要填 */
+            cfg.commentAtMe
+              ? h('div', { 'data-dy-row': '' },
+                h('input', {
+                  'data-dy-input': '', style: { flex: '1' },
+                  placeholder: '想 @ 别的号才填昵称（留空 = @ 你登录的这个号）',
+                  value: atMeDraft !== null ? atMeDraft : String(cfg.commentSelfName || ''),
+                  onChange: (e) => setAtMeDraft(e.target.value),
+                }),
+                h('button', {
+                  'data-dy-mini': '', disabled: Boolean(busy) || atMeDraft === null,
+                  onClick: async () => { await patch({ commentSelfName: String(atMeDraft || '').trim() }, '已保存要 @ 的昵称'); setAtMeDraft(null) },
+                }, '保存'))
+              : null,
+
+            /* ⭐⭐ 聊天模式（2026-10-24）：使用者实测的「会话模式」进插件。
+             *   每 N 秒静默读一次私信对象的会话（HTTP 快路径，不起浏览器），
+             *   他来新消息就弹 Windows 通知。回话还是你来（或叫值班轮）。 */
+            h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, '聊天模式'),
+                h('div', { 'data-dy-sub': '' },
+                  (cfg.chatWatch
+                    ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息（不弹桌面通知，状态屏和值班回话就是反馈）。不起浏览器，很轻。`
+                    : '关着（默认是开的）。想恢复再打开。'))),
+              h(Switch, {
+                on: Boolean(cfg.chatWatch),
+                disabled: !cfg.dmToId || busy === 'patch',
+                onChange: (v) => patch({ chatWatch: v }, v
+                  ? '✅ 已打开聊天模式（静默盯消息）'
+                  : '已关闭聊天模式'),
+              })),
+            busy === 'patch'
+              ? h('div', { 'data-dy-sub': '' }, '保存中…')
+              : null,
+            !cfg.dmToId
+              ? h('div', { 'data-dy-sub': '' }, '（先在下面「私信发给谁」选好对象，这个才有用）')
+              : null,
+            cfg.chatWatch
+              ? h('div', { 'data-dy-row': '' },
+                h('span', { 'data-dy-sub': '' }, '看消息的间隔（秒，10–300）'),
+                h('input', {
+                  'data-dy-input': '', style: { width: '90px' }, type: 'number', min: 10, max: 300,
+                  value: cwSecDraft !== null ? cwSecDraft : String(cfg.chatWatchSec || 30),
+                  onChange: (e) => setCwSecDraft(e.target.value),
+                }),
+                h('button', {
+                  'data-dy-mini': '', disabled: Boolean(busy) || cwSecDraft === null,
+                  onClick: async () => {
+                    const n = Math.max(10, Math.min(Number(cwSecDraft) || 30, 300))
+                    await patch({ chatWatchSec: n }, `聊天模式间隔已存：${n} 秒`)
+                    setCwSecDraft(null)
+                  },
+                }, '保存'))
+              : null,
+            /* ⭐ 实时状态屏（2026-10-24 使用者要求：「我哪知道它有什么用、错在哪了」）：
+             *    开着聊天模式时每 15 秒拉一次后端状态，显示几秒前看过、结果、通知弹没弹。 */
+            cfg.chatWatch ? h(ChatWatchStatus, { key: 'cw-status' }) : null),
+  /* ── 私信发给谁（点选，不用手填 sec_uid） ── */
+          h('div', { 'data-dy-subblock': '' },
+            h('div', { 'data-dy-row': '' },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, '私信发给谁'),
+                h('div', { 'data-dy-sub': '' },
+                  cfg.dmTo
+                    ? `现在是「${cfg.dmTo}」${cfg.dmToId ? '' : '（⚠️ 没记下稳定 id，重名时可能选错）'}`
+                    : '想让插件把好玩的发给你，先在这里选一个人。不选也行 —— 那就只写日报，不发私信。')),
+              h('button', {
+                'data-dy-btn': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
+              }, busy === 'people' ? '读取中…' : (people === null ? '从我的会话里选' : '重新读取'))),
+
+            !st.loggedIn
+              ? h('div', { 'data-dy-sub': '' }, '（要先在上面扫码登录，才能读到你的人）')
+              : null,
+
+            people && people.length
+              ? h('div', { 'data-dy-people': '' },
+                people.map((p, i) => h('button', {
+                  key: 'p' + i,
+                  'data-dy-person': '',
+                  'data-picked': (cfg.dmToId && p.sec_uid && cfg.dmToId === p.sec_uid)
+                    || (!cfg.dmToId && cfg.dmTo === p.nick) ? '' : undefined,
+                  disabled: Boolean(busy),
+                  onClick: () => pickPerson(p),
+                },
+                  h('span', { 'data-dy-person-name': '' }, p.nick),
+                  p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
+                  p.preview ? h('span', { 'data-dy-person-sub': '' }, p.preview) : null,
+                  ((cfg.dmToId && p.sec_uid && cfg.dmToId === p.sec_uid) || (!cfg.dmToId && cfg.dmTo === p.nick))
+                    ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已选')
+                    : null)))
+              : null,
+
+            people && !people.length
+              ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, peopleHint || '会话列表是空的')
+              : null,
+            peopleHint && people && people.length
+              ? h('div', { 'data-dy-sub': '' }, peopleHint)
+              : null,
+
+            /* ⭐ 也可以自己写 —— 不想从会话里选，或者那个人不在最近会话里 */
+            h('div', { 'data-dy-row': '' },
+              h('button', {
+                'data-dy-mini': '',
+                onClick: () => setManualDm(manualDm === null ? { nick: cfg.dmTo || '', id: cfg.dmToId || '' } : null),
+              }, manualDm === null ? '自己写' : '收起')),
+            manualDm !== null
+              ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
+                h('div', { 'data-dy-sub': '' }, '昵称（显示用）'),
+                h('input', {
+                  'data-dy-input': '', value: manualDm.nick, placeholder: '比如：示例好友',
+                  onChange: (e) => setManualDm({ ...manualDm, nick: e.target.value }),
+                }),
+                h('div', { 'data-dy-sub': '' }, '稳定 ID（可选 —— 重名时才有用；从「从我的会话里选」拿最方便）'),
+                h('input', {
+                  'data-dy-input': '', value: manualDm.id, placeholder: 'MS4wLjABAAAA…（可以留空）',
+                  onChange: (e) => setManualDm({ ...manualDm, id: e.target.value }),
+                }),
+                h('div', { 'data-dy-row': '' },
+                  h('button', {
+                    'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy),
+                    onClick: async () => {
+                      await patch({ dmTo: manualDm.nick.trim(), dmToId: manualDm.id.trim() },
+                        manualDm.nick.trim() ? `已保存「${manualDm.nick.trim()}」` : '已清空私信对象')
+                      setManualDm(null)
+                    },
+                  }, '保存'),
+                  h('div', { 'data-dy-sub': '' }, '留空 = 不发私信，只写日报')))
+              : null),
+        ),
+
+        /* ══════ 组「出问题才看」—— **默认收起**（foldErr 初始 false），点标题行展开 ══════
+         * 🔴 折叠状态是 Panel 顶部那两个 useState；这里只读、只 set，**绝不在条件分支里加 hook**。 */
+        h('div', { 'data-dy-group': '' },
+          h('button', {
+            'data-dy-groupbtn': '', 'data-open': foldErr ? '' : undefined,
+            'aria-expanded': foldErr ? 'true' : 'false',
+            onClick: () => setFoldErr((v) => !v),
+          },
+            h('span', { 'data-dy-groupname': '' }, '出问题才看'),
+            h('span', { 'data-dy-groupchev': '' }, foldErr ? '收起 ▲' : '展开看 ▼'))),
+
+        /* ── 卡 ④ 出问题了？（体检 + dsh 入口 + 看报告 + 给别的 AI 用 + 关于）──
+         *    都是「平时不看、出问题才翻」的东西，收进一张卡，默认折叠。 */
+        foldErr
+          ? h('div', { 'data-dy-card': '' },
+      /* ── 环境体检 ── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, '出问题了？'),
+                    h('div', { 'data-dy-sub': '' }, '点一下，9 项环境逐个查，哪项红了直接告诉你怎么办')),
+                  h('button', { 'data-dy-btn': '', disabled: busy === 'doctor', onClick: onDoctor },
+                    busy === 'doctor' ? '查着…' : '检查环境')),
+                doctor
+                  ? h('div', { 'data-dy-kv': '' },
+                    (doctor.items || []).map((it, i) => h('div', { key: 'd' + i },
+                      (it.state === 'ok' ? '✅ ' : it.state === 'warn' ? '⚠️ ' : '❌ ')
+                      + it.item + '：' + it.detail)))
+                  : null,
+                h('div', { 'data-dy-row': '' },
+                  h('button', { 'data-dy-mini': '', disabled: busy === 'report', onClick: onShowReport }, '看今天的报告')),
+
+                /**
+                 * ⭐⭐ 2026-10-23 加：**dsh 入口路径**（起因：使用者反馈「总是显示找不到 dsh」）
+                 * 🔴 桌面版不是 npm 全局装的，插件以前只能猜路径；猜不到就报"找不到 dsh"，
+                 *    而面板上**根本没有地方填** —— 使用者彻底卡死。
+                 *    现在：自动探测（多半能中）+ 这里可手填兜底 + 「自动找」清空回到探测。
+                 */
+                h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, 'dsh 入口（后台跑一轮要用）'),
+                    h('div', { 'data-dy-sub': '' },
+                      cfg.dshBin
+                        ? '已手填路径。点「自动找」清空，回到自动探测。'
+                        : '留空 = 自动找（桌面版会去 app.asar 里找，一般能中）。只有报「找不到 dsh」时才需要填。'))),
+                h('div', { 'data-dy-row': '' },
+                  h('input', {
+                    'data-dy-input': '', style: { flex: '1' },
+                    placeholder: '…\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js',
+                    value: dshBinDraft !== null ? dshBinDraft : String(cfg.dshBin || ''),
+                    onChange: (e) => setDshBinDraft(e.target.value),
+                  }),
+                  h('button', {
+                    'data-dy-mini': '', disabled: Boolean(busy) || dshBinDraft === null,
+                    onClick: async () => { await patch({ dshBin: String(dshBinDraft || '').trim() }, '已保存 dsh 入口路径'); setDshBinDraft(null) },
+                  }, '保存'),
+                  h('button', {
+                    'data-dy-mini': '', disabled: Boolean(busy),
+                    onClick: async () => { await patch({ dshBin: '' }, '已清空 ⇒ 回到自动探测'); setDshBinDraft(null) },
+                  }, '自动找')),
+                h('div', { 'data-dy-sub': '', style: { opacity: '.78' } },
+                  '填这两个之一：<安装目录>\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\'
+                  + 'dsh-desktop-host\\lib\\cli.js 或 …\\@deepseek-ai\\dsh\\lib\\bin.js')),
+      /* ── 给别的 AI 用（MCP） ── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, '给别的 AI 用'),
+                    h('div', { 'data-dy-sub': '' },
+                      '想让 Claude Code / Cursor / 别的 agent 也能刷抖音？这插件自带一个 MCP server，配一段 JSON 就能接。'))),
+                h('div', { 'data-dy-row': '' },
+                  h('button', {
+                    'data-dy-btn': '', disabled: busy === 'ai', onClick: loadAi,
+                  }, busy === 'ai' ? '读说明中…' : '看接入方式')),
+                ai
+                  ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
+                    h('div', { 'data-dy-kv': '' }, 'MCP server：' + ((ai.mcp && ai.mcp.server) || '(缺失)')),
+                    ai.mcp && ai.mcp.exists
+                      ? null
+                      : h('div', { 'data-dy-msg': '', 'data-warn': '' }, '⚠️ 找不到 tools/mcp-server.mjs —— 插件包不完整，重新安装'),
+                    h('div', { 'data-dy-sub': '' }, '把下面这段填进那个工具的 MCP 配置（路径已经按这台机器算好了）：'),
+                    h('pre', { 'data-dy-pre': '' }, (ai.mcp && ai.mcp.configText) || ''),
+                    h('div', { 'data-dy-row': '' },
+                      h('button', {
+                        'data-dy-mini': '',
+                        onClick: () => copy((ai.mcp && ai.mcp.configText) || '', 'MCP 配置'),
+                      }, copied === 'MCP 配置' ? '✓ 已复制' : '复制 MCP 配置'),
+                      h('button', {
+                        'data-dy-mini': '',
+                        onClick: () => copy((ai.mcp && ai.mcp.selfTest) || '', '自测命令'),
+                      }, copied === '自测命令' ? '✓ 已复制' : '复制自测命令')),
+                    h('div', { 'data-dy-sub': '' }, '自测（不接任何客户端，先看它自己通不通）：'),
+                    h('pre', { 'data-dy-pre': '' }, (ai.mcp && ai.mcp.selfTest) || ''),
+                    ai.doc
+                      ? h('div', { 'data-dy-row': '' },
+                        h('button', {
+                          'data-dy-mini': '',
+                          onClick: () => copy(ai.doc, '使用说明'),
+                        }, copied === '使用说明' ? '✓ 已复制' : '复制完整使用说明（贴给那个 AI 看）'))
+                      : h('div', { 'data-dy-msg': '', 'data-warn': '' }, '读不到 AI-USAGE.md：' + (ai.doc_error || '未知原因')))
+                  : h('div', { 'data-dy-sub': '' }, '点「看接入方式」会显示：MCP 配置、自测命令、给 AI 看的使用说明。')),
+      /* ── 关于 / 检查更新 ── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, '关于'),
+                    h('div', { 'data-dy-sub': '' }, '当前版本 v' + (st.version || '?') + ' · 报告在 ' + (st.report || 'out/'))),
+                  h('button', {
+                    'data-dy-btn': '', disabled: busy === 'update', onClick: () => onCheckUpdate(true),
+                  }, busy === 'update' ? '查着呢…' : '检查更新')),
+                upd
+                  ? h('div', { 'data-dy-kv': '' },
+                    upd.checked
+                      ? (upd.hasUpdate
+                        ? `有新版本 v${upd.latest}（当前 v${upd.current}）`
+                        : `已是最新版（v${upd.current}）`) + (upd.source ? `　来源：${upd.source}` : '')
+                      : (upd.note || '查不到最新版本'),
+                    upd.hasUpdate && upd.how ? h('div', { style: { marginTop: '4px' } }, '升级：' + upd.how) : null)
+                  : null,
+                upd && upd.tried && !upd.checked
+                  ? h('div', { 'data-dy-sub': '' }, '试过：' + upd.tried.map((t) => t.source + (t.ok ? ' ✓' : ' ✗')).join('、'))
+                  : null),
+      /* ── 报告 ── */
+              report !== null
+                ? h('div', { 'data-dy-subblock': '' },
+                  h('div', { 'data-dy-title': '' }, '报告'),
+                  h('pre', { 'data-dy-pre': '' }, report))
+                : null,
+            )
           : null,
 
-        /* ── 对话记忆 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '对话记忆'),
-              h('div', { 'data-dy-sub': '' },
-                '回私信、回评论时会记住聊过什么（存在本机，不上传）。这样它才不会把人当陌生人、重复问已经说过的事。')),
-            h('button', {
-              'data-dy-btn': '', disabled: busy === 'mem', onClick: loadMem,
-            }, mem === null ? '看记忆' : '收起')),
-          mem !== null
-            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
-              h('div', { 'data-dy-kv': '' },
-                `私信记忆 ${mem.dm} 个人 · 评论区记忆 ${mem.comment} 条视频 · 共 ${Math.round((mem.bytes || 0) / 1024)} KB`),
-              h('div', { 'data-dy-sub': '' },
-                mem.dm || mem.comment
-                  ? '想忘掉某个人：在对话里说「忘掉他」，或者清空全部。'
-                  : '还没有记忆 —— 用它聊过天之后才会有。'),
-              h('div', { 'data-dy-row': '' },
-                h('button', {
-                  'data-dy-mini': '', 'data-danger': '', disabled: Boolean(busy) || (!mem.dm && !mem.comment),
-                  onClick: clearMem,
-                }, '清空全部记忆')))
-            : null),
+        /* ══════ 组「一次配好」—— **默认收起**（foldCfg 初始 false），点标题行展开 ══════
+         * 🔴 折叠状态是 Panel 顶部那两个 useState；这里只读、只 set，**绝不在条件分支里加 hook**。 */
+        h('div', { 'data-dy-group': '' },
+          h('button', {
+            'data-dy-groupbtn': '', 'data-open': foldCfg ? '' : undefined,
+            'aria-expanded': foldCfg ? 'true' : 'false',
+            onClick: () => setFoldCfg((v) => !v),
+          },
+            h('span', { 'data-dy-groupname': '' }, '一次配好'),
+            h('span', { 'data-dy-groupchev': '' }, foldCfg ? '收起 ▲' : '展开看 ▼'))),
 
-        /* ── 我的人设 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '我的人设'),
-              h('div', { 'data-dy-sub': '' },
-                '让它用你想要的身份和口吻写日报。不写也行 —— 用插件自带的中性人设。')),
-            h('button', { 'data-dy-btn': '', disabled: busy === 'persona', onClick: loadPersona },
-              persona === null ? '写人设' : '收起')),
-          persona !== null
-            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
-              h('div', { 'data-dy-sub': '' },
-                persona.custom ? '正在用你写的这份' : (persona.hint || '还没写自己的 —— 现在用的是默认人设')),
-              h('textarea', {
-                'data-dy-input': '', rows: 8,
-                value: persona.text || '',
-                placeholder: '比如：\n- 说话软一点、别腻\n- 简短，别写成客服\n- 不透露任何私人信息',
-                onChange: (e) => setPersona({ ...persona, text: e.target.value }),
-              }),
-              h('div', { 'data-dy-row': '' },
-                h('button', {
-                  'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: savePersona,
-                }, '保存'),
-                h('button', {
-                  'data-dy-mini': '', disabled: Boolean(busy),
-                  onClick: () => setPersona({ ...persona, text: persona.defText || '' }),
-                }, '填入默认那份看看'),
-                h('div', { 'data-dy-grow': '' }),
-                h('span', { 'data-dy-sub': '' }, '留空保存 = 退回默认')))
-            : null),
-
-        /* ── 给别的 AI 用（MCP） ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '给别的 AI 用'),
-              h('div', { 'data-dy-sub': '' },
-                '想让 Claude Code / Cursor / 别的 agent 也能刷抖音？这插件自带一个 MCP server，配一段 JSON 就能接。'))),
-          h('div', { 'data-dy-row': '' },
-            h('button', {
-              'data-dy-btn': '', disabled: busy === 'ai', onClick: loadAi,
-            }, busy === 'ai' ? '读说明中…' : '看接入方式')),
-          ai
-            ? h('div', { 'data-dy-card': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
-              h('div', { 'data-dy-kv': '' }, 'MCP server：' + ((ai.mcp && ai.mcp.server) || '(缺失)')),
-              ai.mcp && ai.mcp.exists
-                ? null
-                : h('div', { 'data-dy-msg': '', 'data-warn': '' }, '⚠️ 找不到 tools/mcp-server.mjs —— 插件包不完整，重新安装'),
-              h('div', { 'data-dy-sub': '' }, '把下面这段填进那个工具的 MCP 配置（路径已经按这台机器算好了）：'),
-              h('pre', { 'data-dy-pre': '' }, (ai.mcp && ai.mcp.configText) || ''),
-              h('div', { 'data-dy-row': '' },
-                h('button', {
-                  'data-dy-mini': '',
-                  onClick: () => copy((ai.mcp && ai.mcp.configText) || '', 'MCP 配置'),
-                }, copied === 'MCP 配置' ? '✓ 已复制' : '复制 MCP 配置'),
-                h('button', {
-                  'data-dy-mini': '',
-                  onClick: () => copy((ai.mcp && ai.mcp.selfTest) || '', '自测命令'),
-                }, copied === '自测命令' ? '✓ 已复制' : '复制自测命令')),
-              h('div', { 'data-dy-sub': '' }, '自测（不接任何客户端，先看它自己通不通）：'),
-              h('pre', { 'data-dy-pre': '' }, (ai.mcp && ai.mcp.selfTest) || ''),
-              ai.doc
-                ? h('div', { 'data-dy-row': '' },
-                  h('button', {
-                    'data-dy-mini': '',
-                    onClick: () => copy(ai.doc, '使用说明'),
-                  }, copied === '使用说明' ? '✓ 已复制' : '复制完整使用说明（贴给那个 AI 看）'))
-                : h('div', { 'data-dy-msg': '', 'data-warn': '' }, '读不到 AI-USAGE.md：' + (ai.doc_error || '未知原因')))
-            : h('div', { 'data-dy-sub': '' }, '点「看接入方式」会显示：MCP 配置、自测命令、给 AI 看的使用说明。')),
-
-        /* ── 关于 / 检查更新 ── */
-        h('div', { 'data-dy-card': '' },
-          h('div', { 'data-dy-row': '' },
-            h('div', { 'data-dy-grow': '' },
-              h('div', { 'data-dy-title': '' }, '关于'),
-              h('div', { 'data-dy-sub': '' }, '当前版本 v' + (st.version || '?') + ' · 报告在 ' + (st.report || 'out/'))),
-            h('button', {
-              'data-dy-btn': '', disabled: busy === 'update', onClick: () => onCheckUpdate(true),
-            }, busy === 'update' ? '查着呢…' : '检查更新')),
-          upd
-            ? h('div', { 'data-dy-kv': '' },
-              upd.checked
-                ? (upd.hasUpdate
-                  ? `有新版本 v${upd.latest}（当前 v${upd.current}）`
-                  : `已是最新版（v${upd.current}）`) + (upd.source ? `　来源：${upd.source}` : '')
-                : (upd.note || '查不到最新版本'),
-              upd.hasUpdate && upd.how ? h('div', { style: { marginTop: '4px' } }, '升级：' + upd.how) : null)
-            : null,
-          upd && upd.tried && !upd.checked
-            ? h('div', { 'data-dy-sub': '' }, '试过：' + upd.tried.map((t) => t.source + (t.ok ? ' ✓' : ' ✗')).join('、'))
-            : null),
-
-        /* ── 报告 ── */
-        report !== null
+        /* ── 卡 ⑤ 刷抖音的策略：刷什么 / 什么时候自己跑 / 每天挑几条 / 日报多细 / 通知方式 ── */
+        foldCfg
           ? h('div', { 'data-dy-card': '' },
-            h('div', { 'data-dy-title': '' }, '报告'),
-            h('pre', { 'data-dy-pre': '' }, report))
+              h('div', { 'data-dy-title': '' }, '刷抖音的策略'),
+              h('div', { 'data-dy-sub': '' },
+                '刷什么、什么时候自己跑、每天挑几条、日报写多细、消息怎么通知你 —— 一次配好就不用再管。'),
+      /* ── 刷什么 ── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-title': '' }, '刷什么'),
+                h('div', { 'data-dy-sub': '' }, '关注关键词，一行一个（留空 = 用内置默认那几组）'),
+                h('textarea', {
+                  'data-dy-input': '', rows: 5, value: kwText,
+                  placeholder: '搞笑\n美食\n猫',
+                  onChange: (e) => setKws(e.target.value),
+                }),
+                h('div', { 'data-dy-row': '' },
+                  h('button', {
+                    'data-dy-btn': '', 'data-primary': '',
+                    disabled: Boolean(busy), onClick: saveKws,
+                  }, '保存'))),
+      /* ── 什么时候跑 ── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, '什么时候自己跑'),
+                    h('div', { 'data-dy-sub': '' }, '只在谷时跑（便宜）。全关 = 只在你点「现在跑一轮」时跑。'))),
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-sub': '' }, '中午谷时 12:00–14:00')),
+                  h(Switch, {
+                    on: Boolean(cfg.noon),
+                    onChange: (v) => patch({ noon: v }, v ? '中午自动跑：开' : '中午自动跑：关'),
+                  })),
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' }, h('div', { 'data-dy-sub': '' }, '晚上谷时 18:00–次日 09:00')),
+                  h(Switch, {
+                    on: Boolean(cfg.night),
+                    onChange: (v) => patch({ night: v }, v ? '晚上自动跑：开' : '晚上自动跑：关'),
+                  })),
+
+                /* ⭐ 自定义时段：和上面两个开关**叠加**（任意一个命中就跑），每个时段每天只跑一次 */
+                h('div', { 'data-dy-sub': '', style: { marginTop: '4px' } }, '自定义时段（可选，跟上面两个叠加）'),
+                winList.length
+                  ? winList.map((w, i) => h('div', { 'data-dy-wrow': '', key: 'w' + i },
+                    h('input', {
+                      'data-dy-time': '', type: 'time', value: String(w.start || ''),
+                      onChange: (e) => setWinAt(i, 'start', e.target.value),
+                    }),
+                    h('span', { 'data-dy-sep': '' }, '→'),
+                    h('input', {
+                      'data-dy-time': '', type: 'time', value: String(w.end || ''),
+                      onChange: (e) => setWinAt(i, 'end', e.target.value),
+                    }),
+                    h('input', {
+                      'data-dy-input': '', style: { flex: '1', minWidth: '60px' },
+                      placeholder: '备注（可空）', value: String(w.label || ''),
+                      onChange: (e) => setWinAt(i, 'label', e.target.value),
+                    }),
+                    h('button', { 'data-dy-mini': '', 'data-danger': '', onClick: () => delWin(i) }, '删')))
+                  : null,
+                h('div', { 'data-dy-row': '' },
+                  h('button', { 'data-dy-mini': '', onClick: addWin }, '+ 加一个时段'),
+                  winList.length
+                    ? h('button', {
+                      'data-dy-mini': '', 'data-primary': '',
+                      disabled: Boolean(busy), onClick: saveWins,
+                    }, '保存时段')
+                    : null,
+                  h('div', { 'data-dy-grow': '' }),
+                  winList.length
+                    ? h('span', { 'data-dy-sub': '' }, '跨零点也行（23:00 → 02:00）')
+                    : null),
+
+                h('div', { 'data-dy-sub': '' }, '两个都关 = 只在点「现在跑一轮」时跑。')),
+      /* ── 每天挑几条 / 日报多细 ── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-title': '' }, '每天挑几条'),
+                h('div', { 'data-dy-sub': '' },
+                  '全天总量（不是每轮）。0 = 不自动刷，只在你点「现在跑一轮」时跑。'),
+                h('div', { 'data-dy-row': '' },
+                  h('input', {
+                    'data-dy-time': '', type: 'number', min: 0, max: 300,
+                    style: { width: '72px' },
+                    value: String(perDayDraft !== null ? perDayDraft : (cfg.perDay != null ? cfg.perDay : 5)),
+                    onChange: (e) => setPerDayDraft(e.target.value),
+                  }),
+                  h('span', { 'data-dy-sub': '' }, '条 / 天'),
+                  h('div', { 'data-dy-grow': '' }),
+                  h('button', {
+                    'data-dy-mini': '', 'data-primary': '',
+                    disabled: Boolean(busy) || perDayDraft === null,
+                    onClick: async () => {
+                      const n = Math.max(0, Math.min(Number(perDayDraft) || 0, 300))
+                      await patch({ perDay: n }, `每天最多 ${n} 条`)
+                      setPerDayDraft(null)
+                    },
+                  }, '保存')),
+                h('div', { 'data-dy-row': '' },
+                  h('span', { 'data-dy-sub': '' }, '日报写多细：'),
+                  h('select', {
+                    'data-dy-input': '', style: { flex: '1', maxWidth: '180px' },
+                    value: String(cfg.reportLevel || 'full'),
+                    onChange: (e) => patch({ reportLevel: e.target.value }, '日报详细程度已保存'),
+                  },
+                    h('option', { value: 'full' }, '完整版（为什么值得 + 一句话）'),
+                    h('option', { value: 'brief' }, '薄版（每条一两行）'),
+                    h('option', { value: 'off' }, '不写日报')),
+
+                  h('span', { 'data-dy-sub': '', style: { marginLeft: '12px' } }, '通知：'),
+                  h('select', {
+                    'data-dy-input': '', style: { flex: '1', maxWidth: '150px' },
+                    value: String(cfg.notifyMode || 'toast'),
+                    onChange: (e) => patch({ notifyMode: e.target.value }, '通知方式已保存'),
+                  },
+                    h('option', { value: 'toast' }, '弹 Windows 通知'),
+                    h('option', { value: 'file' }, '只写文件（不打扰）'),
+                    h('option', { value: 'webhook' }, '推 webhook'),
+                    h('option', { value: 'both' }, '通知 + webhook')))),
+            )
+          : null,
+
+        /* ── 卡 ⑥ 桌宠：开关 + 她的所思所想 + 人格四选一 + 弹幕三态 + 补充人设 ── */
+        foldCfg
+          ? h('div', { 'data-dy-card': '' },
+              h('div', { 'data-dy-title': '' }, '桌宠'),
+              h('div', { 'data-dy-sub': '' },
+                '她浮在桌面上，也在下面这张屏里告诉你她此刻在干嘛。人格决定她的性格，补充人设是额外几句你要求她遵守的话。'),
+      /* ── 桌宠（2026-10-24 v5 从 dsh-deskpet 迁回：主人拍板放回面板）── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, '桌宠'),
+                    h('div', { 'data-dy-sub': '' },
+                      (cfg.petOn
+                        ? '✅ 她浮在桌面上。右键她有全部功能：聊天 / 喂饭 / 维修工 / 弹幕 / 人格 / 写日记 / 休息 / 退出。'
+                        : '关着。打开她就飘回来（休息中也会被叫回）。')),
+                  h(Switch, {
+                    on: cfg.petOn !== false,
+                    disabled: busy === 'patch',
+                    onChange: (v) => patch({ petOn: v }, v ? '✅ 她回来了' : '她去休息了（面板随时叫回）'),
+                  }))),
+                /* ⭐ 她的所思所想（主人 2026-10-24 的设计初衷）
+                 *    和桌面上的气泡是同一份数据 —— 面板里读到的就是她此刻在干嘛。 */
+                cfg.petOn !== false ? h(PetActivityStatus, { key: 'pet-activity' }) : null,
+                /* ⚠️ 2026-10-25 主人：「日记功能我要的是彩蛋形式，只在右键宠物的时候有这个选项，
+                 *    插件面板要保持干净」⇒ 面板这里的日记卡片**撤掉**，改成右键菜单里的「写日记」。 */
+                h('div', { 'data-dy-title': '' }, '人格（她是怎样的鱼）'),
+                h('div', { 'data-dy-sub': '', style: { marginBottom: '6px' } },
+                  '选一个性格，她说话的口吻、弹幕台词、小动作都跟着换。想改更深的人设文字，见下面「我的人设」。'),
+                h('div', { 'data-dy-personas': '' },
+                  [
+                    ['infp', 'INFP · 治愈小鱼', '温柔安静，共情力满'],
+                    ['entp', 'ENTP · 毒舌本鱼', '嘴毒手勤倒反天罡（红瞳紫雾）'],
+                    ['esfp', 'ESFP · 元气小鱼', '自来熟表演家，话最多'],
+                    ['istj', 'ISTJ · 维修工小鱼', '一丝不苟，引导体检'],
+                  ].map(([id, name, desc]) =>
+                    h('button', {
+                      key: id, 'data-dy-pcard': '', 'data-on': cfg.petPersona === id ? '' : undefined,
+                      disabled: busy === 'patch',
+                      onClick: () => patch({ petPersona: id }, '人格已切：' + name),
+                    },
+                      h('div', { 'data-dy-pcard-name': '' }, name),
+                      h('div', { 'data-dy-pcard-desc': '' }, desc)))),
+                /* 弹幕三态（主人 2026-10-25：「我要的是全屏弹幕跟局域弹幕」） */
+                h('div', { 'data-dy-title': '', style: { marginTop: '8px' } }, '弹幕'),
+                h('div', { 'data-dy-sub': '', style: { marginBottom: '6px' } },
+                  '全屏 = 铺满整个屏幕（点击穿透，不挡操作）；局域 = 只在她身边飘。'),
+                h('div', { 'data-dy-row': '', style: { gap: '6px' } },
+                  [
+                    ['off', '关'],
+                    ['local', '局域'],
+                    ['full', '全屏'],
+                  ].map(([mode, label]) =>
+                    h('button', {
+                      key: 'dm-' + mode, 'data-dy-mini': '',
+                      'data-primary': (cfg.petDanmakuMode || 'off') === mode ? '' : undefined,
+                      disabled: busy === 'patch',
+                      onClick: () => patch(
+                        { petDanmakuMode: mode, petDanmaku: mode !== 'off' },
+                        mode === 'full' ? '全屏弹幕开了' : mode === 'local' ? '局域弹幕开了' : '弹幕关了'),
+                    }, label)))),
+                /* ⚠️ 2026-10-25 主人：「走动模式去掉，不生效也没动画」⇒ 这块直接删掉。 */
+      /* ── 我的人设（补充文字） ──
+                 🔴 2026-10-25 主人：「插件面板人设跟人格重合了」
+                 查下来两者分工其实是：
+                   · 人格（MBTI）  = 她的**性格档位**，决定口吻/弹幕台词/小动作（面板里 4 张卡）
+                   · 我的人设      = 附加在人格之上的**补充文字**（你额外想让她遵守的话）
+                 以前两块的标题和描述都像"定义她是谁"，看着就是一个功能。
+                 现在把这里改名成「补充人设（可选）」并说明分工，不再跟人格抢位置。 */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, '补充人设（可选）'),
+                    h('div', { 'data-dy-sub': '' },
+                      '人格选好性格，这里再补几句你额外想让她遵守的话（写日报时也用这份）。不写也行。')),
+                  h('button', { 'data-dy-mini': '', disabled: busy === 'persona', onClick: loadPersona },
+                    persona === null ? '展开' : '收起')),
+                persona !== null
+                  ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
+                    h('div', { 'data-dy-sub': '' },
+                      persona.custom ? '正在用你写的这份' : (persona.hint || '还没写自己的 —— 现在用的是默认人设')),
+                    h('textarea', {
+                      'data-dy-input': '', rows: 8,
+                      value: persona.text || '',
+                      placeholder: '比如：\n- 说话软一点、别腻\n- 简短，别写成客服\n- 不透露任何私人信息',
+                      onChange: (e) => setPersona({ ...persona, text: e.target.value }),
+                    }),
+                    h('div', { 'data-dy-row': '' },
+                      h('button', {
+                        'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: savePersona,
+                      }, '保存'),
+                      h('button', {
+                        'data-dy-mini': '', disabled: Boolean(busy),
+                        onClick: () => setPersona({ ...persona, text: persona.defText || '' }),
+                      }, '填入默认那份看看'),
+                      h('div', { 'data-dy-grow': '' }),
+                      h('span', { 'data-dy-sub': '' }, '留空保存 = 退回默认')))
+                  : null),
+            )
+          : null,
+
+        /* ── 卡 ⑦ 消息与记忆：收件箱（谁找我）+ 聊天窗口 + 对话记忆（含清空） ── */
+        foldCfg
+          ? h('div', { 'data-dy-card': '' },
+              h('div', { 'data-dy-title': '' }, '消息与记忆'),
+              h('div', { 'data-dy-sub': '' },
+                '谁在评论区 @ 了你、谁给你发了私信；点一条就能回。聊过的话记在本机，不上传。'),
+      /* ── 消息：评论区 @ 我 + 谁私信我 ── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, '消息'),
+                    h('div', { 'data-dy-sub': '' },
+                      '谁在评论区 @ 了你、谁最近给你发了私信。点一条就能回。')),
+                  h('button', { 'data-dy-btn': '', disabled: busy === 'inbox' || !st.loggedIn, onClick: loadInbox },
+                    busy === 'inbox' ? '读取中…' : (inbox === null ? '看看谁找我' : '收起'))),
+                !st.loggedIn ? h('div', { 'data-dy-sub': '' }, '（要先扫码登录）') : null,
+
+                inbox !== null && inbox.ok
+                  ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '10px' } },
+                    /* 评论区 @ */
+                    h('div', { 'data-dy-sub': '' }, `评论区 @ 我：${inbox.at_n || 0} 条`),
+                    (inbox.at || []).length
+                      ? h('div', { 'data-dy-people': '' },
+                        inbox.at.map((a, i) => h('div', { key: 'at' + i, 'data-dy-msgrow': '' },
+                          h('div', { 'data-dy-row': '' },
+                            h('span', { 'data-dy-person-name': '' }, a.nickname || '（不知道是谁）'),
+                            h('span', { 'data-dy-tag': '', ...(a.before === '回过' ? { 'data-ok': '' } : {}) }, a.before),
+                            h('div', { 'data-dy-grow': '' }),
+                            a.video_url
+                              ? h('a', { href: a.video_url, target: '_blank', rel: 'noreferrer', 'data-dy-mini': '', style: { textDecoration: 'none' } }, '看视频')
+                              : null),
+                          h('div', { 'data-dy-person-sub': '', style: { whiteSpace: 'normal', marginTop: '2px' } }, a.content || ''),
+                          a.my_comments_here && a.my_comments_here.length
+                            ? h('div', { 'data-dy-sub': '', style: { marginTop: '2px' } },
+                              '我在这条视频下说过：' + a.my_comments_here[a.my_comments_here.length - 1].text.slice(0, 40))
+                            : null)))
+                      : h('div', { 'data-dy-sub': '' }, (inbox.at_n ? '都回过了' : '最近没有人在评论区 @ 你')),
+
+                    /* 私信 */
+                    h('div', { 'data-dy-sub': '', style: { marginTop: '6px' } }, `最近私信：${inbox.dm_n || 0} 个可能要回`),
+                    (inbox.dm || []).length
+                      ? h('div', { 'data-dy-people': '' },
+                        inbox.dm.map((p, i) => h('button', {
+                          key: 'dm' + i, 'data-dy-person': '', 'data-dy-inbox-dm': '', disabled: Boolean(busy),
+                          onClick: () => openChat(p),
+                        },
+                          h('span', { 'data-dy-person-name': '' }, p.nick),
+                          p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
+                          p.needs_reply ? h('span', { 'data-dy-tag': '' }, '该回了') : null,
+                          h('span', { 'data-dy-person-sub': '' },
+                            (p.their_last ? '他：' + String(p.their_last.text).slice(0, 26) : (p.preview || ''))),
+                          h('span', { 'data-dy-tag': '' }, `记 ${p.remembered || 0}`))))
+                      : h('div', { 'data-dy-sub': '' }, '最近没有私信'),
+                    (inbox.errors && inbox.errors.length)
+                      ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, '有些读不到：' + inbox.errors.join('；'))
+                      : null)
+                  : null,
+                inbox !== null && !inbox.ok
+                  ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, (inbox.errors || []).join('；') || '读不到消息')
+                  : null),
+      /* ── 聊天（带记忆） ── */
+              chat !== null
+                ? h('div', { 'data-dy-subblock': '' },
+                  h('div', { 'data-dy-row': '' },
+                    h('div', { 'data-dy-grow': '' },
+                      h('div', { 'data-dy-title': '' }, '跟 ' + chat.who.nick + ' 聊'),
+                      h('div', { 'data-dy-sub': '' },
+                        chat.data.context && chat.data.context.facts && chat.data.context.facts.length
+                          ? '记得关于他的：' + chat.data.context.facts.join('、')
+                          : (chat.data.context && chat.data.context.note) ? chat.data.context.note : '记忆里还没有这个人')),
+                    h('button', { 'data-dy-mini': '', onClick: () => { setChat(null); setChatText('') } }, '关掉')),
+
+                  /* 消息气泡 */
+                  h('div', { 'data-dy-chat': '' },
+                    (chat.data.messages || []).map((m, i) => h('div', {
+                      key: 'm' + i,
+                      'data-dy-bubble': '',
+                      'data-mine': m.from === 'me' ? '' : undefined,
+                      'data-them': m.from === 'them' ? '' : undefined,
+                    },
+                      h('div', { 'data-dy-bubble-text': '' }, String(m.text || '').slice(0, 300)),
+                      m.awe === 800 ? h('div', { 'data-dy-tag': '' }, '分享卡片') : null))),
+
+                  /* 输入 */
+                  h('div', { 'data-dy-row': '' },
+                    h('input', {
+                      'data-dy-input': '', style: { flex: '1' },
+                      placeholder: '说点什么…（发出去会进记忆）',
+                      value: chatText,
+                      onChange: (e) => setChatText(e.target.value),
+                      onKeyDown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() } },
+                    }),
+                    h('button', {
+                      'data-dy-btn': '', 'data-primary': '',
+                      disabled: busy === 'send' || !String(chatText || '').trim(),
+                      onClick: sendChat,
+                    }, busy === 'send' ? '发送中…' : '发送')),
+                  h('div', { 'data-dy-sub': '' },
+                    '发出去的话会记进记忆，下次打开就知道聊到哪了。'))
+                : null,
+      /* ── 对话记忆 ── */
+              h('div', { 'data-dy-subblock': '' },
+                h('div', { 'data-dy-row': '' },
+                  h('div', { 'data-dy-grow': '' },
+                    h('div', { 'data-dy-title': '' }, '对话记忆'),
+                    h('div', { 'data-dy-sub': '' },
+                      '回私信、回评论时会记住聊过什么（存在本机，不上传）。这样它才不会把人当陌生人、重复问已经说过的事。')),
+                  h('button', {
+                    'data-dy-btn': '', disabled: busy === 'mem', onClick: loadMem,
+                  }, mem === null ? '看记忆' : '收起')),
+                mem !== null
+                  ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
+                    h('div', { 'data-dy-kv': '' },
+                      `私信记忆 ${mem.dm} 个人 · 评论区记忆 ${mem.comment} 条视频 · 共 ${Math.round((mem.bytes || 0) / 1024)} KB`),
+                    h('div', { 'data-dy-sub': '' },
+                      mem.dm || mem.comment
+                        ? '想忘掉某个人：在对话里说「忘掉他」，或者清空全部。'
+                        : '还没有记忆 —— 用它聊过天之后才会有。'),
+                    h('div', { 'data-dy-row': '' },
+                      h('button', {
+                        'data-dy-mini': '', 'data-danger': '', disabled: Boolean(busy) || (!mem.dm && !mem.comment),
+                        onClick: clearMem,
+                      }, '清空全部记忆')))
+                  : null),
+            )
           : null,
       )
     }

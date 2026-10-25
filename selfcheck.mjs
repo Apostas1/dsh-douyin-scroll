@@ -561,6 +561,12 @@ try {
  *    语法完全合法。这一段用极小 React 替身把 Panel 真跑一遍 —— 白屏会在推之前被抓住。
  *    ⭐ 而且它同时验证**新手流程**：没登录时看到什么、点「扫码登录」出什么、
  *      点「从我的会话里选」能不能列出人。
+ * ⭐ 2026-10-25 面板重排：20+ 张卡 → 3 组 / 7 张卡。这里补两条**源码级**守卫：
+ *    ① 三个组标题（常开必看 / 出问题才看 / 一次配好）必须在，且组标题用 data-dy-group
+ *       （不是 data-dy-card —— 否则卡片计数就不止 7）
+ *    ② 两个折叠组的状态必须初始 false（默认收起），且必须放在**条件 return 之前**
+ *       （hook 顺序稳定，不许挪进 if 分支里）
+ *    渲染层面的"7 张卡 / 默认收起 / 点开才看得见"由 panel-render-check.mjs 实测。
  */
 console.log('\n4j. 设置页渲染 + 新手流程')
 try {
@@ -576,7 +582,125 @@ try {
     const why = String(r.stdout || r.stderr || '').split('\n').filter((l) => l.includes('❌')).slice(0, 3).join(' ')
     bad(`设置页渲染失败：${why || String(r.stderr || '').slice(0, 200)}`)
   }
+
+  /* ── 4j-1. 面板三组结构（源码级守卫，2026-10-25） ── */
+  const cl = readFileSync(join(here, 'client.js'), 'utf8')
+  for (const name of ['常开必看', '出问题才看', '一次配好']) {
+    if (cl.includes(`'${name}'`)) ok(`面板有组标题「${name}」`)
+    else bad(`面板缺组标题「${name}」—— 三组结构被打散了`)
+  }
+  // 组标题必须用 data-dy-group，不能占 data-dy-card（否则卡片计数不准）
+  if (/h\('div', \{ 'data-dy-group': '' \}/.test(cl) && /'data-dy-groupname'/.test(cl)) {
+    ok('组标题用 data-dy-group + data-dy-groupname（不占 data-dy-card，卡片计数才对）')
+  } else bad('组标题没有用 data-dy-group —— 卡片数会算错')
+  // 两个折叠组的状态默认 false（收起）
+  if (/const \[foldErr, setFoldErr\] = React\.useState\(false\)/.test(cl)) ok('「出问题才看」默认收起（foldErr 初始 false）')
+  else bad('「出问题才看」默认不是收起的 —— 面板会一上来就摊开')
+  if (/const \[foldCfg, setFoldCfg\] = React\.useState\(false\)/.test(cl)) ok('「一次配好」默认收起（foldCfg 初始 false）')
+  else bad('「一次配好」默认不是收起的')
+  // hook 顺序：折叠状态必须在 `if (!st || !cfg)` 那个提前 return **之前**声明
+  {
+    const iFold = cl.indexOf('const [foldErr, setFoldErr]')
+    const iBail = cl.indexOf('if (!st || !cfg) {')
+    if (iFold > 0 && iBail > 0 && iFold < iBail) {
+      ok('折叠状态声明在「读设置中…」提前 return 之前（hook 顺序稳定，不会白屏）')
+    } else bad(`折叠状态的 useState 放错位置（foldErr@${iFold} return@${iBail}）—— 必须在提前 return 之前`)
+  }
+  // 二维码登录（新手必经）必须在「常开必看」里、默认就看得到
+  if (cl.indexOf("'开始使用'") < cl.indexOf("'出问题才看'")) {
+    ok('「开始使用」（含扫码登录）在「出问题才看」之前 ⇒ 属于常开必看，默认展开')
+  } else bad('「开始使用」被排到折叠组后面了 —— 新手看不到扫码登录')
 } catch (e) { bad(`渲染检查跑不起来：${e.message}`) }
+
+/* ── 4j-2. 桌宠对话投递：宁可拒绝，也不许把主人的会话写坏 ──
+ * 🔴🔴 2026-10-25 血的教训（两次，都是"写完当场毫无反应，下次开会话才炸"）：
+ *   ① 手写 user/message 漏了 `source`
+ *      ⇒ "format v4 message requires a producer-owned source kind"
+ *   ② 补了 source 又漏了 `id`
+ *      ⇒ 41 条无 id 消息 ⇒ 再打开会话就 "session event at seq 40214 lacks an
+ *         identified message"，4 万条会话整个读不开（主人真的踩到了）
+ *   ③ 直接 append 还会插在 tool-call 与 tool-result 中间 ⇒ 每轮 400
+ *   现在改走 agent.followup()（由 agent 循环在正确边界落盘），并由
+ *   tools/pet-relay-test.mjs 用 DSH 自己的 adoptSessionEvent 验收消息格式。
+ */
+console.log('\n4j-2. 桌宠对话投递（不许写坏会话）')
+try {
+  const r = spawnSync(process.execPath, [join(here, 'tools', 'pet-relay-test.mjs')], {
+    encoding: 'utf8', timeout: 60_000,
+  })
+  const out = String(r.stdout || '')
+  const line = out.split('\n').filter((l) => l.includes('结果：')).pop() || ''
+  if (r.status === 0) ok(`投递链路安全（${line.replace('结果：', '').replace('✓', '').trim() || '全过'}）`)
+  else {
+    const why = out.split('\n').filter((l) => l.includes('❌')).slice(0, 3).join(' ')
+    bad(`投递链路有问题：${why || String(r.stderr || '').slice(0, 200)}`)
+  }
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  // ⚠️ 只看**代码**，不看注释 —— 我习惯在注释里贴旧代码当证据，
+  //    直接正则整文件会把证据当成"还在用"，误报过一次。
+  const idxCode = idx.split('\n')
+    .filter((l) => {
+      const t = l.trim()
+      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))
+    })
+    .join('\n')
+  if (/append\(\s*['"]user\/message['"]/.test(idxCode)) bad('index.js 还在直接 append user/message —— 这条路上次把会话写死了，改用 agent.followup()')
+  else ok('index.js 不再自己往会话日志塞消息（走 agent.followup）')
+  if (/deliverToSession/.test(idxCode)) ok('index.js 用的是 lib/pet-relay.mjs 的 deliverToSession')
+  else bad('index.js 没接 pet-relay 的投递实现')
+  let covered = 0
+  const relay = readFileSync(join(here, 'lib', 'pet-relay.mjs'), 'utf8')
+  for (const f of ['id', 'role', 'source', 'content']) if (new RegExp(`'${f}'`).test(relay)) covered++
+  if (covered === 4) ok('投递自检覆盖 id / role / source / content 四个字段')
+  else bad(`投递字段自检只覆盖 ${covered}/4 —— 少一个就会写坏会话`)
+} catch (e) { bad(`投递检查跑不起来：${e.message}`) }
+
+/* ── 4j-3. PetHost 请求体必须按 UTF-8 解（中文不许变问号） ──
+ * 🔴 2026-10-25 真凶：宿主里手写的 TcpListener 用 Encoding.ASCII 解整个请求，
+ *    中文一个字都不剩全变成 '?' —— 桌宠说的话进会话是「?????????」。
+ *    真实链路已用 tools/pet-host/probe-utf8.ps1 实测（77 字节中文+颜文字原样到达上游）。
+ */
+console.log('\n4j-3. PetHost 请求体 UTF-8（中文不许变问号）')
+try {
+  const cs = readFileSync(join(here, 'tools', 'pet-host', 'PetHost.cs'), 'utf8')
+  // ⚠️ 同上：只查代码行，注释里贴着旧代码当证据不算。
+  const csCode = cs.split('\n')
+    .filter((l) => {
+      const t = l.trim()
+      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))
+    })
+    .join('\n')
+  if (/Encoding\.ASCII\.GetString\(buf, 0, n\)/.test(csCode)) bad('PetHost.cs 还在整包 ASCII 解请求 —— 中文会全变 ?')
+  else ok('PetHost.cs 不再整包 ASCII 解请求')
+  if (/static bool HttpReadRequest/.test(csCode)) ok('PetHost.cs 有 HttpReadRequest（头 ASCII / 体 UTF-8 分开解）')
+  else bad('PetHost.cs 没有 HttpReadRequest —— 请求体编码不可控')
+  if (/while \(got < contentLen\)/.test(csCode)) ok('请求体按 Content-Length 读全（长消息不再被截断）')
+  else bad('请求体只读一次 Read —— 跨 TCP 分段时会丢尾巴')
+  if (/bodyBytes = rawBody/.test(csCode)) ok('代理转发的是原始 UTF-8 字节（不再从 ASCII 字符串重编）')
+  else bad('代理还在从 ASCII 字符串重编请求体')
+  for (const [probe, what] of [
+    ['probe-utf8.ps1', '编码'],
+    ['probe-diary.ps1', '日记本'],
+    ['probe-parent-watch.ps1', '父进程监视'],
+  ]) {
+    if (existsSync(join(here, 'tools', 'pet-host', probe))) ok(`有 ${probe}（${what}随时可复验）`)
+    else warn(`没有 ${probe} —— 以后改宿主时没法快速复验${what}`)
+  }
+  // 🔴 修会话的工具必须随包发：0.6.0 及更早用过桌宠对话的人可能已经中招
+  //    （消息缺 id ⇒ 会话打不开）。工具留在主人本机上就等于没修。
+  for (const [tool, what] of [
+    ['pet-session-repair.mjs', '修会话'],
+    ['pet-session-verify.mjs', '复核会话'],
+  ]) {
+    const f = join(here, 'tools', tool)
+    if (!existsSync(f)) { bad(`缺 tools/${tool} —— ${what}的工具没随包，中招的人没法自己修`); continue }
+    const src = readFileSync(f, 'utf8')
+    // ⚠️ 路径不许写死：别人的 DSH 装的位置跟我们不一样
+    if (/D:\\DeepSeek|D:\/DeepSeek/.test(src)) bad(`tools/${tool} 里写死了本机路径 —— 别人的机器跑不了`)
+    else if (/DSH_HOST_MODULES/.test(src) && /candidate/i.test(src)) ok(`有 tools/${tool}（${what}，会自己找宿主的包）`)
+    else warn(`tools/${tool} 的路径探测看着可疑，人工看一眼`)
+  }
+} catch (e) { bad(`PetHost 编码检查跑不起来：${e.message}`) }
 
 /* ── 4k. 新手流程：登录 + 私信对象都不许让用户去敲命令行 / 手填 sec_uid ── */
 console.log('\n4k. 新手流程（登录 / 私信对象）')

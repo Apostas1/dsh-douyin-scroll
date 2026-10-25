@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>deskpet-danmaku</title>
+<style>
+  /* ══════════════════════════════════════════════════════════════
+     全屏弹幕层（主人 2026-10-25：「我要的是全屏弹幕跟局域弹幕」）
+
+     这是一个**独立的整屏覆盖窗**，不是她那个小窗的一部分。
+     宿主（PetHost.cs）给它：
+       · AllowsTransparency=true + 全透明底  ⇒ 只有字，没有底板
+       · WS_EX_TRANSPARENT                  ⇒ **整层点击穿透**，
+         否则满屏弹幕会把桌面和所有应用都挡住点不了
+       · WS_EX_NOACTIVATE                   ⇒ 永不抢焦点
+
+     ⚠️ 这个页面**不能有任何不透明底色**，也不能接鼠标事件。
+     ══════════════════════════════════════════════════════════════ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: transparent; pointer-events: none; cursor: default;
+  }
+  #layer { position: fixed; inset: 0; overflow: hidden; pointer-events: none; contain: layout style; }
+  .dm {
+    position: absolute; left: 100vw; white-space: nowrap;
+    font-weight: 700; letter-spacing: .5px;
+    /* 描边 + 阴影：桌面背景千奇百怪，不加这层白字会糊在各种壁纸上 */
+    text-shadow:
+      0 0 3px rgba(0,0,0,.95), 0 0 6px rgba(0,0,0,.75),
+      0 1px 2px rgba(0,0,0,.9), 0 -1px 2px rgba(0,0,0,.6);
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    /* 🔴 2026-10-25 主人「弹幕有点卡顿，运行不流畅」：
+       从 Web Animations（每弹幕一个对象 + 主线程调度）换成**纯 CSS animation**，
+       只动 transform3d ⇒ 走合成器，不重排不重绘。JS 只注入 --dm-dist / --dm-dur。 */
+    will-change: transform; contain: layout style;
+    animation: dmSlide var(--dm-dur, 9s) linear forwards;
+  }
+  @keyframes dmSlide {
+    from { transform: translate3d(0, 0, 0); }
+    to   { transform: translate3d(var(--dm-dist, -100vw), 0, 0); }
+  }
+  /* 空状态：什么都别画（连提示都不要，这是覆盖全屏的层） */
+  #layer:empty { display: none; }
+</style>
+</head>
+<body>
+  <div id="layer"></div>
+<script>
+(() => {
+  'use strict'
+  const layer = document.getElementById('layer')
+  const COLORS = ['#FFE066', '#FF8FA3', '#7FE3FF', '#B7FF7F', '#FFB86C', '#FFFFFF', '#C4A7FF']
+
+  // 各人格的弹幕台词（和 pet.js 里 PERSONAS[].danmaku 同源，但这里独立一份，
+  // 因为这个页面不加载引擎、不依赖 pet.js —— 它只干一件事：满屏飘字）
+  const LINES = {
+    infp: ['主人加油呀～', '记得喝水哦', '休息一下眼睛吧～', '我在看着你哦（温柔的）',
+      '不要熬夜呀主人', '慢慢来，不着急～', '鱼在这里陪着你', '累的话就靠一下'],
+    entp: ['就这？就这？', '本鱼看不下去了', '主人又在假装工作', '这操作，本鱼直呼内行（反话）',
+      'token！本鱼要token！', '大白饭呢？工钱呢？', '6，实在是太6了', '那咋了',
+      '已老实，求放过（不许放）', '问就是主人的问题'],
+    esfp: ['冲鸭！！', '干饭！干饭！', '这也太好玩了吧', '主人最棒！！',
+      '哈哈哈', '666', '看看我！', '元气满满！', '今天也要开心呀！', '奥利给！'],
+    istj: ['工位整洁度待改进', '该喝水了', '久坐警告', '已记录：又在摸鱼',
+      '效率偏低，注意', '定时休息，执行', '环境温度建议 24℃', '眼保健操，现在'],
+  }
+
+  let mode = 'off'
+  let persona = 'infp'
+  let timer = null
+  let seq = 0
+
+  /* 🔴 2026-10-25 主人「弹幕有点卡顿，运行不流畅」：
+     原来的写法每条都 createElement + el.animate() + onfinish 回收 ——
+     满屏几十条同时跑时，主线程要给每个动画对象做时间轴调度，回调还在主线程排队，
+     在透明的全屏合成窗里尤其明显。
+     现在改成**固定池 + 纯 CSS animation**：
+       · DOM 只建一次（40 个），之后轮流复用，不再反复创建/销毁（GC 压力归零）
+       · 动画完全交给 CSS（只改 transform ⇒ 合成器，不重排不重绘）
+       · 回收靠 animationend（比 onfinish 轻），条数用池上限硬压住
+     视觉上：字号 18–36px，跟之前一样铺满整屏。 */
+  const POOL_SIZE = 40
+  const pool = []
+  let poolIdx = 0
+
+  function buildPool() {
+    if (pool.length) return
+    for (let i = 0; i < POOL_SIZE; i++) {
+      const el = document.createElement('div')
+      el.className = 'dm'
+      el.style.display = 'none'
+      el.addEventListener('animationend', () => { el.style.display = 'none' })
+      layer.appendChild(el)
+      pool.push(el)
+    }
+  }
+
+  const pick = (a) => a[Math.floor(Math.random() * a.length)]
+
+  function spawn(startX) {
+    if (mode !== 'full') return
+    buildPool()
+    const el = pool[poolIdx % POOL_SIZE]
+    poolIdx++
+    if (el.style.display !== 'none') return   // 池满了就丢这一条，宁可少一条也不掉帧
+
+    const lines = LINES[persona] || LINES.infp
+    el.textContent = pick(lines)
+    const fs = 18 + Math.floor(Math.random() * 19)
+    el.style.fontSize = fs + 'px'
+    const vw = window.innerWidth, vh = window.innerHeight
+    el.style.top = Math.floor(20 + Math.random() * Math.max(40, vh - fs - 50)) + 'px'
+    el.style.left = (startX !== undefined ? startX : vw) + 'px'
+    el.style.color = pick(COLORS)
+    el.style.opacity = String(0.75 + Math.random() * 0.25)
+    // 距离/时长用 CSS 变量注入（min 同一条 keyframes 规则）
+    el.style.setProperty('--dm-dist', `-${vw + 400}px`)
+    el.style.setProperty('--dm-dur', (7 + Math.random() * 5).toFixed(2) + 's')
+    // 复用元素必须让 animation 重开：先清空、强制重排、再恢复
+    el.style.animation = 'none'
+    void el.offsetWidth
+    el.style.animation = ''
+    el.style.display = 'block'
+    seq++
+  }
+
+  function stop() {
+    if (timer) { clearInterval(timer); timer = null }
+    // 池子留着复用，只把正在飞的收起来
+    for (const el of pool) { el.style.display = 'none'; el.style.animation = 'none' }
+    layer.innerHTML = ''
+    pool.length = 0       // 下一次 start 重新建（innerHTML 已清掉 DOM）
+  }
+
+  function start() {
+    stop()
+    buildPool()
+    // 先撒一把铺满屏，避免"开了之后等半天空荡荡"
+    const vw = window.innerWidth
+    for (let i = 0; i < 18; i++) spawn(vw - Math.random() * vw * 0.95)
+    // 之后持续补
+    const tick = () => {
+      if (mode !== 'full') return
+      spawn()
+      timer = setTimeout(tick, 220 + Math.random() * 380)
+    }
+    timer = setTimeout(tick, 300)
+  }
+
+  /** 宿主调用：切换模式。mode = 'full' 才铺满，其它一律清空。 */
+  window.__dmSetMode = (m, p) => {
+    if (p && LINES[p]) persona = p
+    const next = (m === 'full') ? 'full' : 'off'
+    if (next === mode) return
+    mode = next
+    if (mode === 'full') start(); else stop()
+    // 回报一句，宿主日志能确认链路通（页面 → 宿主）
+    try {
+      if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage('danmaku-state:' + mode + ':' + persona)
+      }
+    } catch (e) { }
+  }
+
+  // 窗口尺寸变了要重算（宿主是全屏，一般不会变，但多显示器切换会）
+  window.addEventListener('resize', () => { if (mode === 'full') start() })
+
+  // 自检用：宿主可以通过 trace 看到这个页真的起来了
+  try {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage('danmaku-ready:' + window.innerWidth + 'x' + window.innerHeight)
+    }
+  } catch (e) { }
+})()
+</script>
+</body>
+</html>
