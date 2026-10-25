@@ -200,21 +200,36 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       const ago = s.lastCheckAt ? Math.max(0, Math.round((Date.now() - s.lastCheckAt) / 1000)) : null
       const sec = Number(s.sec || 30)
       const nextIn = s.lastCheckAt ? Math.max(0, sec - ago) : sec
+      /* ⭐⭐ 2026-10-26 凌晨（主人：「如果是普通用户，他该怎么办，没那么聪明啊」）
+       *   面板不再让用户读内部字段（lastResult / lastError 是给排障的），
+       *   分两层显示：
+       *     第一层 = 后端给的一句人话（s.human）+ 该干什么（s.action）—— 普通人只看这层
+       *     第二层 = 技术细节（几秒前 · 走了哪条路 · 看了几次）—— 默认小字，排障才看
+       *   health=broken 时把 action 高亮成橙色，warning 黄色，ok 绿点。
+       */
+      const health = s.health || (s.lastResult === 'error' ? 'warning' : 'ok')
+      const DOT = { ok: '🟢', warning: '🟡', broken: '🔴', off: '⚪' }
       const FISH = {
         ok: `🐟 小鱼抱着手机趴在缸边等着呢——刚看过（${ago} 秒前），还没有新消息。下次去看还有 ${nextIn} 秒`,
         ok_prime: `🐳 小鱼刚接班，正在把聊天记录翻到最新一页（之前的不重播，从现在起只等新的）`,
-        ok_new: `🔔 小鱼看到新消息了：「${s.lastNewText || ''}」——已经转给值班的小鱼接话${s.toast && s.toast.indexOf('没能叫醒') >= 0 ? '（⚠️ 这次没叫醒：' + s.toast.slice(s.toast.indexOf('没能叫醒')) : ''}）`,
-        error: `😵 小鱼撞缸了：${s.lastError || '未知原因'}。歇一拍再试，不用管它`,
+        ok_new: `🔔 小鱼看到新消息了：「${s.lastNewText || ''}」——已经转给值班的小鱼接话`,
+        error: `😵 小鱼撞缸了`,
         no_match: `🤔 小鱼在已建立会话里没找到「${s.to || '这个人'}」：${s.lastNote || '陌生人消息走不了这条路'}`,
         off: `😴 开关关了，小鱼在缸底睡觉（这条是旧状态）`,
-        skip_no_to: `🫥 小鱼不知道该盯谁——还没选私信对象（去下面「私信发给谁」选一个）`,
-        skip_no_login: `🫥 小鱼进不去抖音——还没登录（先扫码）`,
+        skip_no_to: `🫥 小鱼不知道该盯谁——还没选私信对象`,
+        skip_no_login: `🫥 小鱼进不去抖音——还没登录`,
       }
-      const line = FISH[s.lastResult] || `🐟 小鱼状态：${s.lastResult || '刚下水，还没跑第一拍'}`
+      // 后端给了人话就用它（普通人只看得懂那个）；没给才退回老的拟人句
+      const line = s.human || FISH[s.lastResult] || `🐟 小鱼状态：${s.lastResult || '刚下水，还没跑第一拍'}`
+      const tone = health === 'broken' ? '#f59e0b' : health === 'warning' ? '#fbbf24' : null
       return h('div', { 'data-dy-inner': '', 'data-dy-subflat': '', style: { background: 'transparent', border: '1px dashed var(--dsw-alias-border-l2,rgba(255,255,255,.14))', padding: '8px 10px', gap: '4px' } },
-        h('div', { 'data-dy-sub': '', style: { opacity: '.95' } }, line),
+        h('div', { 'data-dy-sub': '', style: { opacity: '.95' } }, `${DOT[health] || '🐟'} ${line}`),
+        // 该干什么：只有真需要用户动手时才显示（action 为空 = 不用管）
+        s.action
+          ? h('div', { 'data-dy-sub': '', style: { color: tone || 'inherit', fontWeight: '500' } }, `👉 ${s.action}`)
+          : null,
         h('div', { 'data-dy-sub': '', style: { opacity: '.7' } },
-          `每 ${sec} 秒看一眼「${s.to || '私信对象'}」· 走 ${s.via || 'http'} · 已看 ${s.checks || 0} 次 · 提醒过 ${s.notified || 0} 条`))
+          `每 ${sec} 秒看一眼「${s.to || '私信对象'}」· 走 ${s.via || 'http'} · 已看 ${s.checks || 0} 次 · 提醒过 ${s.notified || 0} 条${s.failStreak ? ` · 连续失败 ${s.failStreak} 次` : ''}`))
     }
 
     /**
@@ -252,6 +267,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
       const [kws, setKws] = React.useState(null)
+      /** ⭐ 一键自救的结果（{ok, human, need_user, fixed}）—— null = 还没点过 */
+      const [chatFix, setChatFix] = React.useState(null)
       const [doctor, setDoctor] = React.useState(null)
       const [report, setReport] = React.useState(null)
       const [wins, setWins] = React.useState(null)
@@ -1054,7 +1071,31 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               : null,
             /* ⭐ 实时状态屏（2026-10-24 使用者要求：「我哪知道它有什么用、错在哪了」）：
              *    开着聊天模式时每 15 秒拉一次后端状态，显示几秒前看过、结果、通知弹没弹。 */
-            cfg.chatWatch ? h(ChatWatchStatus, { key: 'cw-status' }) : null),
+            cfg.chatWatch ? h(ChatWatchStatus, { key: 'cw-status' }) : null,
+            /* ⭐⭐ 2026-10-26 凌晨（主人：「如果是普通用户，他该怎么办，没那么聪明啊」）
+             *   一句话说明 + 一个按钮：不懂的人只会点这个。
+             *   按钮背后是 /chat/fix —— 后端自动判断、能修的自己修，修不了的用
+             *   「还差一步：……」告诉他去点哪儿。绝不让用户读日志。 */
+            h('div', { 'data-dy-row': '', style: { marginTop: '8px', alignItems: 'center' } },
+              h('button', {
+                'data-dy-btn': '',
+                disabled: busy === 'chatfix',
+                onClick: async () => {
+                  setBusy('chatfix')
+                  try {
+                    const r = await jpost('/chat/fix', {})
+                    setChatFix(r)
+                    say(r.ok ? '好了，现在能收发了' : (r.need_user ? `还差一步：${r.need_user.what}` : '还有问题，看下面的说明'), r.ok ? 'good' : 'warn')
+                  } catch (e) { say('自检失败：' + String((e && e.message) || e), 'warn') }
+                  finally { setBusy('') }
+                },
+              }, busy === 'chatfix' ? '检查中…' : '🔧 一键修好（不聊天时点这个）'),
+              h('span', { 'data-dy-sub': '' }, '收到消息不回？先点这个，它自己会修。')),
+            chatFix
+              ? h('div', { 'data-dy-sub': '', style: { color: chatFix.ok ? '#22c55e' : '#f59e0b' } },
+                `${chatFix.ok ? '✅' : '👉'} ${chatFix.human || ''}`
+                  + (chatFix.need_user && chatFix.need_user.how ? `\n${chatFix.need_user.how}` : ''))
+              : null),
   /* ── 私信发给谁（点选，不用手填 sec_uid） ── */
           h('div', { 'data-dy-subblock': '' },
             h('div', { 'data-dy-row': '' },

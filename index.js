@@ -441,6 +441,32 @@ export function apply(ctx, config) {
       if (saved[k] === undefined) continue
       if (same(out[k], DEFAULTS[k]) && !same(saved[k], DEFAULTS[k])) out[k] = saved[k]
     }
+    /**
+     * 🔴🔴🔴 2026-10-26 凌晨根治（今晚踩了第 4 次，不能再靠人肉拨回来）：
+     *   **开关类字段一律以磁盘为准，宿主表单只是镜像。**
+     *
+     *   病：每次插件重载，宿主设置表单里存着的旧 `chatWatch: false` 会被当成
+     *   "用户的意思"合并进内存 ⇒ 盯梢静默停掉。实测 15:38:16 重载后停到
+     *   15:39:10（54 秒），主人那句「怎样现在」正好落进这条缝里——不是没回，
+     *   是压根没看见。
+     *
+     *   为什么该以磁盘为准：这些字段只有两条写路（面板 patch / MCP douyin_config），
+     *   两条都走 saveCfg 落盘；宿主表单那份是 saveCfgHost 顺手同步的备份，
+     *   **它天生滞后**（表单刷新时机由 DSH 决定，不由我们）。拿滞后的镜像
+     *   去覆盖新写进磁盘的真值，方向是反的。
+     *
+     *   ⚠️ 只罩"开关/模式"这类原子字段，别扩大到数值阈值（perDay 之类主人可能
+     *   直接改表单，那些仍按原合并规则走）。
+     */
+    const DISK_WINS = ['chatWatch', 'chatWatchTarget']
+    for (const k of DISK_WINS) {
+      if (saved[k] === undefined) continue
+      if (!same(out[k], saved[k])) {
+        out[k] = saved[k]
+        // 只在"表单和磁盘不一致"时记一笔，正常情况不刷日志
+        log(`配置：${k} 以磁盘为准（表单=${JSON.stringify(user[k] ?? out[k])} → 磁盘=${JSON.stringify(saved[k])}）`)
+      }
+    }
     // ⭐ 空值兜底（本次事故的补丁）：字符串字段，表单给空的、磁盘有值 ⇒ 用磁盘
     for (const k of Object.keys(DEFAULTS)) {
       if (typeof DEFAULTS[k] !== 'string') continue
@@ -3004,9 +3030,57 @@ export function apply(ctx, config) {
       const j = pickJson(r.stdout)
       cwState.checks += 1
       if (!j || !j.ok) {
-        // 限流 / 接口挂 / Cookie 失效：记下来给面板看，静默等下一拍
-        cwWrite({ lastCheckAt: Date.now(), lastResult: 'error', lastError: String((j && j.error) || r.stderr || '没返回可解析结果').slice(0, 160) })
+        /**
+         * 🔴🔴 2026-10-26 凌晨重做（主人：「如果是普通用户，他该怎么办，没那么聪明啊」）
+         *
+         *   以前：出错只写状态屏 + 静默等下一拍。普通用户看到的现象是
+         *   「我发消息他不回」，而真相（DNS 抽风 / Cookie 过期 / 接口限流）
+         *   只有翻日志或打开设置页才看得见 —— 等于没告警。
+         *
+         *   现在分三层，按"用户能不能自己搞"来区分：
+         *     ① 瞬时故障（DNS/超时/网络）：**自动重试**（下面的 chatWatchRetryAt），
+         *        不打扰用户；重试成功就当作没发生过。
+         *     ② 连续失败 ≥3 次：**主动弹一条 Windows 通知**说人话
+         *        （「抖音私信读不到了：网络连不上，等下自动重试」），
+         *        并且每次故障只提醒一次（不刷屏）。
+         *     ③ 恢复后：记一笔「已恢复」并**清空通知去重标记**，
+         *        下次再坏还能提醒。
+         */
+        const errText = String((j && j.error) || r.stderr || '没返回可解析结果').slice(0, 160)
+        cwState.failStreak = (cwState.failStreak || 0) + 1
+        // ① 瞬时故障自动重试：**只要还没成功就一直重试**（间隔按 15 秒）
+        //    原来写的是 failStreak<=2 才重试，结果第 3 次以后退化成"等下一个 30 秒周期"，
+        //    看起来像彻底放弃了 —— 普通人根本不会去点重试按钮。
+        chatWatchLastMs = Date.now() - sec * 1000 + 15_000   // 15 秒后允许下一拍再读
+        // ② 连续 3 次失败才打扰用户，且每种错误只提醒一次
+        const human = (/could not resolve|curl: \(6\)|ENOTFOUND|getaddrinfo/i.test(errText)
+          ? '网络连不上抖音（DNS 解析失败）'
+          : /timeout|timed out|超时/i.test(errText)
+            ? '抖音那边一直超时'
+            : /401|403|login|cookie|登录/i.test(errText)
+              ? '登录状态可能过期了，需要重新扫码'
+              : '抖音私信接口报错')
+        const notifyKey = human
+        if (cwState.failStreak >= 3 && cwState.notifiedKey !== notifyKey) {
+          cwState.notifiedKey = notifyKey
+          try {
+            toastSend({ title: '小鱼读不到私信了', body: `${human}。已经连续 ${cwState.failStreak} 次没读到，会自己重试；要是很久都不好，打开设置页看「聊天模式」那一栏。` })
+          } catch { /* 通知失败不影响重试 */ }
+          chatWatchLog(`⚠️ 连续 ${cwState.failStreak} 次读不到私信：${human}（已提醒用户）`)
+        }
+        cwWrite({
+          lastCheckAt: Date.now(), lastResult: 'error', lastError: errText,
+          failStreak: cwState.failStreak,
+          lastNote: cwState.failStreak >= 3 ? `${human}（已连续 ${cwState.failStreak} 次，正在自动重试）` : '刚出问题，自动重试中',
+        })
         return
+      }
+      // 读取恢复正常 —— 记一笔并清掉去重标记（下次再坏还能提醒）
+      if (cwState.failStreak) {
+        const n = cwState.failStreak
+        cwState.failStreak = 0
+        cwState.notifiedKey = ''
+        chatWatchLog(`已恢复（之前连续失败 ${n} 次）`)
       }
       if (!j.matched) {
         cwWrite({ lastCheckAt: Date.now(), lastResult: 'no_match', lastNote: String(j.match_note || ''), lastError: '' })
@@ -3187,7 +3261,9 @@ export function apply(ctx, config) {
   } catch { /* 定时器起不来就算了，报号不是命脉 */ }
 
   try {
-    const cw = setInterval(() => { chatWatchTick() }, 10_000)   // 10 秒醒一次看「到没到点」，真正读的频率由 chatWatchSec 决定
+    // ⚠️ 5 秒醒一次（原来 10 秒）：真正读取频率仍由 chatWatchSec 决定，
+    //    但故障后「15 秒内自动重试」需要更细的节拍才落得准（普通人不会去点重试）。
+    const cw = setInterval(() => { chatWatchTick() }, 5_000)
     cw.unref?.()
     ctx.effect(() => () => clearInterval(cw), 'douyin-duty: 聊天盯梢')
   } catch (e) { log(`聊天盯梢没起来：${e?.message ?? e}`) }
@@ -3534,12 +3610,20 @@ export function apply(ctx, config) {
       }
       if (!handle?.agent) return { ok: false, reason: '值班会话没拉起来（agents.create/resume 不可用或失败）' }
       void dutySessionBrief(handle)
+      /**
+       * 🔴 2026-10-26 凌晨实测的坑：`loadLlmCreateUserMessage()` 有时返回 null
+       *   （进程刚起/宿主树还没就绪），而这里原来**直接放弃** ⇒ 白回退前台。
+       *   日志原话：「值班鱼不在（宿主 createUserMessage 加载失败）」。
+       *
+       *   但 pet-relay 早就有等价实现 `makeUserMessage()`（同样四件套齐全：
+       *   id/role/source/content，还被 pet-relay-test 单测锁着）。所以这里
+       *   **降级到它**，而不是把一条真私信扔回前台。
+       */
       const mk = await loadLlmCreateUserMessage()
-      if (!mk) return { ok: false, reason: '宿主 createUserMessage 加载失败（不能手拼消息——会写坏会话日志）' }
-      const msg = mk({
-        content: [{ type: 'text', text }],
-        source: { kind: 'user', rpcId: `duty-fish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, clientTimeZone: pickClientTimeZone() },
-      })
+      const content = [{ type: 'text', text }]
+      const source = { kind: 'user', rpcId: `duty-fish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, clientTimeZone: pickClientTimeZone() }
+      const msg = mk ? mk({ content, source }) : makeUserMessage({ content, source })
+      if (!mk) log('值班投递：宿主 createUserMessage 拿不到，已降级用 pet-relay 的 makeUserMessage（等价四件套）')
       const runningNow = (() => { try { return handle.agent.status === 'running' } catch { return false } })()
       handle.agent.followup(msg)
       log(`私信[投值班鱼]：${String(text).slice(0, 30)}… → ${DUTY_SESSION_ID}（${runningNow ? '在跑，排进收件箱' : '已叫醒，下一轮就读'}）`)
@@ -4143,7 +4227,62 @@ export function apply(ctx, config) {
     /* ── ⭐ 聊天模式：实时状态（面板每 15 秒拉一次，显示「它现在在干嘛」） ── */
     if (req.method === 'GET' && path === '/api/douyin-duty/chat/watch') {
       const s = readJson(join(stateDir, 'chat-watch-state.json'), {})
-      return sendJson(res, 200, { ok: true, ...s, now: Date.now() })
+      /**
+       * ⭐⭐ 2026-10-26 凌晨（主人：「如果是普通用户，他该怎么办，没那么聪明啊」）
+       *   面板不该让用户自己解读 lastResult/lastError 这些内部字段。
+       *   这里额外给三样**人话**：
+       *     health  : ok / warning / broken / off —— 一句话结论
+       *     human   : 一句中文，直接念给用户听
+       *     action  : 该干什么（可空；空 = 不用管，插件自己会好）
+       */
+      const now = Date.now()
+      const ageSec = s.lastCheckAt ? Math.round((now - s.lastCheckAt) / 1000) : null
+      const streak = Number(s.failStreak || 0)
+      let health = 'ok'
+      let human = ''
+      let action = ''
+      if (!s.on) {
+        health = 'off'
+        human = '聊天模式是关着的——他发消息小鱼不会看。'
+        action = '想让小鱼接话，把上面的开关打开。'
+      } else if (s.lastResult === 'skip_no_login') {
+        health = 'broken'
+        human = '还没登录抖音，小鱼读不到私信。'
+        action = '点上面的「扫码登录」，用抖音 App 扫一下就恢复了。'
+      } else if (s.lastResult === 'skip_no_to') {
+        health = 'broken'
+        human = '还没选「私信发给谁」，小鱼不知道盯谁。'
+        action = '在下面「私信发给谁」里选一个人。'
+      } else if (streak > 0 || s.lastResult === 'error') {
+        const humanReason = /could not resolve|curl: \(6\)|ENOTFOUND|getaddrinfo/i.test(String(s.lastError || ''))
+          ? '网络连不上抖音'
+          : /timeout|timed out|超时/i.test(String(s.lastError || ''))
+            ? '抖音那边一直超时'
+            : /401|403|login|cookie|登录/i.test(String(s.lastError || ''))
+              ? '登录状态可能过期了'
+              : '抖音私信接口报错'
+        if (streak >= 8) {
+          health = 'broken'
+          human = `已经连续 ${streak} 次读不到私信了（${humanReason}）。`
+          action = /登录/.test(humanReason)
+            ? '点上面的「扫码登录」重新扫一次。'
+            : '先确认电脑能上网；还不行就在下面「看日志」把最后几行发给我。'
+        } else {
+          health = 'warning'
+          human = `刚才读私信失败了几次（${humanReason}），正在自动重试。`
+          action = '不用管，一般十几秒就自己好了。'
+        }
+      } else if (ageSec !== null && ageSec > 180) {
+        health = 'warning'
+        human = `已经 ${Math.round(ageSec / 60)} 分钟没检查过私信了。`
+        action = '可能刚启动还没轮到；一直这样就把这个开关关掉再打开一次。'
+      } else {
+        health = 'ok'
+        human = s.lastResult === 'ok_new'
+          ? `正常工作：「${String(s.lastNewText || '').slice(0, 20)}」已经转给值班的小鱼。`
+          : '正常工作，正在等他的新消息。'
+      }
+      return sendJson(res, 200, { ok: true, ...s, health, human, action, ageSec, now })
     }
 
     /* ─────────────── ⭐ 桌宠状态源（2026-10-25 拆分后保留的最后一批接口）───────────────
@@ -4668,6 +4807,80 @@ export function apply(ctx, config) {
     if (req.method === 'POST' && path === '/api/douyin-duty/install-browser') {
       return sendJson(res, 200, { ok: false, gone: true, hint: '2026-10-21 起不再需要浏览器依赖 —— bb-browser / playwright 那套已经整个删掉了' })
     }
+    /* ── ⭐⭐⭐ 聊天模式「一键自救」（2026-10-26 凌晨，主人：「普通用户没那么聪明」）
+     *
+     *  设计原则：**用户只需要点一下**，剩下的判断全在这里。
+     *  它按顺序做四件事，每件都能自愈就自愈，不能就给出人话结论：
+     *    ① 开关没开？→ 直接帮它开（用户点这个按钮就是想让它工作）
+     *    ② 没登录？→ 明确告诉去扫码（这个自动化不了，必须人来）
+     *    ③ 没选私信对象 → 从已有会话里挑第一个能用的？不，这个不能猜，
+     *       但可以给出「去下面选一个人」+ 列表已经帮你读好了
+     *    ④ 都正常但读不到 → 真去读一次试试，把结果（成功/具体错因）说清楚
+     *
+     *  返回 { ok, fixed: [...], need_user: {what, how}|null, human }
+     *  —— 面板直接把 human 显示出来，普通人看完就知道好了没。
+     */
+    if (req.method === 'POST' && path === '/api/douyin-duty/chat/fix') {
+      const fixed = []
+      let needUser = null
+      let human = ''
+      try {
+        refreshCfg()
+        // ① 开关
+        if (!cfg.chatWatch) {
+          saveCfg({ chatWatch: true })
+          try { await saveCfgHost({ chatWatch: true }) } catch { /* 表单同步失败不影响插件自己 */ }
+          fixed.push('帮你把「聊天模式」打开了')
+        }
+        // ② 登录
+        if (!hasCredential(stateDir)) {
+          needUser = { what: '登录', how: '点上面的「扫码登录」，用抖音 App 扫一下就恢复了。' }
+          human = '还差一步：得用抖音 App 扫码登录，这个我替不了你。'
+          return sendJson(res, 200, { ok: false, fixed, need_user: needUser, human })
+        }
+        // ③ 私信对象
+        const toId = String(cfg.dmToId || '').trim()
+        if (!toId) {
+          needUser = { what: '选人', how: '在下面「私信发给谁」里点「从我的会话里选」，挑一个人。' }
+          human = '还差一步：得先告诉我要盯谁的私信。'
+          return sendJson(res, 200, { ok: false, fixed, need_user: needUser, human })
+        }
+        // ④ 真读一次，看能不能读到
+        const r = runPy('im-http.py', ['--read', '--peer-sec-uid', toId, '--limit', '3'], { timeout: 30_000 })
+        const j = pickJson(r.stdout)
+        if (!j || !j.ok) {
+          const err = String((j && j.error) || r.stderr || '没返回可解析结果')
+          const isNet = /could not resolve|curl: \(6\)|ENOTFOUND|getaddrinfo|timeout|超时/i.test(err)
+          const isAuth = /401|403|cookie|登录|login/i.test(err)
+          cwWrite({ lastCheckAt: Date.now(), lastResult: 'error', lastError: err.slice(0, 160) })
+          needUser = isAuth
+            ? { what: '重新登录', how: '点上面的「扫码登录」重新扫一次。' }
+            : isNet ? { what: '网络', how: '先确认电脑能上网（打开网页试试），然后点这个按钮再来一次。' }
+              : { what: '报错了', how: '点下面「看日志」，把最后几行发给我。' }
+          human = isNet
+            ? '现在连不上抖音（网络问题），不是插件坏了。'
+            : isAuth ? '登录状态过期了，得重新扫码。'
+              : '读私信时出错了，具体原因在日志里。'
+          chatWatchLog(`一键自救：读私信失败（${err.slice(0, 100)}）`)
+          return sendJson(res, 200, { ok: false, fixed, need_user: needUser, human })
+        }
+        // 读到了 —— 顺手把状态屏刷新成健康，并重置失败计数
+        cwState.failStreak = 0
+        cwState.notifiedKey = ''
+        cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok', lastError: '', failStreak: 0 })
+        const n = Array.isArray(j.matched?.messages) ? j.matched.messages.length : 0
+        human = fixed.length
+          ? `${fixed.join('、')}。刚才试读了一次，能读到他的私信（最近 ${n} 条），现在应该正常了。`
+          : `一切都正常：能读到他的私信（最近 ${n} 条），开着聊天模式，等他发消息就会接。`
+        chatWatchLog(`一键自救：${human}`)
+        return sendJson(res, 200, { ok: true, fixed, need_user: null, human, read_count: n })
+      } catch (e) {
+        const msg = String(e?.message ?? e)
+        chatWatchLog(`一键自救出错：${msg}`)
+        return sendJson(res, 200, { ok: false, fixed, need_user: null, human: '自检时出错了：' + msg.slice(0, 120) })
+      }
+    }
+
     if (req.method === 'POST' && path === '/api/douyin-duty/check') {
       const out = { ok: false, steps: [] }
       if (!venvReadyNow()) { out.error = '环境还没装好 —— 点「装主依赖」'; return sendJson(res, 200, out) }

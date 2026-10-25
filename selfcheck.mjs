@@ -1220,6 +1220,25 @@ try {
     //    少了这组参数，它会变成一个顶层会话，侧栏「未分组」里就多一个。
     if (/parentAgent/.test(idxM) && /origin: 'subagent'/.test(idxM) && /delegationDepth: 1/.test(idxM)) ok('值班会话带 parentAgent + origin:subagent（不进工作区、侧栏不露脸）')
     else bad('值班会话没带 parentAgent/origin —— 会在侧栏「未分组」里多出一个会话')
+    // 🔴 2026-10-26 凌晨根治：开关类字段以磁盘为准（宿主表单只是滞后的镜像）。
+    //    病：每次插件重载，表单里旧的 chatWatch:false 会把内存刷停 ⇒ 盯梢静默断档
+    //    （实测 54 秒空白，主人一句话漏在缝里）。
+    if (/DISK_WINS/.test(idxM) && /'chatWatch'/.test(idxM) && /'chatWatchTarget'/.test(idxM)) ok('开关类字段以磁盘为准（重载不再被宿主表单刷停）')
+    else bad('开关字段没走磁盘优先 —— 重载后 chatWatch 会被旧表单刷成 false，盯梢静默断档')
+    /* 🔴🔴 2026-10-26 凌晨（主人：「如果是普通用户，他该怎么办，没那么聪明啊」）
+     *  三道"普通人能自己活"的底线，少一条就得靠人盯着：
+     *    ① 读失败自动重试（不是停在 error 等人点）
+     *    ② 连续失败主动弹通知说人话（不是只写状态屏等人来看）
+     *    ③ 面板有一键自救按钮（不会读日志的人点一下就够）
+     */
+    if (/chatWatchLastMs = Date\.now\(\) - sec \* 1000 \+ 15_000/.test(idxM)) ok('读私信失败会自动重试（15 秒后再试，不等人来点）')
+    else bad('读失败没有自动重试 —— 普通用户只会觉得"它不回我"')
+    if (/failStreak >= 3 && cwState\.notifiedKey !== notifyKey/.test(idxM)) ok('连续失败 3 次主动弹通知（且每种错只提醒一次，不刷屏）')
+    else bad('连续失败不通知用户 —— 只写状态屏没人会去看')
+    if (/path === '\/api\/douyin-duty\/chat\/fix'/.test(idxM) && /一键修好/.test(cliM)) ok('面板有「一键修好」按钮 + 后端自救接口')
+    else bad('缺一键自救 —— 普通用户遇到问题只能干等')
+    if (/need_user/.test(idxM) && /还差一步/.test(cliM)) ok('自救失败时明确告诉用户"还差哪一步"（不让用户自己猜）')
+    else bad('自救失败没告诉用户该干嘛')
     if (/ownerCtx|生命周期挂在|插件重载不杀它/.test(idxM) || /照 headless runner 的用法/.test(idxM)) ok('值班会话生命周期说明在案（挂宿主根，不随插件重载而死）')
     else warn('值班会话生命周期说明缺失 —— 排障时容易误判')
     if (/TEAM_LEAD_REQUIRED|Agent Teams 队友 ✗|插件不是 Lead/.test(idxM)) ok('记录了为什么不用 Agent Teams（TEAM_LEAD_REQUIRED，roster 挂 Lead 会话名下）')
