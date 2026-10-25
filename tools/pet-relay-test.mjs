@@ -18,7 +18,7 @@
  */
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { deliverToSession, makeUserMessage, validateUserMessage, pickTargetAgent, relayLine } from '../lib/pet-relay.mjs';
+import { deliverToSession, makeUserMessage, validateUserMessage, pickTargetAgent, relayLine, pickClientTimeZone } from '../lib/pet-relay.mjs';
 
 const modulesRoot = 'D:\\DeepSeek\\dsh-data\\extracted-asar\\dsh\\node_modules';
 let adoptSessionEvent = null;
@@ -136,6 +136,38 @@ console.log('\n6. 自造消息（拿不到 dsh-llm 时的兜底）也要合法')
   const noId = makeUserMessage({ content: [], source: { kind: 'user' }, uuid: () => '' })
   if (validateUserMessage(noId) !== null) ok('坏消息能被 validateUserMessage 抓出来')
   else bad('validateUserMessage 放过了坏消息')
+}
+
+console.log('\n7. clientTimeZone 必须带（否则那一轮模型看到"时区不可用"）');
+{
+  // 🔴 2026-10-25 实测踩到：转达消息没带 clientTimeZone ⇒
+  //    dsh-time-context 的 deriveBrowserTimeZoneContext({kind:'missing'}) ⇒
+  //    模型被告知 "Browser time zone for this request: unavailable"。
+  //    真人打字时 DSH 会带，我们不带就是自己造偏差。
+  const { agent, rec } = fakeAgent()
+  deliverToSession({ text: '时区检查', agents: [agent] })
+  const src = rec.lastMsg?.source
+  if (src && typeof src.clientTimeZone === 'string' && src.clientTimeZone) {
+    ok('转达消息带上了 clientTimeZone = ' + src.clientTimeZone)
+  } else bad('转达消息没带 clientTimeZone —— 那一轮模型会被告知时区不可用')
+
+  // 值必须是 dsh-time-context 认的那种：'UTC' 或规范 IANA Area/Location
+  const IANA = /^[A-Za-z][A-Za-z0-9_+.-]*(?:\/[A-Za-z0-9_+.-]+)+$/
+  const z = src?.clientTimeZone
+  if (z === 'UTC' || IANA.test(z || '')) ok('clientTimeZone 形状合法（UTC 或 Area/Location）')
+  else bad('clientTimeZone 形状不合法，dsh-time-context 会 throw：' + JSON.stringify(z))
+
+  // 而且必须是 Intl 认的规范名（非规范名 DSH 也会 throw）
+  try {
+    const canonical = new Intl.DateTimeFormat('en-US', { timeZone: z }).resolvedOptions().timeZone
+    if (canonical === z) ok('clientTimeZone 是 Intl 认同的规范名')
+    else bad(`clientTimeZone 非规范：给的是 ${z}，规范名是 ${canonical}（DSH 会 throw）`)
+  } catch (e) { bad('clientTimeZone 连 Intl 都不认：' + e.message) }
+
+  // pickClientTimeZone 自身也要稳
+  const tz = pickClientTimeZone()
+  if (tz === 'UTC' || IANA.test(tz)) ok('pickClientTimeZone() 返回合法值：' + tz)
+  else bad('pickClientTimeZone() 返回值不合法：' + JSON.stringify(tz))
 }
 
 console.log(fail ? `\n结果：${pass} 通过 / ${fail} 失败` : `\n结果：${pass} 通过 / 0 失败 ✓ 投递链路安全`)

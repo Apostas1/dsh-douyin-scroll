@@ -653,6 +653,22 @@ try {
   for (const f of ['id', 'role', 'source', 'content']) if (new RegExp(`'${f}'`).test(relay)) covered++
   if (covered === 4) ok('投递自检覆盖 id / role / source / content 四个字段')
   else bad(`投递字段自检只覆盖 ${covered}/4 —— 少一个就会写坏会话`)
+  // 🔴🔴 2026-10-25 实测抓到的第二个漏（比 id 隐蔽，它**不报错**）：
+  //    转达消息没带 `clientTimeZone`。DSH 的 dsh-time-context 只从
+  //    "当前这一轮的用户消息"里收集时区（source.kind==='user' && 有 rpcId &&
+  //    有 clientTimeZone 才算一条）。真人打字时 DSH 会带，我们不带 ⇒
+  //    那一轮唯一的用户消息就"没有时区" ⇒ 模型被告知
+  //      Browser time zone for this request: unavailable. Ask the user to clarify
+  //    ⇒ 任何"今天/明天/几点"都会变得含糊。**不报错、不崩、就是悄悄偏**。
+  //    症状：转达之后那轮的 runtime context 里 time zone 变成 unavailable。
+  if (/clientTimeZone/.test(relay) && /pickClientTimeZone/.test(relay)) {
+    ok('转达消息带上 clientTimeZone（否则那轮模型看到"时区不可用"）')
+  } else {
+    bad('转达消息没带 clientTimeZone —— 每转达一次，那轮的时区判断就变成 unavailable（实测过）')
+  }
+  // 值必须是 UTC 或规范 IANA 名，否则 dsh-time-context 直接 throw TypeError
+  if (/Intl\.DateTimeFormat[\s\S]{0,200}timeZone/.test(relay)) ok('时区值会经过 Intl 规范化（非规范名 DSH 会 throw）')
+  else warn('pet-relay 里没看到 Intl 规范化时区 —— 确认一下传出去的是不是规范名')
 } catch (e) { bad(`投递检查跑不起来：${e.message}`) }
 
 /* ── 4j-3. PetHost 请求体必须按 UTF-8 解（中文不许变问号） ──
