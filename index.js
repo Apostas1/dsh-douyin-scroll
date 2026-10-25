@@ -372,6 +372,21 @@ export function apply(ctx, config) {
   }
   const hostCfg = () => normalize(config, { ...DEFAULTS })
   const savedCfg = () => normalize(readJson(cfgFile, {}), { ...DEFAULTS })
+  /**
+   * 🔴🔴🔴 合并规则的核心（2026-10-25 事故后重写，别改回去）：
+   *
+   *   `cfg` 是**内存里的真相**，每次读写前都从「DSH 设置表单 + config.json」重新合成。
+   *   旧逻辑只在"host 那层退回默认值"时才拿 config.json 兜底 ——
+   *   但**空字符串不等于默认值**（`dmTo` 默认就是 `''`），所以：
+   *     表单里 `dmTo` 空着 + config.json 里有值 ⇒ 旧逻辑认为"两边一样，用表单的"
+   *     ⇒ **磁盘上的私信对象被内存里的空值顶掉，下一次 patch 就写进磁盘，永久丢失**。
+   *   这就是主人那次 `dmTo`/`dmToId` 消失的全部经过。
+   *
+   * ✅ 新规则：**只要表单给的是空字符串、而磁盘上有非空值 ⇒ 一律用磁盘的。**
+   *    理由：这些字段的"空"永远是**坏状态**（没选人、没设解释器、没地址），
+   *    不可能是主人"特意清空"——真要清空，面板给的是显式的清除按钮，
+   *    那种情况我们会显式带 `{ dmTo: '', dmToId: '' }` 走 patch，而不是靠"没填"。
+   */
   const loadCfg = () => {
     const saved = savedCfg()
     const row = settingsDesc()
@@ -385,22 +400,68 @@ export function apply(ctx, config) {
       if (saved[k] === undefined) continue
       if (same(out[k], DEFAULTS[k]) && !same(saved[k], DEFAULTS[k])) out[k] = saved[k]
     }
+    // ⭐ 空值兜底（本次事故的补丁）：字符串字段，表单给空的、磁盘有值 ⇒ 用磁盘
+    for (const k of Object.keys(DEFAULTS)) {
+      if (typeof DEFAULTS[k] !== 'string') continue
+      const cur = String(out[k] ?? '')
+      const disk = String(saved[k] ?? '')
+      if (!cur.trim() && disk.trim()) out[k] = saved[k]
+    }
     return clampPatch(out)
   }
   const cfg = loadCfg()
   const refreshCfg = () => { Object.assign(cfg, loadCfg()) }
+  /**
+   * 🔴🔴🔴 2026-10-25 又出一次事故（这次是主人抓的）：
+   *   主人：「聊天模式怎么打开了，关闭不了」。
+   *   查下来不是开关坏了 —— 是 **`dmToId` 被清空了**，而面板那句
+   *   `disabled: !cfg.dmToId` 让开关永久变灰，右边说明却还写着"✅ 开着"。
+   *   同一次事故里 `pythonPath` 也被清成了 `"python"`（原来的 venv 绝对路径没了）。
+   *
+   * 当时的保护只盯着 `dmTo`/`dmToId` 两个键（2026-10-21 那次的补丁），
+   * 于是 `pythonPath` 这种同样"空 = 坏掉"的字段完全没保护。
+   *
+   * ✅ 现在的规矩（通用，不再逐字段打补丁）：
+   *    ① 任何**字符串字段**，如果新值是空的、而磁盘上有非空值 ⇒ **一律保住磁盘值**。
+   *       这条对全部字段生效，以后加新配置项自动被保护，不用再想起来改这里。
+   *    ② 写盘之前先比对：如果这一写会**丢掉**非空值，先把旧文件备份成
+   *       `config.json.lost-<时间戳>` 并大声记日志。
+   *       为什么：事故当时我没法从任何地方还原 `pythonPath`，只能靠翻 duty.log 猜。
+   *       有了备份，下次一分钟就能捞回来。
+   *    ③ 保住了就记日志（`配置：xxx 差点被空值覆盖`），排障时一眼看到。
+   */
   const saveCfg = (patch) => {
     Object.assign(cfg, normalize(patch, cfg))
-    // ⭐ 2026-10-21 实测事故：`dmTo` / `dmToId` 被清空过 —— 日志里连着三条 `设置已更新：{}`，
-    //    设置页一渲染就把空输入框 blur 出去一次。清空的后果是私信直接发不出去（还不知道为什么）。
-    //    规矩：空值不许覆盖磁盘上已有的非空值。
     const onDisk = readJson(cfgFile, {})
-    for (const k of ['dmTo', 'dmToId']) {
-      if (!String(cfg[k] || '').trim() && String(onDisk[k] || '').trim()) {
+    // ① 通用空值保护：所有字符串字段，空的不许盖掉磁盘上的非空值
+    const rescued = []
+    for (const k of Object.keys(DEFAULTS)) {
+      if (typeof DEFAULTS[k] !== 'string') continue
+      const next = String(cfg[k] ?? '')
+      const prev = String(onDisk[k] ?? '')
+      if (!next.trim() && prev.trim()) {
         cfg[k] = onDisk[k]
-        log(`配置：${k} 差点被空值覆盖 —— 已保住磁盘上的原值`)
+        rescued.push(k)
       }
     }
+    if (rescued.length) {
+      log(`配置：${rescued.join('、')} 差点被空值覆盖 —— 已保住磁盘上的原值`)
+    }
+    // ② 写盘前比对：真要丢非空值就先备份（正常情况不会触发，触发说明有更强的破坏源）
+    try {
+      const lost = []
+      for (const k of Object.keys(DEFAULTS)) {
+        if (typeof DEFAULTS[k] !== 'string') continue
+        const next = String(cfg[k] ?? '').trim()
+        const prev = String(onDisk[k] ?? '').trim()
+        if (!next && prev) lost.push(k)
+      }
+      if (lost.length) {
+        const bak = cfgFile + '.lost-' + new Date().toISOString().replace(/[:.]/g, '-')
+        writeJson(bak, onDisk)
+        log(`⚠️ 配置写入会丢掉 ${lost.join('、')} 的值，旧文件已备份到 ${bak}`)
+      }
+    } catch (e) { log(`配置备份失败（不影响写入）：${e?.message ?? e}`) }
     writeJson(cfgFile, cfg)
   }
   const saveCfgHost = async (patch) => {

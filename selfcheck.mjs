@@ -1033,6 +1033,88 @@ try {
   else bad('弹幕静默期被拆了 —— "开了又自己关掉"会复发')
 } catch (e) { bad(`4j-10 检查跑不起来：${e.message}`) }
 
+/* ── 4j-11. 配置不许被空值清空（2026-10-25 事故：私信对象和 venv 路径一起消失）──
+ *
+ * 🔴 事故经过（主人原话：「聊天模式怎么打开了，关闭不了」）：
+ *   查下来**不是开关坏了** —— 是 `dmTo` / `dmToId` / `pythonPath` 三个值被清空了。
+ *   而面板那句 `disabled: !cfg.dmToId` 让开关永久变灰（点它没反应），
+ *   右边说明却还写着"✅ 开着" ⇒ 主人的观感就是"显示开着、关不掉"。
+ *
+ * 根因是**合并逻辑的漏洞**，不是某一次误操作：
+ *   `loadCfg()` 里"表单值优先"的规则，把**空字符串当成一个正常值**。
+ *   可这些字段的"空"永远是**坏状态**（没选人、没设解释器），不可能是主人特意清空。
+ *   于是：表单空 + 磁盘有值 ⇒ 内存变空 ⇒ 下一次任何 patch 就写进磁盘，永久丢失。
+ *
+ * ✅ 现在的规矩（守这里）：
+ *   ① `loadCfg` 合并后，字符串字段"表单空、磁盘非空"⇒ 用磁盘的
+ *   ② `saveCfg` 写盘前，同样"空的不许盖掉磁盘上的非空值"（**对所有字符串字段**，
+ *      不是只盯着 dmTo/dmToId —— 旧补丁就是只保护两个键，pythonPath 才漏掉的）
+ *   ③ 真丢了要留备份（.lost-<时间戳>），下次一分钟能捞回来
+ *
+ * ⚠️ 这三条少任何一条，同类事故都会复发。所以每一处都单独断言。
+ */
+console.log('\n4j-11. 配置不许被空值清空（私信对象/venv 路径）')
+try {
+  const idx11 = readIf(join(here, 'index.js'))
+  // ① loadCfg 的空值兜底
+  if (/空值兜底|表单给空的、磁盘有值/.test(idx11)) ok('loadCfg 有"空白档优先用磁盘值"的兜底')
+  else bad('loadCfg 没做空值兜底 —— 表单空会把磁盘值顶掉')
+  // ② saveCfg 的通用保护：必须遍历 DEFAULTS 而不是写死两个键
+  //
+  // ⚠️ 这里返工过一次，值得记：第一版我写的是
+  //      /for \(const k of Object\.keys\(DEFAULTS\)\) \{\s*\n\s*if \(typeof DEFAULTS\[k\] !== 'string'\) continue/
+  //    然后做破坏性验证——把保护改回 `for (const k of ['dmTo','dmToId'])`，
+  //    **自检居然还是 419 通过**。原因：`index.js` 里有两处长得一模一样的循环
+  //    （loadCfg 里一处、saveCfg 里一处），我把 loadCfg 那处改坏了，
+  //    但正则匹配到的是 saveCfg 那处 ⇒ 假通过。
+  //    ⇒ 教训：**断言要盯"这段代码在不在 saveCfg 这个函数体里"，不能全文件搜。**
+  //    现在先按函数边界切出 saveCfg 的函数体，再在函数体里查。
+  const saveCfgBody = (() => {
+    const i = idx11.indexOf('const saveCfg = (patch) =>')
+    if (i < 0) return ''
+    // 从 const saveCfg 起，到下一个同级的 const 定义为止（这函数很短）
+    const rest = idx11.slice(i)
+    const end = rest.indexOf('\n  const saveCfgHost')
+    return end > 0 ? rest.slice(0, end) : rest.slice(0, 4000)
+  })()
+  if (!saveCfgBody) {
+    bad('找不到 saveCfg 函数体 —— 改名了？这条断言要跟着改')
+  } else {
+    const generic = /Object\.keys\(DEFAULTS\)/.test(saveCfgBody)
+    const hardcoded = /\['dmTo'\s*,\s*'dmToId'\]/.test(saveCfgBody)
+    if (generic && !hardcoded) {
+      ok('saveCfg 的空值保护是**通用**的（遍历所有字符串字段，不写死键名）')
+    } else if (hardcoded) {
+      bad("saveCfg 的空值保护退回成写死 ['dmTo','dmToId'] 了 —— 下次加新配置项（比如 pythonPath）还会漏")
+    } else {
+      bad(`saveCfg 里找不到通用空值保护（generic=${generic}）`)
+    }
+  }
+  // ②-b loadCfg 的兜底也要在**它自己的函数体**里（同一个假通过陷阱）
+  const loadCfgBody = (() => {
+    const i = idx11.indexOf('const loadCfg = () =>')
+    if (i < 0) return ''
+    const rest = idx11.slice(i)
+    const end = rest.indexOf('\n  const cfg = loadCfg()')
+    return end > 0 ? rest.slice(0, end) : rest.slice(0, 3000)
+  })()
+  if (/Object\.keys\(DEFAULTS\)/.test(loadCfgBody) && /!cur\.trim\(\) && disk\.trim\(\)|cur\.trim\(\)/.test(loadCfgBody)) {
+    ok('loadCfg 函数体里也有空值兜底（表单空、磁盘非空 ⇒ 用磁盘）')
+  } else bad('loadCfg 函数体里没有空值兜底')
+  if (/差点被空值覆盖/.test(saveCfgBody)) ok('保住值时会记日志（排障能一眼看到）')
+  else bad('保住值不记日志 —— 出事了查不出来')
+  // ③ 备份：真要丢非空值，先留一份
+  if (/\.lost-/.test(saveCfgBody)) ok('真要丢非空值会先备份成 .lost-<时间戳>')
+  else bad('没有备份 —— 丢了只能靠翻日志猜')
+  // ④ 面板：disabled 必须解释原因（不许只变灰）
+  const cli11 = readIf(join(here, 'client.js'))
+  if (/点不动\*\* —— 不是坏了|不是坏了，是因为还没选/.test(cli11)) {
+    ok('面板在开关变灰时明说"为什么点不了"（不许让主人猜）')
+  } else bad('开关变灰但不说原因 —— 主人会以为软件坏了（这次就是这么被报的）')
+  if (/先在下面「私信发给谁」选一个人/.test(cli11)) ok('变灰时点它也给一句提示（不是毫无反应）')
+  else bad('变灰时点了毫无反应')
+} catch (e) { bad(`4j-11 检查跑不起来：${e.message}`) }
+
 /* ── 4j-7 结束 ── */
 
 /* ── 4j-4. 排障通道不许变成"定时重发器"（2026-10-25 事故）──

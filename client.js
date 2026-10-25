@@ -1031,16 +1031,39 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
             h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
               h('div', { 'data-dy-grow': '' },
                 h('div', { 'data-dy-title': '' }, '聊天模式'),
+                /* 🔴🔴 2026-10-25 主人：「聊天模式怎么打开了，关闭不了」
+                 *
+                 * 真因不是开关坏了：`dmToId` 被一次配置事故清空，而这里
+                 *   `disabled: !cfg.dmToId`
+                 * 让开关**永久变灰**——点它没反应。更糟的是右边那段说明文字
+                 * 还写着"✅ 开着"，主人看到的就是"显示开着、关不掉"。
+                 *
+                 * ✅ 规矩（这条比修 bug 本身重要）：
+                 *    **任何 disabled 都必须当场说清为什么**，不许只变灰。
+                 *    变灰而不解释 = 让主人猜 = 他会以为软件坏了。
+                 *    所以这里分成三档文案：
+                 *      ① 没选私信对象 ⇒ 明说"开关是灰的，点不了不是坏了，先选人"
+                 *      ② 正在保存     ⇒ 明说"保存中"
+                 *      ③ 正常         ⇒ 说功能状态
+                 */
                 h('div', { 'data-dy-sub': '' },
-                  (cfg.chatWatch
-                    ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息（不弹桌面通知，状态屏和值班回话就是反馈）。不起浏览器，很轻。`
-                    : '关着（默认是开的）。想恢复再打开。'))),
+                  !cfg.dmToId
+                    ? '⚠️ 这个开关现在是**灰的、点不动** —— 不是坏了，是因为还没选「私信发给谁」（在下面选一个人）。没选人它就没有可盯的对象，所以先锁住。'
+                    : busy === 'patch'
+                      ? '保存中…'
+                      : (cfg.chatWatch
+                        ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息（不弹桌面通知，状态屏和值班回话就是反馈）。不起浏览器，很轻。`
+                        : '关着（默认是开的）。想恢复再打开。'))),
               h(Switch, {
                 on: Boolean(cfg.chatWatch),
                 disabled: !cfg.dmToId || busy === 'patch',
-                onChange: (v) => patch({ chatWatch: v }, v
-                  ? '✅ 已打开聊天模式（静默盯消息）'
-                  : '已关闭聊天模式'),
+                /* 变灰时点它也给一句话——比"毫无反应"好，主人至少知道点到了 */
+                onChange: (v) => {
+                  if (!cfg.dmToId) { say('先在下面「私信发给谁」选一个人，这个开关才能用', 'warn'); return }
+                  patch({ chatWatch: v }, v
+                    ? '✅ 已打开聊天模式（静默盯消息）'
+                    : '已关闭聊天模式')
+                },
               })),
             busy === 'patch'
               ? h('div', { 'data-dy-sub': '' }, '保存中…')
