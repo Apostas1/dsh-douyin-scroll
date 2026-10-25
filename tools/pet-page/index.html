@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -18,14 +18,17 @@
     <div id="pet-body" title=""></div>
   </div>
 
-  <!-- 台词输入框：独立定位（不塞进 #pet 底部，否则会压住她的脚）
-       🔴 2026-10-25 主人：「下方的菜单栏有点挡脚了」+「文本框输入多了也有问题」
-       两条一起改：
-         · 台词条移到**画布下方预留的输入区**（宿主给窗口留了脚位），不再压脚
-         · input 换成 **textarea**：输入多了会自动长高（最多 4 行），不再挤出框外 -->
+  <!-- 对话输入区（固定位置，点它不会往上弹）
+       🔴🔴🔴 2026-10-25 晚 主人：「宠物下面的对话框要固定位置不要因为点击对话框就自动弹上去了，
+         该变的是文本输出框，应该弹在下面」
+       ⇒ 输入框**固定在画布下面那条缝的底边**（bottom:6px），高度变化只在它自己身上；
+         她的回话走**上方气泡**（文本输出框），那才是该变的东西。
+       ⇒ 加了 #talk-wrap 外壳：旧版是裸 textarea，所以主人说"太丑"。 -->
   <div id="talkbar">
-    <textarea id="chat-input" rows="1" placeholder="跟她说句话…（Enter 发送 / Shift+Enter 换行）"></textarea>
-    <button id="chat-send" title="发送">➤</button>
+    <div id="talk-wrap">
+      <textarea id="chat-input" rows="1" placeholder="跟她说句话…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <button id="chat-send" title="发送（Enter）">➤</button>
+    </div>
   </div>
 
   <!-- 右键菜单（浏览器预览时用；WebView2 宿主里走原生 WPF 菜单，这个是兜底） -->
@@ -58,6 +61,7 @@
     <button class="tb" data-act="feed" title="喂饭">🍚</button>
     <button class="tb" data-act="play" title="逗她">🎬</button>
     <button class="tb" data-act="danmaku" title="弹幕（局域→全屏→关）">📺</button>
+    <button class="tb" data-act="chat-danmaku" title="弹幕聊天模式（她回你用弹幕滚）">💬📺</button>
     <button class="tb" data-act="hide" title="去休息">😪</button>
     <button class="tb tb-danger" data-act="quit" title="退出">🚪</button>
   </div>

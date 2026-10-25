@@ -680,6 +680,154 @@ try {
   else warn('清队列的 scope 看着可疑 —— 确认默认不会误删主人自己的输入')
 } catch (e) { bad(`投递检查跑不起来：${e.message}`) }
 
+/* ── 4j-5. 桌宠界面七条（2026-10-25 晚 主人离开前交办）──
+ * 主人原话（7 条，逐条对应下面的断言）：
+ *   0.「宠物下面的对话框要固定位置不要因为点击对话框就自动弹上去了，
+ *      该变的是文本输出框，应该弹在下面」
+ *   1.「文本输入框太丑了」
+ *   2.「文本框只能输入三行就不变化了」
+ *   3.「弹幕模式，出问题了，会消失」
+ *   4.「弹幕不要给人卡顿的感觉，不要减少弹幕量，这应该是代码设计问题」
+ *   5.「文本输入能开其它会话输入，但是不能回话到上面文本框啊」
+ *   6.「出个用弹幕聊天模式…我输入对话，她就用弹幕回我，防止我看不到可以滚动文字」
+ *   7.「请你领会我核心意图，不要出错」
+ *
+ * 这里的断言都是**针对"上一版为什么不对"**写的，不是"功能还在不在"：
+ * 只守"功能在"的断言挡不住回归，只有守"当初错在哪"才挡得住。
+ */
+console.log('\n4j-5. 桌宠界面七条（输入框/弹幕/回话）')
+try {
+  const css = readFileSync(join(here, 'tools', 'pet-page', 'pet.css'), 'utf8')
+  const pj  = readFileSync(join(here, 'tools', 'pet-page', 'pet.js'), 'utf8')
+  const html= readFileSync(join(here, 'tools', 'pet-page', 'index.html'), 'utf8')
+  const host= readFileSync(join(here, 'tools', 'pet-host', 'PetHost.cs'), 'utf8')
+  const idx = readFileSync(join(here, 'index.js'), 'utf8')
+  const dmHtml = readFileSync(join(here, 'tools', 'pet-page', 'danmaku.html'), 'utf8')
+
+  // ── 第 0 条：输入框固定、不随点击上弹 ──
+  //   旧的错法：bottom: calc(var(--foot-gap)*0.06) + align-items:flex-end + talking 时按钮条上移
+  if (/body\.talking #toolbar\s*\{[^}]*bottom:/.test(css)) {
+    bad('第0条：body.talking 还在移动按钮条 —— 一聚焦就"弹上去"的观感来源之一')
+  } else ok('第0条：按钮条不随聊天开合移动（输入框长高不推它）')
+  if (/#talkbar\s*\{[^}]*align-items:\s*flex-end/.test(css)) {
+    bad('第0条：#talkbar 还是 align-items:flex-end —— 长高时顶边往上蹿')
+  } else ok('第0条：#talkbar 不再用 flex-end 对齐（底边固定，往上长）')
+  if (/bottom:\s*36px/.test(css)) ok('第0条：输入区贴在按钮条上方 36px（不再与按钮条重叠）')
+  else warn('第0条：没看到 bottom:36px —— 确认输入框与按钮条不重叠')
+
+  // ── 第 1 条：输入框外观（不能是裸 textarea）──
+  if (/#talk-wrap/.test(css) && /#talk-wrap/.test(html)) ok('第1条：输入框有外壳 #talk-wrap（不再是裸 textarea）')
+  else bad('第1条：输入框还是裸 textarea —— 主人说"太丑了"')
+  if (/#chat-send\s*\{[^}]*position:\s*absolute/.test(css)) ok('第1条：发送键绝对定位在外壳里（布局稳定）')
+  else warn('第1条：发送键没有独立定位 —— 可能与输入框互相挤')
+
+  // ── 第 2 条：不止 3 行 ──
+  const mh = (css.match(/#chat-input\s*\{[^}]*max-height:\s*(\d+)px/) || [])[1]
+  if (!mh) bad('第2条：#chat-input 没有 max-height —— 行为不可预期')
+  else {
+    const lines = Math.floor(Number(mh) / 19)
+    if (Number(mh) > 60) ok(`第2条：输入框上限 ${mh}px ≈ ${lines} 行（旧版 60px 只够 3 行）`)
+    else bad(`第2条：max-height 仍是 ${mh}px —— 还是只能 3 行`)
+  }
+  // autoGrow 不许把上限写死成 60
+  if (/Math\.min\(chatInput\.scrollHeight,\s*60\)/.test(pj)) bad('第2条：autoGrow 还把上限写死 60px')
+  else ok('第2条：autoGrow 读 CSS 的 max-height，不再写死')
+  // textarea 不许再被 flex 压住（探针实测过：flex 里 scrollHeight 永远 34）
+  if (/#chat-input\s*\{[^}]*flex:\s*1/.test(css)) bad('第2条：#chat-input 还在 flex 里 —— scrollHeight 会被压住，永远长不高')
+  else ok('第2条：#chat-input 已脱离 flex（scrollHeight 才是真实内容高）')
+
+  // ── 第 3 条：弹幕不许"消失"（两个真因都要守住）──
+  //  ① 池化 + 清 DOM 冲突：关的时候必须同时作废池
+  if (/pool\.length\s*=\s*0/.test(pj)) ok('第3条：关弹幕时池也作废（否则再开时 buildPool 直接 return，屏幕空白）')
+  else bad('第3条：清 DOM 但没作废池 —— 关一次再开就再也不显示（主人报的"消失"）')
+  //  ② 状态回灌把刚开的弹幕按回去
+  if (/danmakuUserUntil/.test(pj) && /DM_GRACE_MS/.test(pj)) ok('第3条：有"用户刚改过"的静默期（否则 2 秒后状态回灌把弹幕按回 off）')
+  else bad('第3条：没有静默期 —— 主人在菜单里开的弹幕会被状态轮询按回去')
+
+  // ── 第 4 条：不卡顿、不降量 ──
+  //  旧版每 spawn 都 『el.style.animation=none; void el.offsetWidth; ...』 = 强制同步重排
+  const stripComments = (src) => {
+    const out = []
+    let inBlock = false
+    for (const line of src.split('\n')) {
+      let t = line
+      if (inBlock) {
+        const end = t.indexOf('*/')
+        if (end < 0) { out.push(''); continue }
+        t = t.slice(end + 2); inBlock = false
+      }
+      const open = t.indexOf('/*')
+      const lineC = t.indexOf('//')
+      if (open >= 0 && (lineC < 0 || open < lineC)) {
+        const end = t.indexOf('*/', open + 2)
+        if (end < 0) { inBlock = true; out.push(t.slice(0, open)); continue }
+        t = t.slice(0, open) + t.slice(end + 2)
+      }
+      const lc = t.indexOf('//')
+      if (lc >= 0) t = t.slice(0, lc)
+      out.push(t)
+    }
+    return out.join('\n')
+  }
+  const reflowInCode = (stripComments(pj).match(/void\s+el\.offsetWidth/) || [])
+  if (reflowInCode.length) bad('第4条：还有 void offsetWidth 强制同步重排 —— 这就是卡顿主因')
+  else ok('第4条：不再用 void offsetWidth 重启动画（改成 dmA/dmB 换名）')
+  if (/@keyframes\s+dmA/.test(css) && /@keyframes\s+dmB/.test(css)) ok('第4条：dmA/dmB 两个同名 keyframes 都在（换名重启的前提）')
+  else bad('第4条：缺 dmA/dmB —— 换名重启会失效，动画不会重开')
+  // 不降量：池必须不小于旧版
+  const localPool = (pj.match(/const DM_POOL_SIZE = (\d+)/) || [])[1]
+  if (localPool && Number(localPool) >= 26) ok(`第4条：局域弹幕池 ${localPool} 条（≥ 旧版 26，没降量）`)
+  else bad(`第4条：池被降到 ${localPool} —— 主人明确说不要减少弹幕量`)
+  // 分轨（避免随机 top 造成的"一顿一顿"）
+  if (/laneFreeAt/.test(pj)) ok('第4条：按轨道排队（不再随机 top，密度稳定）')
+  else bad('第4条：没有轨道概念 —— 弹幕互相压，看起来就是"卡"')
+
+  // ── 第 5 条：回话要回到上面文本框 ──
+  if (/pet\/reply/.test(idx) && /pet\/reply/.test(pj)) ok('第5条：有 /pet/reply 接口 + 页面轮询（把我真实的回话接回气泡）')
+  else bad('第5条：没有回话回读通道 —— 主人永远只看到"我这就去跟他说"')
+  if (/lastSeenSeq/.test(pj) && /startReplyPoll/.test(pj)) ok('第5条：轮询带 since 序号（增量取，不重复刷）')
+  else bad('第5条：轮询没有序号 —— 会重复刷同一句')
+
+  // ── 第 6 条：弹幕聊天模式 ──
+  if (/chat-danmaku/.test(pj) && /chat-danmaku/.test(host)) ok('第6条：弹幕聊天模式有入口（右键菜单 + 页面动作）')
+  else bad('第6条：弹幕聊天模式没有入口，开了也点不到')
+  if (/speakViaDanmaku/.test(pj) && /splitForDanmaku/.test(pj)) ok('第6条：回复会切片走弹幕（长句不会一飞而过）')
+  else bad('第6条：没有"把回复切成弹幕"的实现')
+  if (/chatViaDanmaku/.test(pj)) ok('第6条：开关状态存在页面里')
+  else bad('第6条：没有开关状态')
+
+  // ── 第 7 条：不许靠"减功能"蒙混 ──
+  //   按钮条、聊天、喂饭、弹幕、休息、退出、日记 —— 一个都不许丢
+  for (const [act, label] of [['chat', '聊天'], ['feed', '喂饭'], ['danmaku', '弹幕'],
+                              ['chat-danmaku', '弹幕聊天'], ['hide', '休息'], ['quit', '退出']]) {
+    if (new RegExp(`data-act="${act}"`).test(html)) ok(`第7条：按钮 ${label} 还在`)
+    else bad(`第7条：按钮 ${label} 丢了`)
+  }
+  if (/diary/.test(host)) ok('第7条：右键「她的日记」还在')
+  else bad('第7条：日记入口丢了')
+} catch (e) { bad(`4j-5 检查跑不起来：${e.message}`) }
+
+/* ── 4j-6. 弹幕池化逻辑的离线验证（不需要浏览器）──
+ * 🔴 这一段的由来：主人报"弹幕会消失"，我一开始只怀疑渲染，猜错了方向。
+ *    最后靠"把池化逻辑原样搬出来跑一遍"才钉死：
+ *      旧写法 关一次再开 → DOM 节点数 0 0（复现）
+ *      新写法 关一次再开 → 0 40（修好）
+ *    这种"能复现 bug 的测试"比"断言功能还在"有价值得多，所以留在 selfcheck 里。
+ */
+console.log('\n4j-6. 弹幕池化/分轨逻辑（离线）')
+try {
+  const r = spawnSync(process.execPath, [join(here, 'tools', 'pet-danmaku-test.mjs')], {
+    encoding: 'utf8', timeout: 30_000,
+  })
+  const out = String(r.stdout || '')
+  const line = out.split('\n').filter((l) => l.includes('结果：')).pop() || ''
+  if (r.status === 0) ok(`弹幕重开/分轨逻辑正确（${line.replace('结果：', '').replace('✓', '').trim()}）`)
+  else {
+    const why = out.split('\n').filter((l) => l.includes('FAIL')).slice(0, 3).join(' ')
+    bad(`弹幕逻辑有问题：${why || String(r.stderr || '').slice(0, 200)}`)
+  }
+} catch (e) { bad(`弹幕逻辑测试跑不起来：${e.message}`) }
+
 /* ── 4j-4. 排障通道不许变成"定时重发器"（2026-10-25 事故）──
  * 🔴 事故经过：pet-test.txt 里留了一段测试 JS，
  *      fetch('/pet/chat', {text:'接手验证：桌宠对话链路'})

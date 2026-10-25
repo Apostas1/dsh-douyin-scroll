@@ -20,15 +20,24 @@ html.debug-white, html.debug-white body { background: #f5f5f5; }
    修法：从 Web Animations（每个弹幕一个动画对象 + onfinish 主线程回调 + 每帧时间轴调度）
    换成**纯 CSS animation**：只动 transform（合成器直接做，不重排不重绘），
    配 will-change + contain 让每条独立成层；距离/时长由 JS 注入 --dm-dist / --dm-dur。 */
-#danmaku { position: fixed; inset: 0; overflow: hidden; pointer-events: none; display: none; z-index: 30;
+#danmaku { position: fixed; inset: 0; overflow: hidden; pointer-events: none; display: none; z-index: 12;
   contain: layout style; }
 .dm {
   position: absolute; left: 100vw; white-space: nowrap; font-weight: 700;
   text-shadow: 0 0 4px rgba(0,0,0,.85), 0 1px 2px rgba(0,0,0,.9);
+  /* 每条独立成合成层：只动 transform ⇒ 不重排不重绘 */
   will-change: transform; contain: layout style;
-  animation: dmSlide var(--dm-dur, 8s) linear forwards;
+  /* ⚠️ 这里**故意不写 animation 简写**：具体名字/时长由 JS 逐条注入
+     （dmA/dmB 交替，用来在不读布局的前提下重启动画）。 */
+  backface-visibility: hidden;
 }
-@keyframes dmSlide {
+@keyframes dmA {
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(var(--dm-dist, -100vw), 0, 0); }
+}
+/* dmB 与 dmA **完全一致**，只是名字不同 —— 见上面注释：
+   交替换名就能重启动画，不必读 offsetWidth（去掉强制同步重排）。 */
+@keyframes dmB {
   from { transform: translate3d(0, 0, 0); }
   to   { transform: translate3d(var(--dm-dist, -100vw), 0, 0); }
 }
@@ -97,35 +106,79 @@ html.debug-white, html.debug-white body { background: #f5f5f5; }
 /* 命中热区（她躯干范围；泡泡和台词条各自独立接管点击） */
 #pet-body { position: absolute; top: 15%; left: 12%; right: 12%; bottom: 20%; }
 
-/* ── 台词条（脚下）：聊天输入 ──
-   🔴 2026-10-25 主人两条反馈一起改：
-     「下方的菜单栏有点挡脚了」+「文本框输入多了也有问题」
-   ① 不再塞进 #pet 里（那样必然压脚）：改成独立定位，放在**画布下方预留的脚位**里
-      （宿主给的 --foot-gap，默认 44px）；
-   ② input 换 textarea：输入多了自动长高（最多 4 行），到顶就内部滚动，不再把字挤出框。 */
+/* ── 对话输入区（固定位置，永不跳动）──
+   🔴🔴🔴 2026-10-25 晚 主人三条反馈一起改：
+     「宠物下面的对话框要固定位置不要因为点击对话框就自动弹上去了」
+     「1.文本输入框太丑了。2.文本框只能输入三行就不变化了」
+
+   旧版的三个病（"会动"和"只有 3 行"的来源）：
+     ① 输入区只有 34px 缝（--foot-gap），而输入框要 26~60px ⇒ 必顶出缝、盖到她身上；
+        body.talking 还把按钮条往上推 ⇒ 一聚焦整块往上跳。
+     ② #talkbar 用 align-items:flex-end + JS 改 height ⇒ 长高时底边固定、顶边往上蹿，
+        看起来就是"点一下就弹上去"。
+     ③ max-height:60px（≈3 行）+ overflow ⇒ 第 4 行开始内部滚，不再长个。
+
+   新结构：
+     · 输入区 = 画布下面那条**固定高度的缝**（--foot-gap，宿主给 74）；
+     · #talkbar 贴缝**底**、内部横排（输入框 + 发送键）；输入框往上长，
+       但 max-height 卡在 96 ⇒ 绝不推动她、不推动按钮条、不改窗口。
+     · 底座 bottom 固定 6px ⇒ 主人要的"固定位置"（点不点都不动）。 */
 #talkbar {
   position: fixed; left: 50%; transform: translateX(-50%);
-  bottom: calc(var(--foot-gap, 44px) * 0.06);
-  width: calc(var(--canvas-w, 100%) * 0.96);
-  display: none; align-items: flex-end; gap: 4px; z-index: 20; cursor: default;
+  /* 🔴 底部对齐按钮条**上方**（按钮条高 26 + 底距 5 + 间距 4 = 35）。
+     探针实测过旧值 bottom:6px 会和按钮条叠在一起（input.bottom=400 / toolbar.bottom=406）。 */
+  bottom: 36px;
+  width: calc(var(--canvas-w, 100%) + 44px);
+  display: none;
+  z-index: 20; cursor: default;
 }
-#talkbar.on { display: flex; }
+#talkbar.on { display: block; }
+/* 输入框外壳：层次感 + 固定的底座（旧版是裸 textarea，所以主人说"丑"） */
+#talk-wrap {
+  position: relative;                /* 发送键 absolute 挂它 */
+  padding: 6px 40px 6px 11px;        /* 右边留出 40px 给发送键 */
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(40,45,58,.97), rgba(22,25,33,.98));
+  border: 1px solid rgba(140,175,255,.30);
+  box-shadow: 0 6px 20px rgba(0,0,0,.48), 0 0 0 1px rgba(255,255,255,.05) inset;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+#talk-wrap:focus-within {
+  border-color: rgba(96,165,250,.85);
+  box-shadow: 0 6px 22px rgba(0,0,0,.52), 0 0 0 3px rgba(59,130,246,.18);
+}
 #chat-input {
-  flex: 1; min-width: 0;
-  font: inherit; font-size: 11.5px; line-height: 15px;
-  padding: 5px 8px; border-radius: 9px;
-  border: 1px solid rgba(255,255,255,.24);
-  background: rgba(24,27,34,.96); color: #fff; outline: none;
-  user-select: text; cursor: text;
-  resize: none; overflow-y: auto; max-height: 60px;
-  scrollbar-width: none;
+  /* 🔴 关键：**不用 flex**。旧的 flex + align-items:flex-end 把 textarea
+     压成固定 34px，scrollHeight 读出来永远是被压缩后的值 ⇒ autoGrow 失效
+     （探针实测 7 行内容 h 仍是 34）。改成 block 之后 scrollHeight 才是真实内容高。 */
+  display: block; width: 100%;
+  font: inherit; font-size: 13px; line-height: 19px;
+  padding: 2px 0; border: 0; border-radius: 0;
+  background: transparent; color: #f2f6ff;
+  outline: none; user-select: text; cursor: text;
+  resize: none;
+  box-sizing: content-box;
+  /* min 34 = 1 行不塌；max 96 ≈ 5 行（19px 行高）—— 主人要的"不止三行" */
+  min-height: 34px; max-height: 96px;
+  overflow-y: auto; scrollbar-width: none;
+  caret-color: #7dd3fc;
 }
 #chat-input::-webkit-scrollbar { display: none; }
-#chat-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,.22); }
-#chat-send { flex: 0 0 auto; height: 26px; min-width: 30px; font-size: 13px;
-  padding: 0 8px; border: 0; border-radius: 9px; cursor: pointer;
-  background: #3b82f6; color: #fff; }
-#chat-send:hover { background: #2563eb; }
+#chat-input::placeholder { color: rgba(200,215,240,.42); }
+#chat-send {
+  position: absolute; right: 6px; bottom: 6px;
+  width: 29px; height: 29px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+  border: 0; border-radius: 9px; cursor: pointer;
+  color: #06121f; font-weight: 700;
+  background: linear-gradient(180deg, #7dd3fc, #38bdf8);
+  box-shadow: 0 2px 8px rgba(56,189,248,.35);
+  transition: transform .1s ease, filter .12s ease;
+}
+#chat-send:hover { filter: brightness(1.08); }
+#chat-send:active { transform: scale(.92); }
+#chat-send[disabled] { opacity: .45; cursor: default; filter: grayscale(.5); }
 
 /* ── 右键菜单（浏览器预览兜底；WebView2 宿主里走原生 WPF 菜单）── */
 #menu { position: fixed; display: none; min-width: 180px; background: rgba(30,32,40,.97);
@@ -143,7 +196,9 @@ html.debug-white, html.debug-white body { background: #f5f5f5; }
    ⚠️ 这里绝不能有整块不透明底板（会变成"背景不透明"）。 */
 #toolbar {
   position: fixed; left: 50%; transform: translateX(-50%);
-  bottom: max(1px, calc((var(--foot-gap, 34px) - 25px) / 2));
+  /* 2026-10-25：底部改成固定 5px。原来按 (--foot-gap-25)/2 算，
+     foot-gap 从 34 改到 74 之后它会漂到 24px 高，跟输入框打架。 */
+  bottom: 5px;
   display: flex; gap: 3px; z-index: 35;
   padding: 2px 4px; border-radius: 10px;
   background: rgba(18,20,26,.50); border: 1px solid rgba(255,255,255,.08);
@@ -156,5 +211,9 @@ html.debug-white, html.debug-white body { background: #f5f5f5; }
 #toolbar .tb:hover { background: rgba(255,255,255,.26); transform: translateY(-1px); }
 #toolbar .tb:active { transform: translateY(0) scale(.94); }
 #toolbar .tb-danger:hover { background: #e5484d; }
-/* 输入框开着时按钮条再往上让一格，绝不同时占底部 */
-body.talking #toolbar { bottom: calc(var(--foot-gap, 34px) + 2px); opacity: .55; }
+/* 输入框开着时：**按钮条不许动**。
+   🔴 2026-10-25 晚 主人：「宠物下面的对话框要固定位置不要因为点击对话框就自动弹上去了」
+   这里原来是 bottom: calc(--foot-gap + 2px) —— 一聚焦整条按钮就往上跳，
+   正是主人说的"弹上去"的观感来源之一（除了输入框本身也在长高）。
+   现在按钮条永远钉在 bottom:5px，输入框在它正上方往上长，两者互不侵占。 */
+body.talking #toolbar { opacity: .55; }

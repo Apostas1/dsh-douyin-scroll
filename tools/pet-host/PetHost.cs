@@ -213,13 +213,37 @@ public class PetHostApp
     //       CanvasW = 画布（人物）的边长 —— 决定她多大
     //       BubbleBand = 顶部留多高 —— 决定气泡能长几行
     //       BubbleWiden = 左右各加宽多少 —— 决定气泡铺多宽（横向铺开，行数就少）
-    //    窗口 = (CanvasW + BubbleWiden*2) × (CanvasW + BubbleBand)
+    //    窗口 = (CanvasW + BubbleWiden*2) × (CanvasW + BubbleBand + FootGap)
+    //
+    // 🔴🔴🔴 2026-10-25 晚 主人 7 条反馈里的 1/2/3 —— 布局整体重做：
+    //    「宠物下面的对话框要固定位置不要因为点击对话框就自动弹上去了，
+    //      该变的是文本输出框，应该弹在下面」
+    //    「文本输入框太丑了」「文本框只能输入三行就不变化了」
+    //
+    //    病根（三个叠在一起）：
+    //      ① FootGap 只有 34 DIP，而输入框要 26~60 的高度 ⇒ 它必然**顶出脚位**、
+    //         盖到她身上；`body.talking #toolbar{bottom: foot-gap + 2}` 又把按钮条
+    //         往上推，视觉上就是"一聚焦整块往上跳"。
+    //      ② 输入框高度靠 autoGrow() 改 style.height，而 #talkbar 是 flex 里
+    //         对齐 flex-end 的绝对定位块 ⇒ 长高时**从底边往上长**，
+    //         于是"点一下、框就往上弹"。
+    //      ③ 26→60px 的 max-height 只够 3 行（11.5px 字号 + 15px 行高），
+    //         第 4 行开始内部滚动 —— 主人说的"只能输入三行就变化了"。
+    //
+    //    解法（本文件 + pet.css 一起）：
+    //      · **固定一条输入区**（FootGap 从 34 提到 74 DIP），输入框永远贴在这条缝里，
+    //        高度由 CSS 定（min 34 / max 96 = 6 行），**长高时往下长、不动底边也不动顶边**；
+    //      · 输入框一旦"长高"只在自己那条缝里长，绝不推动她、绝不推动按钮条；
+    //      · 气泡（文本输出）仍在画布上方 —— 主人说的"该变的是文本输出框"。
+    //    按钮条和输入框**共用**这条缝：按钮条贴缝底、输入框贴缝顶，互不挤。
     static int CanvasW = 240;
     static int BubbleBand = 170;
     static int BubbleWiden = 100;
-    /// <summary>画布下面预留的「脚位」（DIP）：按钮条和输入框都放这条缝里，
-    /// 不压她的脚（主人 2026-10-25：「下方的菜单栏有点挡脚了」）。</summary>
-    static int FootGap = 34;
+    /// <summary>画布下面的「输入区」高度（DIP）。
+    /// 2026-10-25：34 → 74。34 只够塞一条 26px 的输入框，多一行就顶到她身上；
+    /// 74 = 输入框最大 96px 的一部分 + 按钮条 25px + 间距，长高也不会越界。
+    /// 这个值会作为 --foot-gap 注入页面，CSS 里所有贴底布局都从它算。</summary>
+    static int FootGap = 74;
     static int WW = 240 + 200;   // 窗口宽（DIP）—— 下面 RecomputeWin() 算
     static int WH = 240 + 170;   // 窗口高（DIP）
 
@@ -228,9 +252,9 @@ public class PetHostApp
     static void RecomputeWin()
     {
         WW = CanvasW + BubbleWiden * 2;
-        WH = CanvasW + BubbleBand + FootGap;   // 画布 + 气泡带 + 脚位
+        WH = CanvasW + BubbleBand + FootGap;   // 画布 + 气泡带 + 输入区
         Log("window = " + WW + "x" + WH + " (画布 " + CanvasW + " / 气泡带 " + BubbleBand
-            + " / 脚位 " + FootGap + " / 左右各 " + BubbleWiden + ")");
+            + " / 输入区 " + FootGap + " / 左右各 " + BubbleWiden + ")");
     }
 
     /// <summary>主人可以在 pet-window-pos.json 里写 Size / BubbleBand / BubbleWiden 调她：
@@ -1556,11 +1580,13 @@ public class PetHostApp
         menu.Items.Add(new Separator());
         addAct("逗她（随机小动作）", "play");
         // ⭐ 弹幕：两种（主人 2026-10-25 要求区分）
+        //    + 弹幕聊天模式（主人当晚第 6 条：「我输入对话，她就用弹幕回我」）
         addSub("弹幕", new string[][]
         {
             new string[] { "全屏弹幕（铺满整个屏幕）", "danmaku-full" },
             new string[] { "局域弹幕（只在她身边）", "danmaku-local" },
             new string[] { "关掉弹幕", "danmaku-off" },
+            new string[] { "—— 弹幕聊天模式（她回你用弹幕滚）", "chat-danmaku" },
         });
         // ⭐ 人格：二级，4 个档案直选（主人 2026-10-25 要求）
         addSub("人格", new string[][]
@@ -1812,6 +1838,24 @@ public class PetHostApp
                         Log("test act: " + act);
                         try { SendAct(act); Log("test act dispatched: " + act); }
                         catch (Exception ea) { Log("test act EXC: " + ea.Message); }
+                    }
+                    else if (js.StartsWith("js:", StringComparison.Ordinal))
+                    {
+                        // 在**主窗口**里跑一段 JS 并回读结果（排障用）。
+                        // 为什么单独加这个前缀：原来的默认分支也执行 JS，但它会把
+                        // **整段脚本**（可能好几千字）塞进日志，而且和 `pixels:` 那些
+                        // 自报通道混在一起。`js:` 是给自动探针用的显式口子：
+                        // 只记前 100 字，结果单独一行 "js result:"，好抓。
+                        string code = js.Substring("js:".Length);
+                        if (Wv != null && Wv.CoreWebView2 != null)
+                        {
+                            Log("js: " + (code.Length > 100 ? code.Substring(0, 100) + "…" : code));
+                            Wv.CoreWebView2.ExecuteScriptAsync(code).ContinueWith(tj =>
+                            {
+                                try { Log("js result: " + (tj.IsFaulted ? "FAULT " + tj.Exception.GetBaseException().Message : tj.Result)); } catch { }
+                            });
+                        }
+                        else Log("js: 主窗口还没好（Wv=null）");
                     }
                     else if (js.StartsWith("diaryjs:", StringComparison.Ordinal))
                     {

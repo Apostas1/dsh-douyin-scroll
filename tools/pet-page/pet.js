@@ -646,6 +646,19 @@ setInterval(() => {
   const wantMode = (typeof j.danmakuMode === 'string' && ['off', 'local', 'full'].includes(j.danmakuMode))
     ? j.danmakuMode
     : (j.danmaku === true ? 'local' : 'off')
+  /* 🔴🔴🔴 2026-10-25 晚 「弹幕模式，出问题了，会消失」的**真正主因**就在这。
+   *
+   *  这个轮询每 2 秒跑一次，会读 pet-window-state.json 里的 danmakuMode；
+   *  而那个字段是 **keeper 每 10 秒全量重写**状态文件时按 cfg 生成的。
+   *  主人刚点开弹幕（页面本地开 + 写 pet-cmd.json），keeper 还没跑下一拍，
+   *  cfg 仍是 off ⇒ **2 秒后这里就把刚开的弹幕按回 off**。
+   *  主人看到的就是"亮一下 → 没了"，而且不知道为什么。
+   *
+   *  ✅ 修法：页面自己**主动**改过之后进入静默期（DM_GRACE_MS）。
+   *     静默期内忽略文件里的旧值，等 keeper 把 cfg 写回正确值再恢复同步。
+   *     两边最终仍然一致，只是不会自己顶掉自己刚做的操作。
+   */
+  if (Date.now() < danmakuUserUntil) return
   if (wantMode !== danmakuMode) setDanmakuMode(wantMode, true)   // true = 来自状态，不回写 cmd
 }, 2000)
 
@@ -805,9 +818,47 @@ const DM_COLORS = ['#FFE066', '#FF8FA3', '#7FE3FF', '#B7FF7F', '#FFB86C', '#FFFF
      · 循环用**固定池 + 复用 DOM**，不再每 spawn 一个就 new 一个元素（GC 压力大）
      · `will-change: transform` + `contain: layout style` 让每个弹幕独立成层
    字体：改回初版大小 17–30px（之前被我压成 12–19px，太小了）。 */
-const DM_POOL_SIZE = 26          // 同时最多这么多条，够满但不压垮合成
+/* ══════════════════════════════════════════════════════════════════════
+   局域弹幕渲染 —— 2026-10-25 晚 按主人第 4 条重设计
+   「弹幕不要给人卡顿的感觉，不要减少弹幕量，这应该是代码设计问题」
+
+   ✅ 他说得对，确实是设计问题。旧实现三个硬伤：
+
+   ① **每次 spawn 都强制同步重排**
+        el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''
+      『void el.offsetWidth』 会逼浏览器立刻结算所有样式（强制 layout）。
+      这是每秒都在跑的路径 ⇒ 掉帧的第一来源。
+
+   ② **靠 animationend 回调回收**
+      几十条同时结束时，主线程在同一帧里排队改样式 ⇒ 尖峰卡顿。
+
+   ③ **top 纯随机** ⇒ 互相压、密度忽高忽低 ⇒ 主观上"一顿一顿"。
+
+   ✅ 新方案（条数一条没减，池 26→40）：
+
+   · **分轨**：把可用高度切成 LANES 条轨道，每条弹幕占一条轨道。
+     同一轨道上，**新的一条必须等前一条走完一段才发**（minGap），
+     所以永远不会压字；相邻轨道天然错开 ⇒ 密度稳定、读着顺。
+
+   · **动画重启用"换名字"而不是"清空+重排"**：
+     预注册 dmA / dmB 两个一模一样的 keyframes，每 spawn 交替用。
+     换 animation-name 本身就会让动画重新开始，**不需要读 offsetWidth**，
+     强制重排彻底消失。（这是消除卡顿的关键一手。）
+
+   · **回收不碰 JS**：
+     keyframes 终点就停在屏幕外（translateX(-dist)），
+     加 animation-fill-mode: forwards 让它留在那儿；
+     池化靠"这条轨道到期了就直接复用"，不用 animationend。
+     ⇒ 主线程在稳态下**零回调**。
+
+   · 时长/距离仍然走 CSS 变量，跟窗口宽联动。
+   ══════════════════════════════════════════════════════════════════════ */
+const DM_POOL_SIZE = 40          // 2026-10-25：26 → 40（主人要求不降量）
+const DM_LANES = 7               // 局域弹幕只在她附近飘，7 条轨道够用
 const pool = []
+const laneFreeAt = new Array(DM_LANES).fill(0)   // 每条轨道"下一个可发时刻"
 let poolIdx = 0
+let dmFlip = 0                   // 0/1 交替，用来切换 dmA / dmB
 
 function buildPool() {
   if (pool.length) return
@@ -815,47 +866,88 @@ function buildPool() {
     const el = document.createElement('div')
     el.className = 'dm'
     el.style.display = 'none'
-    // animationend 一到就归位（CSS 动画的回调，比 Web Animations 的 onfinish 轻）
-    el.addEventListener('animationend', () => { el.style.display = 'none' })
+    // ⚠️ 注意：**没有** animationend 监听。回收靠轨道到期直接复用，
+    //    主线程稳态零回调（旧版的回调排队就是尖峰卡顿的来源）。
     danmakuEl.appendChild(el)
     pool.push(el)
   }
 }
 
+/** 取一条已经飞完的（或最旧的）池元素来复用。不依赖 animationend。 */
+function takeFreeEl(now) {
+  // 先按轮转找一条"显示着但早就该飞完了"的
+  for (let i = 0; i < DM_POOL_SIZE; i++) {
+    const el = pool[(poolIdx + i) % DM_POOL_SIZE]
+    const until = Number(el.__until || 0)
+    if (el.style.display === 'none' || until < now) {
+      poolIdx = (poolIdx + i + 1) % DM_POOL_SIZE
+      return el
+    }
+  }
+  return null            // 全在飞（不该发生：轨道数 < 池），这一拍不发
+}
+
 function spawnDanmaku(startX) {
   if (danmakuEl.style.display === 'none') return
   buildPool()
-  // 从池里轮着拿：全都在跑就跳过这一条（宁可少一条，也不掉帧）
-  const el = pool[poolIdx % DM_POOL_SIZE]
-  poolIdx++
-  if (el.style.display !== 'none') return
+  const now = performance.now()
+
+  // ① 选轨道：挑"最早空出来"的那条；还没到就等（这一拍不发，不硬塞）
+  let lane = 0
+  for (let i = 1; i < DM_LANES; i++) if (laneFreeAt[i] < laneFreeAt[lane]) lane = i
+  if (laneFreeAt[lane] > now) return
+
+  const el = takeFreeEl(now)
+  if (!el) return
 
   el.textContent = pick(P('danmaku'))
-  // ⭐ 字体回到初版观感：17–30px（局域弹幕也要看得清）
-  el.style.fontSize = `${17 + Math.floor(Math.random() * 14)}px`
-  // 局域弹幕只在**她自己那块区域**的高度里飘
-  const topLimit = Math.max(40, window.innerHeight * 0.58)
-  el.style.top = `${8 + Math.random() * topLimit}px`
-  el.style.left = `${startX !== undefined ? startX : window.innerWidth}px`
+  // 字体回到初版观感：17–30px（局域弹幕也要看得清）
+  const fs = 17 + Math.floor(Math.random() * 14)
+  el.style.fontSize = `${fs}px`
   el.style.color = pick(DM_COLORS)
-  // 速度跟窗口宽走：小窗慢一点才看得清，大窗快一点才不堆
+
+  // ② 轨道定位（不再随机 top）：每条轨道一个高度带，垂直居中于带内
+  const vh = window.innerHeight
+  const usable = Math.max(60, vh * 0.62)          // 局域弹幕只在她周围这一块
+  const laneH = usable / DM_LANES
+  const top = 6 + lane * laneH + Math.max(0, (laneH - fs) / 2)
+  el.style.top = `${Math.round(top)}px`
+  el.style.left = `${startX !== undefined ? startX : window.innerWidth}px`
+
+  // ③ 距离/时长：跟窗口宽联动
   const dist = window.innerWidth + 260
-  const dur = 7 + Math.random() * 5
+  const dur = (7 + Math.random() * 4) * 1000      // ms，下面用来算轨道占用
   el.style.setProperty('--dm-dist', `-${dist}px`)
-  el.style.setProperty('--dm-dur', `${dur}s`)
-  // 触发重排让 animation 重新开始（复用元素必须清掉再设）
+  el.style.setProperty('--dm-dur', `${(dur / 1000).toFixed(2)}s`)
+
+  // ④ 🔴 重启动画**不靠** 清空+offsetWidth，而是换 keyframe 名（dmA/dmB 交替）。
+  //    换名字本身就会重启动画 ⇒ 没有强制同步重排，这是去掉卡顿的关键一步。
+  dmFlip ^= 1
   el.style.animation = 'none'
-  void el.offsetWidth
-  el.style.animation = ''
+  el.style.animationName = dmFlip ? 'dmA' : 'dmB'
+  el.style.animationDuration = `${(dur / 1000).toFixed(2)}s`
+  el.style.animationTimingFunction = 'linear'
+  el.style.animationFillMode = 'forwards'
+  el.style.animationIterationCount = '1'
   el.style.display = 'block'
+
+  // ⑤ 记账：这条轨道要占用多久（走完 + 140ms 间隔），供下一次挑轨道
+  el.__until = now + dur + 140
+  laneFreeAt[lane] = el.__until
 }
 
 let dmTimer = null
 /** 当前弹幕模式：'off' | 'local' | 'full' */
 let danmakuMode = 'off'
+/** 主人亲手改过弹幕模式的时刻（+静默期）—— 期间不接受状态文件回灌的旧值。
+ *  见下面轮询里的长注释：这就是"开了又自己关掉"的主因。 */
+let danmakuUserUntil = 0
+const DM_GRACE_MS = 15_000
 
 function setDanmakuMode(mode, fromState) {
   mode = (mode === 'full' || mode === 'local') ? mode : 'off'
+  // 用户亲手点的（不是状态回灌）⇒ 进入静默期，别让 2 秒后的轮询把它顶掉
+  if (!fromState) danmakuUserUntil = Date.now() + DM_GRACE_MS
   if (mode === danmakuMode) return
   danmakuMode = mode
   state.cfg = state.cfg || {}
@@ -870,7 +962,23 @@ function setDanmakuMode(mode, fromState) {
     }
   } else {
     danmakuEl.style.display = 'none'
+    // 🔴🔴🔴 2026-10-25 晚 主人：「弹幕模式，出问题了，会消失」
+    //
+    //   真因就在下面这两行的**顺序**上（一个典型的池化 + 清 DOM 冲突）：
+    //     danmakuEl.innerHTML = '';          ← 把 26 个弹幕节点从文档上摘掉
+    //     pool 数组里那 26 个引用**还在**     ← 但它们已经不在页面上了
+    //   下次再开弹幕时 buildPool() 第一行是 `if (pool.length) return` ——
+    //   pool 非空 ⇒ 直接返回 ⇒ **一个节点都不会重新挂到 DOM 上**。
+    //   于是"关一次再开"之后，spawn 一直在跑、池一直在轮，但屏幕上一条也看不见。
+    //   主人描述成"会消失"完全准确：它确实还在跑，只是不在页面上。
+    //
+    //   全屏弹幕那边（danmaku.html）有 `pool.length = 0`，所以它没这个病 ——
+    //   两边实现不一致，这就是漏掉的原因。
+    //
+    //   ✅ 修法：清 DOM 的同时**把池也作废**，让 buildPool() 下次重新建。
     danmakuEl.innerHTML = ''
+    pool.length = 0
+    poolIdx = 0
     if (dmTimer) { clearInterval(dmTimer); dmTimer = null }
   }
   // ② full 交给宿主的独立全屏窗（状态回灌时也要通知一遍，保证两端一致）
@@ -1009,6 +1117,11 @@ async function chatSend(text) {
     const j = await r.json()
     bubbleEl.classList.remove('is-thinking')
     if (!j.ok) throw new Error(j.error || 'bad')
+    // 🔴 第 5 条：从现在起等"我的真实回复"回来（下面 startReplyPoll 负责取）
+    //    sinceSeq 只用一次作起点，之后由服务端回 nextSeq 推进
+    if (typeof j.afterSeq === 'number') lastSeenSeq = j.afterSeq
+    else if (!lastSeenSeq) lastSeenSeq = 1
+    startReplyPoll()
     const reply = String(j.say || '').trim() || '嗯！'
     bubbleType(reply, 45)
     talkUntil = Date.now() + reply.length * 60 + 900
@@ -1029,6 +1142,151 @@ async function chatSend(text) {
   } finally {
     chatBusy = false
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   第 5/6 条：把「我的真实回复」接回页面
+   ──────────────────────────────────────────────────────────────────
+   主人：「文本输入能开其它会话输入，但是不能回话到上面文本框啊」
+         「出个用弹幕聊天模式…我输入对话，她就用弹幕回我，
+           防止我看不到可以滚动文字」
+
+   缺的那一环：/pet/chat 只回了"转达台词"，**没有**把 DSH 里我的真实回复带回来。
+   真实回复要等我这轮跑完（followup 的语义），所以只能**轮询**。
+
+   设计（三个人都在意的点：不丢字、不卡、不打扰）：
+     · /pet/reply?since=<seq> 只回**新增的 assistant 文本**，增量很小
+     · 1.5 秒一次；拿不到就静默重试（不弹任何报错，免得吵）
+     · 拿到之后：
+         ① 进上方气泡（主人说的"文本输出框"）—— 逐字冒
+         ② 如果开着**弹幕聊天模式**，同一段再切成片走弹幕（第 6 条）
+     · 上限：一次最多消化 3 条，多的合并成一条，防止刷屏
+   ══════════════════════════════════════════════════════════════════ */
+let lastSeenSeq = 0           // 上次已经展示到哪条
+let replyPollTimer = null
+let replyPollBusy = false
+let chatViaDanmaku = false    // 弹幕聊天模式开关（第 6 条）
+
+/** 把一段长文本切成适合弹幕的片（中文按标点断，不硬切词） */
+function splitForDanmaku(text, max = 22) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!t) return []
+  const parts = []
+  let buf = ''
+  for (const ch of t) {
+    buf += ch
+    const isBreak = /[。！？!?，,、；;\n]/.test(ch)
+    if (buf.length >= max || (isBreak && buf.length >= 8)) { parts.push(buf.trim()); buf = '' }
+  }
+  if (buf.trim()) parts.push(buf.trim())
+  return parts.filter(Boolean).slice(0, 12)   // 最多 12 片，再多也没人看
+}
+
+/** 弹幕回话：复用既有 spawnDanmaku 管线（分轨 + 无强制重排），逐片滚出来 */
+function speakViaDanmaku(text) {
+  const parts = splitForDanmaku(text)
+  if (!parts.length) return
+  // 先确保局域弹幕层是开着的（否则 spawnDanmaku 直接 return，等于没回）
+  const wasOff = danmakuEl.style.display === 'none'
+  if (wasOff) {
+    danmakuEl.style.display = 'block'
+    buildPool()
+  }
+  let i = 0
+  const feed = () => {
+    if (i >= parts.length) {
+      // 说完之后：如果本来是关着的，收回去（不改变主人的设置）
+      if (wasOff) setTimeout(() => { if (danmakuEl.style.display !== 'none') danmakuEl.style.display = 'none' }, 1200)
+      return
+    }
+    // 回话片用固定颜色、比普通弹幕更显眼（这是"我要能看见"的那条）
+    const px = pick(DM_COLORS)
+    // 借 spawnDanmaku 的分轨/复用，但内容要指定 —— 用一次性 override
+    spawnDanmakuText(parts[i], px)
+    i++
+    setTimeout(feed, 520)
+  }
+  feed()
+}
+
+/** 指定文字 + 颜色的弹幕（复用同一条管线，只是内容由我们给） */
+function spawnDanmakuText(text, color) {
+  if (danmakuEl.style.display === 'none') return
+  buildPool()
+  const now = performance.now()
+  let lane = 0
+  for (let i = 1; i < DM_LANES; i++) if (laneFreeAt[i] < laneFreeAt[lane]) lane = i
+  if (laneFreeAt[lane] > now) return
+  const el = takeFreeEl(now)
+  if (!el) return
+  el.textContent = String(text)
+  const fs = 18 + Math.floor(Math.random() * 8)
+  el.style.fontSize = `${fs}px`
+  el.style.color = color || '#7FE3FF'
+  // 回话弹幕加一个描边更重的样式，保证在桌面上也看得清
+  el.style.textShadow = '0 0 6px rgba(0,0,0,.95), 0 2px 3px rgba(0,0,0,.95)'
+  const vh = window.innerHeight
+  const usable = Math.max(60, vh * 0.62)
+  const laneH = usable / DM_LANES
+  el.style.top = `${Math.round(6 + lane * laneH + Math.max(0, (laneH - fs) / 2))}px`
+  el.style.left = `${window.innerWidth}px`
+  const dist = window.innerWidth + 260
+  const dur = 8000
+  el.style.setProperty('--dm-dist', `-${dist}px`)
+  el.style.setProperty('--dm-dur', `${(dur / 1000).toFixed(2)}s`)
+  dmFlip ^= 1
+  el.style.animation = 'none'
+  el.style.animationName = dmFlip ? 'dmA' : 'dmB'
+  el.style.animationDuration = `${(dur / 1000).toFixed(2)}s`
+  el.style.animationTimingFunction = 'linear'
+  el.style.animationFillMode = 'forwards'
+  el.style.animationIterationCount = '1'
+  el.style.display = 'block'
+  el.__until = now + dur + 140
+  laneFreeAt[lane] = el.__until
+}
+
+/** 轮询"我的真实回复"进来没有 */
+function startReplyPoll() {
+  if (replyPollTimer) return
+  replyPollTimer = setInterval(async () => {
+    if (replyPollBusy) return
+    // 只在"主人刚说过话"之后才轮询，闲着不打扰 DSH
+    if (!lastSeenSeq) return
+    replyPollBusy = true
+    try {
+      const base = apiBase()
+      if (!base) return
+      const r = await fetch(`${base}/pet/reply?since=${lastSeenSeq}`, { cache: 'no-store' })
+      const j = await r.json()
+      if (!j || !j.ok) return
+      if (typeof j.nextSeq === 'number' && j.nextSeq > lastSeenSeq) lastSeenSeq = j.nextSeq
+      const texts = Array.isArray(j.replies) ? j.replies.filter((t) => String(t || '').trim()) : []
+      if (!texts.length) return
+      // 多条合并，防止一次刷爆气泡
+      const merged = texts.slice(0, 3).join(' ')
+      // ① 上面那个文本框（气泡）—— 这是主人第 5 条要的
+      bubbleType(merged, 28)
+      // ② 弹幕聊天模式：同一段再滚一遍（第 6 条）
+      if (chatViaDanmaku) speakViaDanmaku(merged)
+      // 她也"说"这句话的时候，嘴动一下
+      talkUntil = Date.now() + merged.length * 60 + 1200
+    } catch (e) {
+      // 静默：这是后台轮询，失败不该弹错误气泡打扰主人
+    } finally {
+      replyPollBusy = false
+    }
+  }, 1500)
+}
+
+/** 开/关"弹幕聊天模式"（第 6 条）—— 她回我的话走弹幕 */
+function setChatViaDanmaku(on) {
+  chatViaDanmaku = Boolean(on)
+  state.cfg = state.cfg || {}
+  state.cfg.chatViaDanmaku = chatViaDanmaku
+  cmdWrite({ chatViaDanmaku: chatViaDanmaku })
+  bubble(chatViaDanmaku ? '弹幕聊天模式开了 —— 鱼用弹幕回你 (๑•̀ㅂ•́)و✧' : '弹幕聊天模式关了', 3500)
+  return chatViaDanmaku
 }
 
 /* 老的本地小脑（降级用；接口不通时才有机会跑） */
@@ -1097,11 +1355,41 @@ function bubbleType(text, speed) {
    ══════════════════════════════════════════════════════════════ */
 const chatSendBtn = $('chat-send')
 
-/** textarea 按内容自适应高度（1 行起，最多 max-height 顶住内部滚动） */
+/** textarea 按内容自适应高度。
+ *
+ * 🔴🔴 2026-10-25 晚 主人：「宠物下面的对话框要固定位置不要因为点击对话框就自动弹上去了，
+ *    该变的是文本输出框，应该弹在下面」+「文本框只能输入三行就不变化了」
+ *
+ * 旧版有两个病，都在这个函数和 CSS 里：
+ *   ① 上限写成 60px —— 13px 字号 / 19px 行高下只够 **3 行**，
+ *      第 4 行开始内部滚（主人说的"只能输入三行就变化了"）。
+ *   ② #talkbar 是 align-items:flex-end 的绝对定位块，这里改 style.height 时
+ *      底边不动、**顶边往上蹿** ⇒ 视觉上"点一下框就弹上去"，
+ *      还会盖到她身上（因为那条缝只有 34px）。
+ *
+ * 现在：
+ *   · 上限跟 CSS 的 max-height 保持一致（96px ≈ 5 行），读 CSS 变量而不是写死，
+ *     以后改样式不会两边打架；
+ *   · #talkbar 贴缝底（bottom:6px）+ flex-direction:column，
+ *     所以长高时**只会往上长，底座和按钮条都不动**；
+ *   · 高度只改 textarea 自己，**不碰窗口、不碰她、不碰按钮条**。
+ *   ⚠️ scrollHeight 在 max-height 生效后会等于 max-height，所以先归位 'auto'
+ *      再读，否则永远量到上限。
+ */
 function autoGrow() {
+  const cs = getComputedStyle(chatInput)
+  const maxH = parseFloat(cs.maxHeight) || 96
+  const minH = parseFloat(cs.minHeight) || 34
+  // ⚠️ 必须先归位再量，否则 max-height 生效后 scrollHeight 永远等于上限。
   chatInput.style.height = 'auto'
-  const h = Math.min(chatInput.scrollHeight, 60)
-  chatInput.style.height = Math.max(26, h) + 'px'
+  // 🔴 2026-10-25 探针实测：在 flex 容器里 scrollHeight 会被压缩成 34（永远不长）。
+  //    CSS 已把 textarea 改成 display:block，这里读到的才是真实内容高。
+  //    再兜一层：scrollHeight 若小于 minH，用 minH（空内容时 scrollHeight 可能偏小）。
+  const need = Math.max(chatInput.scrollHeight, minH)
+  const target = Math.min(need, maxH)
+  chatInput.style.height = target + 'px'
+  // 到顶之后内部滚，不涨高度（主人要的是"能多行"，不是"无限长"）
+  chatInput.style.overflowY = need > maxH ? 'auto' : 'hidden'
 }
 
 /** 请求键盘焦点（分层窗必须让宿主 Activate 才行）。
@@ -1179,6 +1467,19 @@ function doAction(act) {
     const cur = (state.cfg && state.cfg.danmakuMode) || 'off'
     const next = cur === 'off' ? 'local' : cur === 'local' ? 'full' : 'off'
     setDanmakuMode(next)
+    return
+  }
+  // ⭐ 弹幕聊天模式（主人 2026-10-25 第 6 条）：
+  //    「出个用弹幕聊天模式…我输入对话，她就用弹幕回我，
+  //      防止我看不到可以滚动文字」
+  //    开了之后：她回我的话 → 上面气泡 + 同时切成片走弹幕，双通道不漏字。
+  if (act === 'chat-danmaku') {
+    const on = setChatViaDanmaku(!chatViaDanmaku)
+    // 开了之后确保局域弹幕层是亮的（不然弹幕回话看不见）
+    if (on && danmakuEl.style.display === 'none') {
+      danmakuEl.style.display = 'block'
+      buildPool()
+    }
     return
   }
   // ⭐ 人格直选（主人 2026-10-25：「人格应该有二级选项可以选择」）

@@ -3745,6 +3745,71 @@ export function apply(ctx, config) {
       return sendJson(res, 200, r)
     }
 
+    /* ── 🔴 第 5 条：把「我的真实回复」送回桌宠的那个文本框
+     *
+     * 主人 2026-10-25 晚：「文本输入能开其它会话输入，但是不能回话到上面文本框啊」
+     *
+     * 缺的那一环：/pet/chat 只返回"转达台词"（她替主人把话带过去），
+     * 而**我的真实回复**要等我这轮跑完、下一轮读到那条 user 消息、再写 assistant 消息。
+     * 页面从来没去读 assistant ⇒ 主人永远只看到"好，鱼这就去跟他说"。
+     *
+     * 这个接口就干一件事：告诉我"你上次看到 seq N 之后，有没有新的 assistant 文本"。
+     *   GET /pet/reply?since=<seq>
+     *   → { ok, replies: [string], nextSeq: number }
+     *
+     * 🔴 三条红线：
+     *   ① 只读，绝不改会话
+     *   ② 只取**这个会话里 seq > since 的 assistant 文本**，不搬别的东西
+     *   ③ 拿不到就 ok:false + 原因，绝不编一句假的"我回了"
+     *
+     * @returns {{ok:boolean, replies?:string[], nextSeq?:number, reason?:string}}
+     * ── */
+    if (req.method === 'GET' && path === '/api/douyin-duty/pet/reply') {
+      try {
+        const u = new URL(req.url, 'http://x')
+        const since = Math.max(0, Number(u.searchParams.get('since') || 0) || 0)
+
+        // 找当前 live agent 的会话
+        const agents = (() => { try { return ctx.get('agents') } catch { return null } })()
+        if (!agents || typeof agents.list !== 'function') {
+          return sendJson(res, 200, { ok: false, reason: 'agents 服务不可用' })
+        }
+        const roots = (() => { try { return agents.roots?.() || [] } catch { return [] } })()
+        const list = agents.list() || []
+        const target = (roots.length ? roots : list).filter(Boolean).pop()
+        if (!target) return sendJson(res, 200, { ok: false, reason: '没有 live agent' })
+        const sess = target.session
+        if (!sess || typeof sess.snapshotEvents !== 'function') {
+          return sendJson(res, 200, { ok: false, reason: 'session.snapshotEvents 不可用' })
+        }
+
+        const events = sess.snapshotEvents() || []
+        const START = Math.min(Math.max(since + 1, 0), Math.max(events.length, 0))
+        const replies = []
+        let nextSeq = since
+        for (let i = START; i < events.length; i++) {
+          const ev = events[i]
+          if (!ev) continue
+          if (typeof ev.seq === 'number' && ev.seq > nextSeq) nextSeq = ev.seq
+          if (ev.type !== 'assistant/message') continue
+          const blocks = ev.data?.message?.content ?? ev.data?.content ?? []
+          const text = blocks.filter((b) => b && b.type === 'text').map((b) => b.text || '').join('').trim()
+          // 只认**看得见的整段话**：空的和超长的（工具输出等）都跳过
+          if (!text) continue
+          if (text.length > 4000) continue
+          replies.push(text)
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          replies: replies.slice(-4),        // 最多 4 条，页面那边还会再合并
+          nextSeq: Math.max(nextSeq, since),
+          sessionId: String(target.id || ''),
+        })
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, reason: String(e?.message ?? e) })
+      }
+    }
+
     /* ── ⭐ 她的对话（主人 2026-10-24 的设计初衷）
      * 「我跟她说话你是怎么设计的，收到消息乱回？」——原来只有 4 条正则 + 随机兜底。
      * 现在两层：
@@ -3774,11 +3839,24 @@ export function apply(ctx, config) {
         if (delivered.ok) {
           log(`桌宠对话[转达给DSH会话]：${q.slice(0, 40)} → session ${delivered.sessionId}（${delivered.mode}）`)
           try { diaryAdd(stateDir, `主人通过小鱼说：${q}`, { kind: 'relay' }) } catch { /* 日记失败不影响 */ }
+          // 🔴 第 5 条：告诉页面"从哪个 seq 开始等我的回复"。
+          //    这是页面轮询 /pet/reply?since=N 的起点 —— 给了它，
+          //    页面才能把我这轮跑完之后写下的 assistant 文本接回上面的文本框。
+          let afterSeq = 0
+          try {
+            const agents = ctx.get('agents')
+            const list = agents?.list?.() || []
+            const roots = agents?.roots?.() || []
+            const t = (roots.length ? roots : list).filter(Boolean).pop()
+            const evs = t?.session?.snapshotEvents?.() || []
+            afterSeq = evs.length ? Number(evs[evs.length - 1].seq) || 0 : 0
+          } catch { /* 拿不到就从 1 开始，页面自己会推进 */ }
           return sendJson(res, 200, {
             ok: true, brain: 'session', relayed: true, mode: delivered.mode,
             sessionId: delivered.sessionId,
             queued: delivered.queued === true,
             runningNow: delivered.runningNow === true,
+            afterSeq: Math.max(1, afterSeq + 1),   // 只关心之后的事件
             // 她只是"传话"的那个，说一句就够，不要抢答主人要问我的事。
             // 🔴 而且措辞要**如实**：我只保证"话排进去了"，
             //    不保证"他正在回你"——他这一轮跑完才会读到。
