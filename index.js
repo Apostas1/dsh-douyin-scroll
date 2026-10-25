@@ -3072,23 +3072,32 @@ export function apply(ctx, config) {
       ].join('\n')
       let wake = null
       let via = ''
+      let fellBack = false
       if (cfg.chatWatchTarget === 'duty') {
-        // 值班鱼模式：通过 Agent Teams 服务把消息送进队友收件箱（它自动醒来跑一轮）
+        // 值班鱼模式：投给插件自有的常驻会话（它自己醒来跑一轮）
         wake = await deliverToDutyFish(wakeText)
         via = '值班鱼'
         if (!wake.ok) {
           // 退回前台 —— 消息不能因为我这边模式选错而没人接
           chatWatchLog(`值班鱼不在（${wake.reason}）—— 退回前台会话`)
           wake = await tryDeliverToSession(wakeText)
-          via = '前台（值班鱼缺席回退）'
+          via = '前台'
+          fellBack = true
         }
       } else {
         wake = await tryDeliverToSession(wakeText)
         via = '前台'
       }
       if (wake && wake.ok) {
-        toastState = `已叫醒${via}（${wake.sessionId || wake.target || '?'}，${wake.runningNow ? '在跑，排队下一轮' : '下一轮就读'}）`
-        chatWatchLog(`已转给${via}（${wake.sessionId ? 'agent ' + wake.sessionId : wake.target || ''}${wake.runningNow ? '，运行中排队' : '，空闲直进'}）`)
+        // ⚠️ 文案必须能一眼看出「走的哪条路」，别把"回退"和"值班会话 id"混在一句里
+        //    （2026-10-25 深夜踩过：状态屏写成「已叫醒前台（值班鱼缺席回退）（douyin-duty-fish-v1）」
+        //     前后自相矛盾，排障时以为值班鱼已经接住了）
+        const who = wake.sessionId || wake.target || '?'
+        const when = wake.runningNow ? '在跑，排队下一轮' : '下一轮就读'
+        toastState = fellBack
+          ? `⚠️ 值班鱼没接住（回退了）—— 这条投进前台会话（${who}，${when}）`
+          : `已叫醒${via}（${who}，${when}）`
+        chatWatchLog(`已转给${via}${fellBack ? '（值班鱼缺席回退）' : ''}（${wake.sessionId ? 'agent ' + wake.sessionId : wake.target || ''}${wake.runningNow ? '，运行中排队' : '，空闲直进'}）`)
       } else {
         toastState = `⚠️ 看见了但没能叫醒：${(wake && wake.reason) || '原因未知'}（消息已记进 chat-watch.log，不会丢）`
         chatWatchLog(`⚠️ 转给${via}失败：${(wake && wake.reason) || '原因未知'}`)
@@ -3355,16 +3364,30 @@ export function apply(ctx, config) {
   const dutySessionEnsure = async () => {
     if (_dutyHandle?.agent) {
       // live 的直接用；但 status 得活着（dispose 过的 agent 会被换掉）
-      try { if (_dutyHandle.agent.status) return _dutyHandle } catch { /* 落到重拉 */ }
+      // ⚠️ 2026-10-25 深夜实测：这里**不能只看 status 真值**就 return/重拉 ——
+      //    之前写 `if (agent.status) return` 时，只要 agent 被回收一次就静默落到
+      //    get→resume→create 全失败链，最后 `return null` 且**一个字都不打**，
+      //    上层只知道"值班鱼缺席"，日志里查不出为什么（踩过：15:22 那条莫名回退前台）。
+      //    现在：任何一步失败都必须留 log + 带上一步拿到的句柄继续用（能 followup 就够了）。
+      let st = null
+      let stErr = ''
+      try { st = _dutyHandle.agent.status } catch (e) { stErr = String(e?.message ?? e) }
+      if (st) return _dutyHandle
+      if (stErr) log(`值班会话：句柄的 status 读不出来了（${stErr.slice(0, 80)}）—— 重新拉`)
+      else log(`值班会话：句柄还拿着但没有 status（可能被回收）—— 重新拉`)
     }
-    if (_dutyBooting) return null
+    if (_dutyBooting) {
+      log('值班会话：另一拍正在拉，这拍先跳过（不重复 create）')
+      return null
+    }
     _dutyBooting = true
     try {
-      const agents = (() => { try { return ctx.get('agents') } catch { return null } })()
-      if (!agents || typeof agents.create !== 'function') return null
+      const agents = (() => { try { return ctx.get('agents') } catch (e) { log(`值班会话：取 agents 服务失败 ${e?.message ?? e}`); return null } })()
+      if (!agents) return null
+      if (typeof agents.create !== 'function') { log('值班会话：宿主 agents 没有 create（版本太旧？）'); return null }
       // ① 先找 live（插件重载后 create 重复 id 会炸，必须先 get）
       let agent = null
-      try { agent = typeof agents.get === 'function' ? agents.get(DUTY_SESSION_ID) : null } catch { agent = null }
+      try { agent = typeof agents.get === 'function' ? agents.get(DUTY_SESSION_ID) : null } catch (e) { log(`值班会话：agents.get 失败 ${String(e?.message ?? e).slice(0, 80)}`) }
       if (agent) {
         _dutyHandle = { agent, dispose: null }
         log(`值班会话：找到 live agent ${DUTY_SESSION_ID}，直接用`)
@@ -3406,10 +3429,29 @@ export function apply(ctx, config) {
         }
       }
       // ④ 真没有 → create（这个 sessionId 一生只走一次）
-      _dutyHandle = await agents.create({ sessionId: DUTY_SESSION_ID, ...baseOpts, setup: mkSetup })
-      _dutyBriefed = false
-      log(`值班会话：新拉起 ${DUTY_SESSION_ID}（cwd=${DUTY_CWD}，provider=${provider || '默认'}）`)
-      return _dutyHandle
+      try {
+        _dutyHandle = await agents.create({ sessionId: DUTY_SESSION_ID, ...baseOpts, setup: mkSetup })
+        _dutyBriefed = false
+        log(`值班会话：新拉起 ${DUTY_SESSION_ID}（cwd=${DUTY_CWD}，provider=${provider || '默认'}）`)
+        return _dutyHandle
+      } catch (e) {
+        const msg = String(e?.message ?? e)
+        // ⚠️ 「already registered / identity exists / 已存在」= 会话其实还活着，
+        //    只是 get() 拿不到（比如它挂在别的 ownerCtx 下）。这种情况**不能算失败**：
+        //    再试一次 get，拿到就用 —— 比静默回退前台强一百倍。
+        if (/already registered|already exists|identity|已存在|重复/i.test(msg)) {
+          log(`值班会话：create 说 id 已存在（${msg.slice(0, 90)}）—— 再 get 一次试试`)
+          try {
+            const again = typeof agents.get === 'function' ? agents.get(DUTY_SESSION_ID) : null
+            if (again) {
+              _dutyHandle = { agent: again, dispose: null }
+              log(`值班会话：get 第二次拿到了 ${DUTY_SESSION_ID}，直接用`)
+              return _dutyHandle
+            }
+          } catch { /* 落到下面的失败 */ }
+        }
+        throw e
+      }
     } catch (e) {
       log(`值班会话拉起失败：${String(e?.message ?? e).slice(0, 160)}`)
       _dutyHandle = null
