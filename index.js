@@ -487,6 +487,67 @@ export function apply(ctx, config) {
   const cfg = loadCfg()
   const refreshCfg = () => { Object.assign(cfg, loadCfg()) }
   /**
+   * 🔴🔴🔴 2026-10-26 凌晨最后一块补丁：**挂载时自己把开关恢复回上次的状态**。
+   *
+   *   为什么还要这一层（DISK_WINS 不是已经挡住了吗）：
+   *     DISK_WINS 只保证"表单和磁盘不一致时以磁盘为准"。但如果**磁盘自己被写成了
+   *     false**（某次 patch 只带了 chatWatch:false，或者表单同步把 falsy 写回去了），
+   *     那就没有真值可依了 —— 今晚实测就这么丢过几次，用户侧表现是
+   *     "刚才还好好回着，重启后不回了"。
+   *
+   *   做法：**额外记一份"上次是开着的"标记**（intent 文件，独立于 config.json）。
+   *     挂载时：intent 说"上次开着" + 现在读到 false + 有登录 + 有私信对象
+   *             ⇒ 自动开回来，并记日志说明原因。
+   *     ⚠️ 用户主动关掉时也会同步清掉 intent（下面 saveCfg 里），所以
+   *        **不会出现"用户关了它自己又打开"** —— 这是这条逻辑的关键，
+   *        否则会变成一个关不掉的开关（比不工作更让人火大）。
+   */
+  const chatIntentFile = join(stateDir, 'chat-watch-intent.json')
+  const readChatIntent = () => {
+    try { return readJson(chatIntentFile, {}) || {} } catch { return {} }
+  }
+  const writeChatIntent = (on) => {
+    try { writeJson(chatIntentFile, { wantOn: Boolean(on), at: new Date().toISOString() }) } catch { /* 写不进就算了 */ }
+  }
+  // 挂载自愈：只有"上次明确开着"才恢复，且必须真的能干活（有登录 + 有对象）
+  try {
+    const intent = readChatIntent()
+    const canWork = Boolean(String(cfg.dmToId || '').trim()) && hasCredential(stateDir)
+    // 🔍 诊断行（常驻保留，成本一行，省掉"它为什么没自动开"的整晚排查）：
+    log(`[自愈] intent=${JSON.stringify(intent.wantOn)} cfg=${cfg.chatWatch} canWork=${canWork}（dmToId=${String(cfg.dmToId || '').length}字 登录=${hasCredential(stateDir)}）`)
+    if (intent.wantOn === true && cfg.chatWatch === false && canWork) {
+      cfg.chatWatch = true
+      /**
+       * ⚠️ 这里**不能调 saveCfg** —— 它定义在本行之后（第 556 行左右），
+       *    此刻还在 TDZ 里，一调就抛 ReferenceError，然后被下面的 catch 吞掉：
+       *    表现为"自愈完全不生效、日志一个字都没有"（2026-10-26 凌晨实测踩到，
+       *    当时磁盘和 intent 都设好了、重载两次都没动静，就是死在这里）。
+       *    所以这一步直接读盘→改→写盘，绕开 TDZ。
+       */
+      try {
+        const onDisk = readJson(cfgFile, {})
+        onDisk.chatWatch = true
+        writeJson(cfgFile, onDisk)
+        log('聊天模式：检测到上次是开着的，已自动恢复（重启不该让它偷偷停掉）')
+      } catch (e) { log(`聊天模式：自动恢复写盘失败（不影响其他功能）：${e?.message ?? e}`) }
+    } else if (cfg.chatWatch === true && intent.wantOn !== true) {
+      // 首次升级/首次跑：把当前状态作为意图记下来
+      writeChatIntent(true)
+    }
+    /**
+     * ⚠️ 剩余情况：intent 说"想开"、但**现在开不了**（没登录 / 没选人）。
+     *   这时**不许把 intent 改成 false** —— 用户没说要关，是条件不具备。
+     *   记一笔日志让人知道"想开但开不了，还差什么"，等条件恢复（扫码/选人）
+     *   下一拍自动开回来。这是"用户关不掉"和"用户开不成"之间唯一正确的取舍。
+     */
+    if (intent.wantOn === true && cfg.chatWatch === false && !canWork) {
+      const miss = []
+      if (!String(cfg.dmToId || '').trim()) miss.push('还没选私信对象')
+      if (!hasCredential(stateDir)) miss.push('还没登录')
+      log(`聊天模式：本来是开着的，但现在还差 ${miss.join('、')} —— 条件齐了会自动开回来`)
+    }
+  } catch (e) { log(`聊天模式自愈检查失败（不影响其他功能）：${e?.message ?? e}`) }
+  /**
    * 🔴🔴🔴 2026-10-25 又出一次事故（这次是主人抓的）：
    *   主人：「聊天模式怎么打开了，关闭不了」。
    *   查下来不是开关坏了 —— 是 **`dmToId` 被清空了**，而面板那句
@@ -551,6 +612,24 @@ export function apply(ctx, config) {
       }
     } catch (e) { log(`配置备份失败（不影响写入）：${e?.message ?? e}`) }
     writeJson(cfgFile, cfg)
+    /**
+     * ⭐ 记住"用户想让开关开着吗"（2026-10-26 凌晨）。
+     *   挂载自愈只看这份 intent，不看 config.json —— 因为 config.json 会被
+     *   别的写入路径意外改掉，而 intent 只有"用户动开关"这一条路会改。
+     *
+     *   🔴 关键两条：
+     *     ① **只有 patch 里明确带了 chatWatch 才算用户在动开关**，
+     *        其他地方顺手保存配置（改关键词、改私信对象）不能篡改这个意图，
+     *        否则用户点「关掉」→ 下次改别的设置 → intent 被顺手改成 true
+     *        ⇒ 挂载时又自己开回来，变成关不掉的开关。
+     *     ② **自愈自己写盘时必须带 keepIntent**（内部恢复 ≠ 用户改主意），
+     *        否则恢复动作会把 intent 覆盖成同一状态，看起来没错但一旦哪天
+     *        恢复失败就会丢掉"用户想开"这条意图，再也开不回来。
+     */
+    const keepIntent = opts?.keepIntent === true
+    if (!keepIntent && patch && Object.prototype.hasOwnProperty.call(patch, 'chatWatch')) {
+      writeChatIntent(cfg.chatWatch === true)
+    }
   }
   const saveCfgHost = async (patch) => {
     const attempt = async (fresh) => {

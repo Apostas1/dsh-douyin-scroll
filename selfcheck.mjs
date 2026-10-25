@@ -1239,6 +1239,25 @@ try {
     else bad('缺一键自救 —— 普通用户遇到问题只能干等')
     if (/need_user/.test(idxM) && /还差一步/.test(cliM)) ok('自救失败时明确告诉用户"还差哪一步"（不让用户自己猜）')
     else bad('自救失败没告诉用户该干嘛')
+    /* 🔴🔴 2026-10-26 凌晨：挂载自愈 + 不许变成"关不掉的开关"
+     *   自愈看的是独立的 intent 文件（chat-watch-intent.json），不是 config.json ——
+     *   因为 config.json 会被别的写入路径意外改掉。
+     *   而 intent **只有 patch 里明确带 chatWatch 时才更新** —— 否则用户点了关、
+     *   下次改别的设置顺手把 intent 改成 true，重启后自己开回来 = 关不掉（比坏更气人）。
+     */
+    if (/chatIntentFile/.test(idxM) && /wantOn/.test(idxM) && /intent\.wantOn === true && cfg\.chatWatch === false/.test(idxM)) ok('挂载时会自己把开关恢复回上次的状态（重启不再偷偷停掉）')
+    else bad('缺挂载自愈 —— 重启后开关可能被刷成 false，用户以为坏了')
+    if (/hasOwnProperty\.call\(patch, 'chatWatch'\)/.test(idxM)) ok('intent 只在用户真动开关时更新（不会变成关不掉的开关）')
+    else bad('intent 更新条件不对 —— 可能变成用户关不掉的开关（比不工作更气人）')
+    /* 🔴 2026-10-26 凌晨实测的隐蔽坑：UTF-8 BOM
+     *   PowerShell `Set-Content -Encoding UTF8` 写出的文件带 BOM（EF BB BF），
+     *   JSON.parse 遇 BOM 直接抛 ⇒ readJson 静默返回 fallback ⇒ 上层读到"空配置"。
+     *   表现极具欺骗性：文件内容肉眼完全正确，程序当它不存在。
+     *   实测：自愈三条件全满足却永不触发，日志 intent=undefined，查了两轮才定位。
+     */
+    const stateSrc = readIf(join(here, 'lib', 'state.mjs'))
+    if (/0xfeff/.test(stateSrc) && /charCodeAt\(0\)/.test(stateSrc)) ok('readJson 会剥 UTF-8 BOM（否则带 BOM 的 JSON 被当成空文件）')
+    else bad('readJson 不剥 BOM —— PowerShell 写出来的配置文件会被静默忽略（踩过）')
     if (/ownerCtx|生命周期挂在|插件重载不杀它/.test(idxM) || /照 headless runner 的用法/.test(idxM)) ok('值班会话生命周期说明在案（挂宿主根，不随插件重载而死）')
     else warn('值班会话生命周期说明缺失 —— 排障时容易误判')
     if (/TEAM_LEAD_REQUIRED|Agent Teams 队友 ✗|插件不是 Lead/.test(idxM)) ok('记录了为什么不用 Agent Teams（TEAM_LEAD_REQUIRED，roster 挂 Lead 会话名下）')
