@@ -1202,6 +1202,17 @@ try {
       if (/data-e2e="conversation-item"/.test(imSend) && !/主/.test(imSend)) ok('im-send.mjs 选择器引号完好（没被批量替换弄坏）')
       else bad('im-send.mjs 选择器坏了（引号被换成别的字符）—— 发送会永远报"没登录"')
     } else bad('tools/im-send.mjs 不见了 —— 发送器没了')
+    // ⑥ 值班鱼投递（2026-10-25 深夜「探明呗」实测后接入）：双目标 + 缺席回退
+    if (/chatWatchTarget: z\.enum\(\['lead', 'duty'\]\)/.test(idxM) && /chatWatchTarget: 'lead'/.test(idxM)) ok('chatWatchTarget 双登记（zod enum + DEFAULTS）')
+    else bad('chatWatchTarget 没双登记 —— 投递目标开关点了没反应（同 chatWatch 事故口径）')
+    if (/deliverToDutyFish/.test(idxM) && /DUTY_FISH_TARGET = 'dm-duty-fish'/.test(idxM)) ok('值班鱼投递在（deliverToDutyFish → Agent Teams 队友）')
+    else bad('值班鱼投递缺失 —— 私信只能挤前台队列')
+    if (/退回前台/.test(idxM) && /值班鱼不在（\$\{wake\.reason\}）/.test(idxM)) ok('值班鱼缺席自动退回前台（消息绝不没人接）')
+    else bad('值班鱼缺席没有回退 —— 鱼不在时私信会石沉大海')
+    if (/agentTeams/.test(idxM) && /sendMessage\(lead/.test(idxM)) ok('值班鱼通道走宿主 Agent Teams 服务（sendMessage）')
+    else bad('值班鱼通道没用 Agent Teams 服务')
+    if (/消息投给/.test(cliM) && /值班小鱼/.test(cliM) && /chatWatchTarget/.test(cliM)) ok('面板有「消息投给」切换（前台/值班小鱼）')
+    else bad('面板缺投递目标切换 —— 主人没法选消息投给谁')
   } catch (e) { bad(`4m 检查跑不起来：${e.message}`) }
 
   /* ═══ 2026-10-25 拆分守卫（原来这里是一大段桌宠检查）═══

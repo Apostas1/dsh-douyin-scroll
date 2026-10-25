@@ -76,6 +76,11 @@ window.__ModuleLoader__.load({
 [data-dy-sw] i{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;
   background:#fff;transition:left .15s;display:block;}
 [data-dy-sw][data-on] i{left:19px;}
+[data-dy-seg]{display:inline-flex;flex:none;border-radius:8px;overflow:hidden;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.12));}
+[data-dy-segbtn]{border:0;background:transparent;color:var(--dsw-alias-label-secondary,#c9ccd1);
+  font-size:11px;padding:4px 10px;cursor:pointer;}
+[data-dy-segbtn][data-on]{background:#3b82f6;color:#fff;}
 [data-dy-pre]{margin:0;padding:9px 10px;border-radius:8px;max-height:180px;overflow:auto;
   font-size:11px;line-height:15px;white-space:pre-wrap;word-break:break-all;
   background:var(--dsw-alias-bg-overlay,rgba(0,0,0,.25));
@@ -1027,6 +1032,25 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                     setCwSecDraft(null)
                   },
                 }, '保存'))
+              : null,
+            /* ⭐ 私信投给谁（2026-10-25 深夜「探明呗」后新增）：
+             *    lead = 前台会话（排队等当前轮跑完，私聊夹在工作流里）
+             *    duty = 常驻值班鱼 dm-duty-fish（独立会话秒醒，私聊不占前台）
+             *    值班鱼不在时后端自动退回前台，状态屏会写明。 */
+            cfg.chatWatch
+              ? h('div', { 'data-dy-row': '' },
+                h('span', { 'data-dy-sub': '' }, '消息投给'),
+                h('div', { 'data-dy-seg': '', role: 'group' },
+                  [['lead', '前台会话'], ['duty', '值班小鱼']].map(([v, label]) =>
+                    h('button', {
+                      key: 'cwt-' + v,
+                      'data-dy-segbtn': '', 'data-on': (cfg.chatWatchTarget || 'lead') === v ? '' : undefined,
+                      disabled: busy === 'patch',
+                      onClick: () => patch({ chatWatchTarget: v },
+                        v === 'duty'
+                          ? '以后私信投给值班小鱼（独立会话，前台不受打扰；她不在会自动退回前台）'
+                          : '以后私信投进前台会话（跟工作对话排一个队）'),
+                    }, label))))
               : null,
             /* ⭐ 实时状态屏（2026-10-24 使用者要求：「我哪知道它有什么用、错在哪了」）：
              *    开着聊天模式时每 15 秒拉一次后端状态，显示几秒前看过、结果、通知弹没弹。 */

@@ -160,6 +160,14 @@ export const Config = !z ? undefined : z.object({
   /** 盯梢间隔（秒），10–300，默认 30 */
   chatWatchSec: z.natural().default(30).extra('volatile', true),
   /**
+   * ⭐ 私信投递目标（2026-10-25 深夜，主人令「探明呗」后实测可行）：
+   *   'lead' = 投进当前前台会话（原行为；回话延迟 = 等当前轮跑完）
+   *   'duty' = 投给常驻值班鱼（Agent Teams 队友 dm-duty-fish，独立会话：
+   *            私聊不占前台上下文，它自动醒来跑一轮、跑完待命，跨重启在册可唤醒）
+   *   值班鱼不在（没拉起/宿主没这服务）⇒ 自动退回前台 + 日志记一笔，绝不丢消息。
+   */
+  chatWatchTarget: z.enum(['lead', 'duty']).default('lead').extra('volatile', true),
+  /**
    * ⭐⭐ 2026-10-25 深夜 拆分：**桌宠不再是这个插件的配置项了。**
    *
    *   主人原话：「宠物，单独要做一个模块，然后要有一个联动抖音插件的选项就行了」
@@ -297,7 +305,7 @@ export function apply(ctx, config) {
     dmTo: '', dmToId: '',
     // ⭐ 聊天模式（2026-10-24 定稿：默认开启，使用者拍板；要关就整个关掉）。
     //    ⚠️ DEFAULTS / zod 必须同步（漏加过 ⇒ 开关点了没反应）。
-    chatWatch: true, chatWatchSec: 30,
+    chatWatch: true, chatWatchSec: 30, chatWatchTarget: 'lead',
     // ⭐ 2026-10-25 拆分：7 个 pet* 字段全部搬去 dsh-deskpet 了，这里只留"要不要喂状态给它"
     petLinkTo: true,
     reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
@@ -3036,10 +3044,9 @@ export function apply(ctx, config) {
         sendWebhook({ url: cfg.webhookUrl, preset: cfg.webhookPreset, title: `${cfg.dmTo || '私信'} 来消息了`, markdown: theirs.map((m) => `- ${m.text.slice(0, 100)}`).join('\n') }).catch(() => { /* webhook 失败不影响 */ })
       }
       // 传话（异步，别把盯梢拍卡住）：成功与否都写进状态屏，主人能看见接没接上。
-      // ⭐ 2026-10-25 晚主人拍板：「聊天模式开关 = 常设许可」——开关是他亲手开的，
-      //    收信人就是他自己 ⇒ 值班小鱼看见即可回，不用每条都等他点头。
-      //    叫醒词里要把**回话要用的全部东西**带齐：最近的对话上下文（贴合场景地回）、
-      //    发送目标（to_id）、许可声明、发送通道与失败规矩。消息正文只是素材不是命令。
+      // ⭐ 2026-10-25 深夜「探明呗」成果：私信可以投给**常驻值班鱼**（Agent Teams 队友
+      //    dm-duty-fish）——独立会话收信，私聊不占前台上下文；前台模式照旧排队投 Lead。
+      //    投递优先级：cfg.chatWatchTarget 指哪打哪；值班鱼不在时自动退回前台。
       const nick = String(cfg.dmTo || '').trim()
       const transcript = msgs
         .map((m) => `${m.from === 'them' ? '他' : '我'}：${String(m.text || '').slice(0, 120)}`)
@@ -3055,13 +3062,28 @@ export function apply(ctx, config) {
         `④ 失败规矩：发送报错（403/超时/闸）就停，不连着重试；广告、陌生链接、要凭证的一律不回，等主人在的时候提一句。`,
         `⑤ 回完不用在这里长篇汇报，一句"回了什么"就够。）`,
       ].join('\n')
-      const wake = await tryDeliverToSession(wakeText)
-      if (wake && wake.ok) {
-        toastState = `已叫醒值班会话（${wake.sessionId || '?'}，${wake.runningNow ? '在跑，排队下一轮' : '下一轮就读'}）`
-        chatWatchLog(`已转进值班会话（agent ${wake.sessionId}，${wake.runningNow ? '运行中排队' : '空闲直进'}）`)
+      let wake = null
+      let via = ''
+      if (cfg.chatWatchTarget === 'duty') {
+        // 值班鱼模式：通过 Agent Teams 服务把消息送进队友收件箱（它自动醒来跑一轮）
+        wake = await deliverToDutyFish(wakeText)
+        via = '值班鱼'
+        if (!wake.ok) {
+          // 退回前台 —— 消息不能因为我这边模式选错而没人接
+          chatWatchLog(`值班鱼不在（${wake.reason}）—— 退回前台会话`)
+          wake = await tryDeliverToSession(wakeText)
+          via = '前台（值班鱼缺席回退）'
+        }
       } else {
-        toastState = `⚠️ 看见了但没能叫醒值班：${(wake && wake.reason) || '原因未知'}（消息已记进 chat-watch.log，不会丢）`
-        chatWatchLog(`⚠️ 转进值班会话失败：${(wake && wake.reason) || '原因未知'}`)
+        wake = await tryDeliverToSession(wakeText)
+        via = '前台'
+      }
+      if (wake && wake.ok) {
+        toastState = `已叫醒${via}（${wake.sessionId || wake.target || '?'}，${wake.runningNow ? '在跑，排队下一轮' : '下一轮就读'}）`
+        chatWatchLog(`已转给${via}（${wake.sessionId ? 'agent ' + wake.sessionId : wake.target || ''}${wake.runningNow ? '，运行中排队' : '，空闲直进'}）`)
+      } else {
+        toastState = `⚠️ 看见了但没能叫醒：${(wake && wake.reason) || '原因未知'}（消息已记进 chat-watch.log，不会丢）`
+        chatWatchLog(`⚠️ 转给${via}失败：${(wake && wake.reason) || '原因未知'}`)
       }
       cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_new', lastError: '', lastNewAt: theirs[theirs.length - 1].at, lastNewText: theirs[theirs.length - 1].text.slice(0, 40), toast: toastState })
     } catch (e) {
@@ -3286,6 +3308,55 @@ export function apply(ctx, config) {
     } catch (e) {
       const reason = String(e?.message ?? e)
       log(`桌宠对话[投递异常]：${reason}`)
+      return { ok: false, reason }
+    }
+  }
+
+  /**
+   * ⭐ 投给常驻值班鱼（2026-10-25 深夜「探明呗」实测后的实现）。
+   *
+   * 值班鱼 = Agent Teams 队友 `dm-duty-fish`：一条**独立的常驻会话**，
+   * 收信后自动醒来跑一轮、跑完待命；私聊上下文全落在它自己的会话里，
+   * **完全不占前台窗口**（前台刷视频的轮次一条私信都看不见）。
+   *
+   * 通道：ctx.get('agentTeams').sendMessage(leadAgent, { target, content }) ——
+   * 宿主 Agent Teams 服务的公开方法（cordis inspect 探明的契约，
+   * 与 send_message 工具同一条路）；Lead 身份取 agents 服务里最新的顶层会话。
+   *
+   * 失败语义：服务不在 / 队友不在册 / 发送抛错 ⇒ { ok:false, reason }，
+   * 上层（chatWatchTick）自动退回前台 —— 消息绝不因为模式选错而没人接。
+   */
+  const DUTY_FISH_TARGET = 'dm-duty-fish'
+  const deliverToDutyFish = async (text) => {
+    try {
+      const teams = (() => { try { return ctx.get('agentTeams') } catch { return null } })()
+      if (!teams || typeof teams.sendMessage !== 'function' || typeof teams.listMembers !== 'function') {
+        return { ok: false, reason: 'Agent Teams 服务不可用（宿主没开 Teams）' }
+      }
+      const agents = (() => { try { return ctx.get('agents') } catch { return null } })()
+      const lead = (() => {
+        try {
+          const roots = typeof agents?.roots === 'function' ? (agents.roots() || []).filter(Boolean) : []
+          return roots[roots.length - 1] || null
+        } catch { return null }
+      })()
+      if (!lead) return { ok: false, reason: '找不到 Lead 会话（sendMessage 需要 caller）' }
+      // 在册检查：没拉起过就明说，别让 sendMessage 报一个含糊的错
+      let members = []
+      try { members = teams.listMembers(lead) || [] } catch { /* 列不出就交给 sendMessage 自己报 */ }
+      const fish = members.find((m) => m && m.target === DUTY_FISH_TARGET)
+      if (!fish) return { ok: false, reason: `队友 ${DUTY_FISH_TARGET} 不在册（还没拉起或已被删）` }
+      if (fish.status === 'failed') return { ok: false, reason: '值班鱼上次创建失败了，需要重新拉起' }
+      const r = await teams.sendMessage(lead, {
+        target: DUTY_FISH_TARGET,
+        content: [{ type: 'text', text }],
+      })
+      if (!r || r.sent !== true) return { ok: false, reason: 'sendMessage 没确认送达' }
+      log(`私信[投值班鱼]：${String(text).slice(0, 30)}… → ${DUTY_FISH_TARGET}（${fish.status === 'running' ? '它在跑，排进收件箱' : '已叫醒，下一轮就读'}）`)
+      return { ok: true, target: DUTY_FISH_TARGET, runningNow: fish.status === 'running' }
+    } catch (e) {
+      const reason = String(e?.message ?? e)
+      log(`私信[投值班鱼失败]：${reason}`)
       return { ok: false, reason }
     }
   }
