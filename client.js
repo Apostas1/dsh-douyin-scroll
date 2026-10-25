@@ -1,4 +1,4 @@
-﻿/**
+/**
  * dsh-douyin-scroll —— 浏览器半端（设置在「设置」里的一页，中文名「刷抖音」）
  * ============================================================================
  * 2026-10-22 从零重写的最小可用版：先确保**面板一定能显示**，再谈功能。
@@ -198,7 +198,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       const FISH = {
         ok: `🐟 小鱼抱着手机趴在缸边等着呢——刚看过（${ago} 秒前），还没有新消息。下次去看还有 ${nextIn} 秒`,
         ok_prime: `🐳 小鱼刚接班，正在把聊天记录翻到最新一页（之前的不重播，从现在起只等新的）`,
-        ok_new: `🔔 小鱼看到新消息了：「${s.lastNewText || ''}」（不弹桌面通知——值班的小鱼会直接接话）`,
+        ok_new: `🔔 小鱼看到新消息了：「${s.lastNewText || ''}」——已经转给值班的小鱼接话${s.toast && s.toast.indexOf('没能叫醒') >= 0 ? '（⚠️ 这次没叫醒：' + s.toast.slice(s.toast.indexOf('没能叫醒')) : ''}）`,
         error: `😵 小鱼撞缸了：${s.lastError || '未知原因'}。歇一拍再试，不用管它`,
         no_match: `🤔 小鱼在已建立会话里没找到「${s.to || '这个人'}」：${s.lastNote || '陌生人消息走不了这条路'}`,
         off: `😴 开关关了，小鱼在缸底睡觉（这条是旧状态）`,
@@ -668,7 +668,12 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
 
       const saveKws = async () => {
         const lines = String(kws || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
-        await patch({ keywords: lines }, '关键词已保存')
+        /* 🔴 2026-10-25 晚：后端守卫「空数组不许盖掉非空列表」（keywords 就是这么丢的）。
+         *    真想清空 = 把框删空再点保存 ⇒ 带 __clearKeys 显式口子，守卫放行。 */
+        await patch(
+          lines.length ? { keywords: lines } : { keywords: [], __clearKeys: ['keywords'] },
+          lines.length ? '关键词已保存' : '关键词已清空',
+        )
       }
 
       /** 当前编辑中的自定义时段（`null` = 还没动过，跟随 cfg） */
@@ -689,9 +694,13 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
           }))
           .filter((w) => /^\d{1,2}:\d{2}$/.test(w.start) && /^\d{1,2}:\d{2}$/.test(w.end))
         const dropped = winList.length - clean.length
-        await patch({ windows: clean }, dropped
-          ? `已保存 ${clean.length} 个时段（${dropped} 个时间格式不对，没存）`
-          : (clean.length ? `已保存 ${clean.length} 个时段` : '已清空自定义时段'))
+        /* 🔴 2026-10-25 晚：数组守卫同款 —— 真清空走 __clearKeys 显式口子 */
+        await patch(
+          clean.length ? { windows: clean } : { windows: [], __clearKeys: ['windows'] },
+          dropped
+            ? `已保存 ${clean.length} 个时段（${dropped} 个时间格式不对，没存）`
+            : (clean.length ? `已保存 ${clean.length} 个时段` : '已清空自定义时段'),
+        )
         setWins(null)
       }
 
@@ -983,8 +992,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                     : busy === 'patch'
                       ? '保存中…'
                       : (cfg.chatWatch
-                        ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息（不弹桌面通知，状态屏和值班回话就是反馈）。不起浏览器，很轻。`
-                        : '关着（默认是开的）。想恢复再打开。'))),
+                        ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息；看见了就把话转给值班的小鱼接（状态屏能看到有没有接上）。不弹桌面通知，不起浏览器，很轻。`
+                        : '关着（默认是开的）。关了之后他来消息就没人接话——小鱼睡缸底。想恢复再打开。'))),
               h(Switch, {
                 on: Boolean(cfg.chatWatch),
                 disabled: !cfg.dmToId || busy === 'patch',

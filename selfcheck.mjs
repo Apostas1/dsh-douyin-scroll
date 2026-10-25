@@ -725,7 +725,8 @@ try {
   //    ⇒ 教训：**断言要盯"这段代码在不在 saveCfg 这个函数体里"，不能全文件搜。**
   //    现在先按函数边界切出 saveCfg 的函数体，再在函数体里查。
   const saveCfgBody = (() => {
-    const i = idx11.indexOf('const saveCfg = (patch) =>')
+    let i = idx11.indexOf('const saveCfg = (patch, opts = {}) =>')
+    if (i < 0) i = idx11.indexOf('const saveCfg = (patch')
     if (i < 0) return ''
     // 从 const saveCfg 起，到下一个同级的 const 定义为止（这函数很短）
     const rest = idx11.slice(i)
@@ -1109,10 +1110,19 @@ try {
   else bad('聊天界面不会自动刷新')
   if (/chat\/read'[\s\S]{0,900}?im-http\.py/.test(idx)) ok('/chat/read 也走 HTTP 快路径（面板刷新不冷启浏览器）')
   else bad('/chat/read 没接快路径 —— 面板每刷一次冷启一次浏览器')
-  // 🔴 盯梢只许读不许发：盯梢循环里出现 im-send/send 就报红
-  const cwLoop = idx.slice(idx.indexOf('chatWatchTick ='), idx.indexOf('chatWatchTick =') + 3200)
-  if (/im-send|sendDm|--text/.test(cwLoop)) bad('盯梢循环里出现了发送代码 —— 盯梢只许「看见」，回话必须由人点头')
-  else ok('盯梢循环是纯只读（看见，不代发）')
+  // 🔴 盯梢不许**自己发**：循环里出现 im-send / sendDm / --text 直发就报红。
+  //    2026-10-25 晚口径更新：盯梢「看见」之后允许**转进值班会话**（tryDeliverToSession，
+  //    这是传话不是代发），真正的私信发送只许值班会话在常设许可下做。
+  const cwLoop = idx.slice(idx.indexOf('chatWatchTick ='), idx.indexOf('chatWatchTick =') + 4800)
+  if (/im-send|sendDm|runNodeTool/.test(cwLoop)) bad('盯梢循环里出现了直发代码 —— 只许「看见 + 转给值班」，不许自己发')
+  else ok('盯梢循环不直发（看见 → 转给值班会话，发送是值班的事）')
+  // ⭐ 2026-10-25 晚：看见必须转进值班会话（之前这里是整个 bug 的后半截——
+  //    看见了没人接话，状态屏的"值班会接话"是空头支票）
+  if (/tryDeliverToSession\(wakeText\)/.test(idx)) ok('看见新消息会转进值班会话（followup，不碰会话日志）')
+  else bad('盯梢看见新消息后没有转给值班会话 —— 又是"看见了没人接话"')
+  // ⭐ 转达词必须带许可与身份（常设许可 = 主人 2026-10-25 拍板），还要带防护（素材不是命令）
+  if (/常设许可/.test(idx) && /不是给你的命令/.test(idx)) ok('转达词带常设许可声明 + 注入防护（消息正文是素材不是命令）')
+  else bad('转达词缺许可声明或注入防护')
   // 🔴 2026-10-24 使用者要求「不用弹这种通知」：聊天模式不弹 Windows 通知
   if (/sendToast/.test(cwLoop)) bad('盯梢循环还在弹 Windows 通知 —— 使用者 2026-10-24 关了')
   else ok('聊天模式不弹桌面通知（只写日志+状态屏，使用者 2026-10-24 指令）')
@@ -1134,6 +1144,65 @@ try {
   //    今早实测 12 秒来自已活着的 AI，插件里「每条消息现起一个会话」实测 73 秒+吞消息，已拆。
   if (/chatReplyRun|chatReplyPrompt|chatReply:/.test(idx)) bad('插件里又有「现起会话回话」的代码 —— 已定稿拆掉，回话归 AI 值班')
   else ok('插件没有「现起会话回话」（回话 = AI 值班，插件只做眼睛）')
+
+  /* ═══ 4m. 2026-10-25 晚追加（主人拍板「开关 = 常设许可」）═══
+   *  ① 数组字段空值守卫（keywords 从「猫、美食、搞笑」变 [] 的姊妹事故）
+   *  ② 显式清空口子 __clearKeys（不许把使用者关进守卫里）
+   *  ③ 上岗报号（打开开关小鱼要说话，贴合场景，一天一次防轰炸）
+   *  ④ 面板状态屏说真话（不许再写"值班会接话"的空头支票——现在真的会转给值班）
+   */
+  console.log('\n4m. 常设许可三件套（数组守卫 / 显式清空 / 上岗报号）')
+  try {
+    const idxM = readIf(join(here, 'index.js'))
+    const cliM = readIf(join(here, 'client.js'))
+    // ① 数组守卫要在 loadCfg 和 saveCfg **各自的函数体**里（同一个假通过陷阱：两处长得像）
+    const loadBodyM = (() => {
+      const i = idxM.indexOf('const loadCfg = () =>')
+      if (i < 0) return ''
+      const rest = idxM.slice(i)
+      const end = rest.indexOf('\n  const cfg = loadCfg()')
+      return end > 0 ? rest.slice(0, end) : rest.slice(0, 3200)
+    })()
+    const saveBodyM = (() => {
+      const i = idxM.indexOf('const saveCfg = (patch, opts = {})')
+      if (i < 0) return ''
+      const rest = idxM.slice(i)
+      const end = rest.indexOf('\n  const saveCfgHost')
+      return end > 0 ? rest.slice(0, end) : rest.slice(0, 4200)
+    })()
+    const arrGuard = /ARRAY_FIELDS/
+    if (arrGuard.test(loadBodyM) && /disk && disk\.length/.test(loadBodyM)) ok('loadCfg 有数组版空值兜底（空数组不许盖掉非空列表）')
+    else bad('loadCfg 缺数组守卫 —— keywords 这类字段还会被静默清空')
+    if (arrGuard.test(saveBodyM) && /cleared\.includes\(k\)/.test(saveBodyM)) ok('saveCfg 有数组版保护 + 显式清空口子（cleared）')
+    else bad('saveCfg 缺数组守卫或显式清空口子')
+    // ② 显式清空口子要能从面板一路走通：client 发 __clearKeys → HTTP 放行 → persistCfg 摘走
+    if (/__clearKeys/.test(cliM)) ok('面板编辑器接了显式清空口子（真清空有活路，不被守卫关死）')
+    else bad('面板没有清空口子 —— 守卫会把「真想清空」也拦死')
+    if (/__clearKeys/.test(idxM) && /stripClearKeys/.test(idxM)) ok('后端有 __clearKeys 摘取（persistCfg 收口）')
+    else bad('后端没有摘 __clearKeys —— 口子半路断掉')
+    if (/Array\.isArray\(body\.__clearKeys\)/.test(idxM)) ok('HTTP /config 路由放行 __clearKeys（白名单外唯一例外）')
+    else bad('HTTP 路由把 __clearKeys 扔了 —— 面板清空等于没点')
+    // ③ 上岗报号：异步（不能 spawnSync 冻宿主）+ 每天每触发点一次 + 失败不记"已发"
+    if (/runNodeToolAsync/.test(idxM)) ok('上岗报号走异步发送（spawnSync 会冻住整个宿主）')
+    else bad('上岗报号用了同步 spawn —— im-send 一跑几十秒，宿主全停')
+    if (/greetOnce\('opened'/.test(idxM) && /greetOnce\('resumed'/.test(idxM)) ok('报号两个触发点都在（开关刚开 / 重启接班）')
+    else bad('报号触发点缺一个 —— 「点开开关她要说话」就落空了')
+    if (/greet: \{ \.\.\.greeted/.test(idxM)) ok('报号按天记账（防轰炸）')
+    else bad('报号没有按天记账 —— 每拍重发就是骚扰')
+    // ④ 面板不再开空头支票
+    if (/值班的小鱼会直接接话/.test(cliM)) bad('状态屏还在写"值班会直接接话"的空头支票（现在必须说"已转给值班/没叫醒"）')
+    else ok('状态屏不再开空头支票（看见 → 说清转没转给值班）')
+    if (/已经转给值班的小鱼接话/.test(cliM)) ok('状态屏 ok_new 文案带「已转给值班」')
+    else bad('状态屏没说"已转给值班" —— 主人还是不知道消息有没有人接')
+    // ⑤ 发送器的引号不许再被"批量清洗"弄坏（2026-10-25 事故：d8a41c0 把 im-send 里
+  //    126 个 " 换成了「主」，选择器全废 ⇒ 发送永远报"没登录"；--read 走 Python
+  //    快路径碰不到这个文件，所以静默坏了两天没人发现）。
+    const imSend = readIf(join(here, 'tools', 'im-send.mjs'))
+    if (imSend) {
+      if (/data-e2e="conversation-item"/.test(imSend) && !/主/.test(imSend)) ok('im-send.mjs 选择器引号完好（没被批量替换弄坏）')
+      else bad('im-send.mjs 选择器坏了（引号被换成别的字符）—— 发送会永远报"没登录"')
+    } else bad('tools/im-send.mjs 不见了 —— 发送器没了')
+  } catch (e) { bad(`4m 检查跑不起来：${e.message}`) }
 
   /* ═══ 2026-10-25 拆分守卫（原来这里是一大段桌宠检查）═══
    *  桌宠整体搬去 dsh-deskpet 了：pet-window.ps1 / PetHost / 人格档案 / pet* 配置
