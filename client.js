@@ -302,6 +302,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       const [runLog, setRunLog] = React.useState(null)
       // 「在评论区 @ 你」要 @ 的昵称（0.5.7：输入框已删，atPeer 点选；草稿态仅留清空确认用）
       const [atMeDraft, setAtMeDraft] = React.useState(null)
+      // 0.5.7c @ 选人列表的展开态（点开关时自动展开）
+      const [showAtPicker, setShowAtPicker] = React.useState(false)
       // 聊天盯梢间隔的输入草稿（2026-10-24）
       const [cwSecDraft, setCwSecDraft] = React.useState(null)
       // dsh 入口路径（输入框草稿）—— 2026-10-23 加，见「出问题了？」卡片
@@ -526,9 +528,12 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
 
       /* 0.5.7 「听他的话」开关已删（主人定稿：聊天模式开着 = 谁私信都接，列表只管发给谁） */
 
-      /** 0.5.7 「在评论区 @ 你」选人（自己的列表，跟私信列表互不相干） */
+      /** 0.5.7 「在评论区 @ 你」选人（自己的列表，跟私信列表互不相干）
+       *  0.5.7c：选完人自动把开关打开 —— 用户的意图链是「点开关 → 选人 → 通」，别让他再跑回来点一次 */
       const pickAt = async (p) => {
-        await patch({ atPeer: { nick: p.nick } }, `挑到好视频时会在评论区 @「${p.nick}」`)
+        await patch({ atPeer: { nick: p.nick }, ...(cfg.commentAtMe ? {} : { commentAtMe: true }) },
+          `挑到好视频时会在评论区 @「${p.nick}」${cfg.commentAtMe ? '' : '（功能已自动打开）'}`)
+        setShowAtPicker(false)
       }
       const clearAt = async () => {
         await patch({ atPeer: { nick: '' }, commentAtMe: false }, '已清掉 @ 对象 —— 「在评论区 @ 你」关闭')
@@ -1096,9 +1101,9 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               : null),
 
 
-            /* ⭐⭐ 「在评论区 @ 你」（0.5.7 主人定稿）—— 自己的选人列表：
-             *    选中谁 → 挑到好视频就在评论区 @ 谁；没选人 = 功能整个关闭。
-             *    跟「私信发给谁」互不相干（可以发 A、@ B）。昵称自动带出，不用打字。 */
+            /* ⭐⭐ 「在评论区 @ 你」（0.5.7c 定稿）—— 开关永远能点：
+             *    没选 @ 对象时点开关 ⇒ 自动展开选人列表 + 提示（不再灰死像 bug）。
+             *    选人数据复用私信区已加载的 people（读一次两边都能选，不重复拉）。 */
             h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
               h('div', { 'data-dy-grow': '' },
                 h('div', { 'data-dy-title': '' }, '在评论区 @ 你'),
@@ -1106,14 +1111,22 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                   !cfg.autoSend
                     ? '先打开上面的「自动发送」，这个才有用。'
                     : !atNick
-                      ? '还没选 @ 谁 —— 下面点选一个人就自动打开；不选 = 这个功能关闭。'
+                      ? '还没选 @ 谁 —— 打开开关就会让你选；不选 = 这个功能关闭。'
                       : `✅ 开着：挑到最值得的那条时，会在它的评论区发一条 @「${atNick}」的评论（他刷抖音就能收到通知）。`)),
               h(Switch, {
                 on: Boolean(cfg.commentAtMe),
-                disabled: !cfg.autoSend || !atNick,
-                title: !atNick ? '先在下面选 @ 谁，这个开关才能打开' : '',
+                disabled: !cfg.autoSend || busy === 'patch',
                 onChange: (v) => {
-                  if (!atNick) { say('先在下面选 @ 谁，这个开关才能打开', 'warn'); return }
+                  if (!atNick) {
+                    if (v) {
+                      say('先在下面点一个要 @ 的人，选完自动打开', 'warn')
+                      if (!people) loadPeople()
+                      setShowAtPicker(true)
+                    } else {
+                      patch({ commentAtMe: false }, '已关闭「在评论区 @ 你」')
+                    }
+                    return
+                  }
                   patch({ commentAtMe: v }, v ? '✅ 已打开「在评论区 @ 你」' : '已关闭「在评论区 @ 你」')
                 },
               })),
@@ -1121,9 +1134,9 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               ? h('div', { 'data-dy-sub': '' },
                 atNick
                   ? `要 @ 的人：「${atNick}」`
-                  : '要 @ 的人：（还没选 —— 下面点一个）')
+                  : '要 @ 的人：（还没选）')
               : null,
-            cfg.autoSend
+            cfg.autoSend && (showAtPicker || (!atNick && cfg.commentAtMe))
               ? h('div', { 'data-dy-people': '' },
                 people && people.length
                   ? people.map((p, i) => h('button', {
@@ -1136,9 +1149,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                     h('span', { 'data-dy-person-name': '' }, p.nick),
                     p.is_group ? h('span', { 'data-dy-tag': '' }, '群不能 @') : null,
                     atNick === p.nick ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ @ 他') : null))
-                  : h('button', {
-                    'data-dy-mini': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
-                  }, busy === 'people' ? '读取会话列表…' : '从我的会话里选 @ 谁'))
+                  : h('div', { 'data-dy-sub': '' }, busy === 'people' ? '读取会话列表中…' : '点「从我的会话里选」（私信区那个按钮）读一次列表，两边共用'))
               : null,
             atNick
               ? h('div', { 'data-dy-row': '' },
