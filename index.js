@@ -1212,8 +1212,11 @@ export function apply(ctx, config) {
       confirm: { type: 'boolean', description: '🔴 必须由用户当场同意后传 true，否则只返回草稿不发送' },
     },
     async execute(args = {}) {
-      const to = String(args.to || cfg.dmTo || '').trim()
-      const toId = String(args.to_id || cfg.dmToId || '').trim()
+      // 🔴 0.5.4 修：to 和 to_id 不许各兜各的默认 —— 只传昵称时绝不能偷偷兜配置里的 dmToId，
+      //    否则快路径拿 A 的 sec_uid 匹配、顶着 B 的昵称返回（「私信发给谁读取不到」的根因）。
+      //    传了昵称 ⇒ to_id 留空按昵称找；传了 to_id ⇒ to 留空别冒用配置昵称；两个都没传才用配置默认。
+      const to = String(args.to || (args.to_id ? '' : cfg.dmTo) || '').trim()
+      const toId = String(args.to_id || (args.to ? '' : cfg.dmToId) || '').trim()
       if (!to && !toId) return { ok: false, error: '不知道发给谁', hint: '传 to / to_id，或在设置里填「私信发给谁」+「稳定 ID」' }
       let file = ''
       if (args.from_list) {
@@ -1275,8 +1278,9 @@ export function apply(ctx, config) {
       confirm: { type: 'boolean', description: '🔴 必须由用户当场同意后传 true，否则只回预览不发送' },
     },
     async execute(args = {}) {
-      const to = String(args.to || cfg.dmTo || '').trim()
-      const toId = String(args.to_id || cfg.dmToId || '').trim()
+      // 🔴 0.5.4 修：同 douyin_dm —— 昵称和稳定 id 不许各兜各的默认（会张冠李戴）
+      const to = String(args.to || (args.to_id ? '' : cfg.dmTo) || '').trim()
+      const toId = String(args.to_id || (args.to ? '' : cfg.dmToId) || '').trim()
       if (!to && !toId) return { ok: false, error: '不知道发给谁', hint: '传 to / to_id，或在设置里填「私信发给谁」+「稳定 ID」' }
       const reasonText = String(args.reason || '').trim()
       const gapSec = args.reason_delay_sec === undefined ? 5 : Math.max(0, Math.min(Number(args.reason_delay_sec) || 0, 60))
@@ -1829,8 +1833,10 @@ export function apply(ctx, config) {
       facts: { type: 'array', items: { type: 'string' }, description: '要记的事实，一条一句（比如 ["在杭州", "养了只橘猫"]）' },
     },
     async execute(args = {}) {
-      const secUid = String(args.to_id || cfg.dmToId || '').trim()
-      if (!secUid) return { ok: false, error: '缺 to_id', hint: 'douyin_im_read 返回里有 to_sec_uid' }
+      // 🔴 0.5.4 修：不许兜底 cfg.dmToId —— 值班鱼刚读完 B 的会话、忘传 to_id 时，
+      //    档案会记到配置那人头上。要记谁必须显式给谁的 to_id。
+      const secUid = String(args.to_id || '').trim()
+      if (!secUid) return { ok: false, error: '缺 to_id（要记谁就给谁的）', hint: 'douyin_im_read 返回里有 to_sec_uid' }
       const facts = Array.isArray(args.facts) ? args.facts : []
       if (!facts.length) return { ok: false, error: 'facts 是空的' }
       const before = loadDmMemory(stateDir, secUid)
@@ -1877,8 +1883,12 @@ export function apply(ctx, config) {
       limit: { type: 'number', description: '返回最近几条（默认 30，最多 60）' },
     },
     async execute(args = {}) {
-      const to = String(args.to || cfg.dmTo || '').trim()
-      const toId = String(args.to_id || cfg.dmToId || '').trim()
+      // 🔴 0.5.4 修：只传昵称（args.to）时**绝不能**偷偷兜配置里的 dmToId ——
+      //    否则快路径拿配置那人的 sec_uid 匹配、却顶着传入的昵称返回，读出来的人和名字对不上
+      //    （评论区「私信发给谁读取不到」就是这个）。传了昵称 ⇒ to_id 留空走浏览器按昵称找；
+      //    要快路径请显式传 to_id。args 两个都没传 ⇒ 才一起用配置默认（同一个人，无错位）。
+      const to = String(args.to || (args.to_id ? '' : cfg.dmTo) || '').trim()
+      const toId = String(args.to_id || (args.to ? '' : cfg.dmToId) || '').trim()
       if (!to && !toId) return { ok: false, error: '不知道读谁的会话', hint: '传 to / to_id，或在设置里填私信对象' }
       const limit = Math.max(1, Math.min(Number(args.limit) || 30, 60))
 
