@@ -18,15 +18,43 @@
  */
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
 import { deliverToSession, makeUserMessage, validateUserMessage, pickTargetAgent, relayLine, pickClientTimeZone } from '../lib/pet-relay.mjs';
 
-const modulesRoot = 'D:\\DeepSeek\\dsh-data\\extracted-asar\\dsh\\node_modules';
+/**
+ * 🔴 找 DSH 的 node_modules 根 —— **不写死任何人的本机路径**（公开仓库带路径 = 泄露机器信息）。
+ * 顺序：环境变量 → DSH_HOME → 常见安装位置 → 找不到就跳过"用宿主校验器验证"那步。
+ */
+function findModulesRoot() {
+  const cands = []
+  if (process.env.DSH_MODULES_ROOT) cands.push(process.env.DSH_MODULES_ROOT)
+  if (process.env.DSH_HOME) {
+    cands.push(path.join(process.env.DSH_HOME, 'extracted-asar', 'dsh', 'node_modules'))
+    cands.push(path.join(process.env.DSH_HOME, 'node_modules'))
+  }
+  const home = process.env.HOME || process.env.USERPROFILE || ''
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    cands.push(path.join(process.env.LOCALAPPDATA, 'DeepSeek', 'dsh-data', 'extracted-asar', 'dsh', 'node_modules'))
+  }
+  if (home) cands.push(path.join(home, '.dsh', 'node_modules'))
+  for (const c of cands) {
+    if (c && fs.existsSync(path.join(c, '@deepseek-ai', 'dsh-session'))) return c
+  }
+  return ''
+}
+
+const modulesRoot = findModulesRoot();
 let adoptSessionEvent = null;
-try {
-  const sess = await import(pathToFileURL(path.join(modulesRoot, '@deepseek-ai', 'dsh-session', 'lib', 'index.js')).href);
-  adoptSessionEvent = sess.adoptSessionEvent;
-} catch (e) {
-  console.log(`⚠️  拿不到 DSH 的 dsh-session（${e.message}）—— 跳过"用宿主校验器验证"那步`);
+if (modulesRoot) {
+  try {
+    const sess = await import(pathToFileURL(path.join(modulesRoot, '@deepseek-ai', 'dsh-session', 'lib', 'index.js')).href);
+    adoptSessionEvent = sess.adoptSessionEvent;
+  } catch (e) {
+    console.log(`⚠️  拿不到 DSH 的 dsh-session（${e.message}）—— 跳过"用宿主校验器验证"那步`);
+  }
+} else {
+  console.log('⚠️  没找到 DSH 的 node_modules —— 跳过"用宿主校验器验证"那步');
+  console.log('    （想验就设 DSH_MODULES_ROOT 或 DSH_HOME 环境变量）');
 }
 
 let pass = 0, fail = 0;
