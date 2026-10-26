@@ -25,7 +25,7 @@ import urllib.parse
 import httpx
 
 HOME = home_str()
-PLUGIN = r"<本目录>"
+PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NODE = r"C:\Program Files\nodejs\node.exe"
 SIGNER = os.path.join(PLUGIN, "tools", "dy-signer.mjs")
 VENVPY = os.path.join(HOME, ".venv", "Scripts", "python.exe")
