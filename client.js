@@ -973,9 +973,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               ? h('pre', { 'data-dy-pre': '', style: { maxHeight: '380px' } }, guide)
               : null),
 
-        /* ── 卡 ③ 自动发送（含「私信发给谁」）────────────────────────────────
-         *    把原来的「自动发送」（内含「在评论区 @ 你」+「聊天模式」）
-         *    和「私信发给谁」合成一张 —— 它们本来就是一件事：发给谁、发什么、发不发。
+        /* ── 卡 ③ 自动发送（含「私信发给谁」·评论区 @ 你 · 聊天模式）────────────────────────
+         *    私信对象紧跟在自动发送开关下面（0.5.5 主人令）—— 它们本来就是一件事：发给谁、发什么、发不发。
          *    2026-10-25 重排：20+ 张卡压成 7 张，功能一个不删，只合并。 */
         h('div', { 'data-dy-card': '', 'data-dy-highlight': cfg.autoSend ? '' : undefined },
           /* 合并卡的总标题：说清这张里装了什么（不然只见「自动发送」，找不到私信对象） */
@@ -1005,6 +1004,101 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                   : (cfg.dmTo || '（还没选私信对象，去下面「私信发给谁」选）')))),
             h('div', { 'data-dy-sub': '' },
               '⚠️ 只管「插件自己在后台跑的轮次」。你当场在对话里让它发，不受这个开关影响。'),
+  /* ── 私信发给谁（0.5.5：放自动发送正下方 —— 主人 2026-10-26 令；多人列表 + 每人「听他的话」开关） ── */
+          h('div', { 'data-dy-subblock': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
+            h('div', { 'data-dy-row': '' },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, '私信发给谁'),
+                h('div', { 'data-dy-sub': '' },
+                  dmPeers.length
+                    ? `已选 ${dmPeers.length} 人：${dmNames(dmPeers)}。日报和分享卡片发给每一个人；开着「听他的话」的人来私信，值班小鱼自动接。`
+                    : '想让插件把好玩的发给你，先在这里选一个人（可以多选）。不选也行 —— 那就只写日报，不发私信。')),
+              h('button', {
+                'data-dy-btn': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
+              }, busy === 'people' ? '读取中…' : (people === null ? '从我的会话里选' : '重新读取'))),
+
+            !st.loggedIn
+              ? h('div', { 'data-dy-sub': '' }, '（要先在上面扫码登录，才能读到你的人）')
+              : null,
+
+            /* ⭐ 0.5.5 已选列表：每人一行 —— 昵称 + 「听他的话」开关 + 移除 */
+            dmPeers.length
+              ? h('div', { 'data-dy-people': '' },
+                dmPeers.map((p, i) => h('div', {
+                  key: 'peer' + i,
+                  'data-dy-person': '',
+                  'data-picked': p.listen ? '' : undefined,
+                },
+                  h('span', { 'data-dy-person-name': '' }, p.nick || (p.sec_uid || '').slice(0, 10) + '…'),
+                  p.sec_uid ? null : h('span', { 'data-dy-tag': '' }, '⚠️ 没有稳定 id，重名可能选错'),
+                  h('span', { 'data-dy-grow': '' }),
+                  h('button', {
+                    'data-dy-mini': '', 'data-ok': p.listen ? '' : undefined,
+                    disabled: Boolean(busy),
+                    title: p.listen ? '开着：他来私信小鱼自动接' : '关着：只收日报，来消息不自动接',
+                    onClick: () => toggleListen(i),
+                  }, p.listen ? '👂 听他的话：开' : '听他的话：关'),
+                  h('button', {
+                    'data-dy-mini': '', disabled: Boolean(busy),
+                    onClick: () => removePeer(i),
+                  }, '移除'))))
+              : null,
+
+            people && people.length
+              ? h('div', { 'data-dy-people': '' },
+                people.map((p, i) => {
+                  const added = dmPeers.some((x) => (p.sec_uid && x.sec_uid === p.sec_uid) || (!p.sec_uid && x.nick === p.nick))
+                  return h('button', {
+                    key: 'p' + i,
+                    'data-dy-person': '',
+                    'data-picked': added ? '' : undefined,
+                    disabled: Boolean(busy) || added,
+                    onClick: () => pickPerson(p),
+                  },
+                    h('span', { 'data-dy-person-name': '' }, p.nick),
+                    p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
+                    added ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已在列表') : null,
+                    p.preview ? h('span', { 'data-dy-person-sub': '' }, p.preview) : null)
+                }))
+              : null,
+
+            people && !people.length
+              ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, peopleHint || '会话列表是空的')
+              : null,
+            peopleHint && people && people.length
+              ? h('div', { 'data-dy-sub': '' }, peopleHint)
+              : null,
+
+            /* ⭐ 手动补一个会话列表里没有的人（留活路，但不再是主路径） */
+            h('div', { 'data-dy-row': '' },
+              h('button', {
+                'data-dy-mini': '',
+                onClick: () => setManualDm(manualDm === null ? { nick: '', id: '' } : null),
+              }, manualDm === null ? '手动加一个（会话列表里没有的人）' : '收起')),
+            manualDm !== null
+              ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
+                h('div', { 'data-dy-sub': '' }, '昵称（显示用）'),
+                h('input', {
+                  'data-dy-input': '', value: manualDm.nick, placeholder: '比如：示例好友',
+                  onChange: (e) => setManualDm({ ...manualDm, nick: e.target.value }),
+                }),
+                h('div', { 'data-dy-sub': '' }, '稳定 ID（sec_uid，从「从我的会话里选」拿最方便；没有它没法精确认人）'),
+                h('input', {
+                  'data-dy-input': '', value: manualDm.id, placeholder: 'MS4wLjABAAAA…',
+                  onChange: (e) => setManualDm({ ...manualDm, id: e.target.value }),
+                }),
+                h('div', { 'data-dy-row': '' },
+                  h('button', {
+                    'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy) || !(manualDm.nick.trim() || manualDm.id.trim()),
+                    onClick: async () => {
+                      const cur = Array.isArray(cfg.dmPeers) ? cfg.dmPeers : []
+                      const next = [...cur, { nick: manualDm.nick.trim(), sec_uid: manualDm.id.trim(), listen: false }]
+                      await patch({ dmPeers: next }, `已把「${manualDm.nick.trim() || manualDm.id.trim()}」加进私信对象`)
+                      setManualDm(null)
+                    },
+                  }, '加进列表')))
+              : null),
+
 
             /* ⭐⭐ 「在评论区 @ 你」—— 用户 2026-10-22 要求，加在自动发送下面 */
             h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
@@ -1158,100 +1252,6 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               ? h('div', { 'data-dy-sub': '', style: { color: chatFix.ok ? '#22c55e' : '#f59e0b' } },
                 `${chatFix.ok ? '✅' : '👉'} ${chatFix.human || ''}`
                   + (chatFix.need_user && chatFix.need_user.how ? `\n${chatFix.need_user.how}` : ''))
-              : null),
-  /* ── 私信发给谁（点选，不用手填 sec_uid） ── */
-          h('div', { 'data-dy-subblock': '' },
-            h('div', { 'data-dy-row': '' },
-              h('div', { 'data-dy-grow': '' },
-                h('div', { 'data-dy-title': '' }, '私信发给谁'),
-                h('div', { 'data-dy-sub': '' },
-                  dmPeers.length
-                    ? `已选 ${dmPeers.length} 人：${dmNames(dmPeers)}。日报和分享卡片发给每一个人；开着「听他的话」的人来私信，值班小鱼自动接。`
-                    : '想让插件把好玩的发给你，先在这里选一个人（可以多选）。不选也行 —— 那就只写日报，不发私信。')),
-              h('button', {
-                'data-dy-btn': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
-              }, busy === 'people' ? '读取中…' : (people === null ? '从我的会话里选' : '重新读取'))),
-
-            !st.loggedIn
-              ? h('div', { 'data-dy-sub': '' }, '（要先在上面扫码登录，才能读到你的人）')
-              : null,
-
-            /* ⭐ 0.5.5 已选列表：每人一行 —— 昵称 + 「听他的话」开关 + 移除 */
-            dmPeers.length
-              ? h('div', { 'data-dy-people': '' },
-                dmPeers.map((p, i) => h('div', {
-                  key: 'peer' + i,
-                  'data-dy-person': '',
-                  'data-picked': p.listen ? '' : undefined,
-                },
-                  h('span', { 'data-dy-person-name': '' }, p.nick || (p.sec_uid || '').slice(0, 10) + '…'),
-                  p.sec_uid ? null : h('span', { 'data-dy-tag': '' }, '⚠️ 没有稳定 id，重名可能选错'),
-                  h('span', { 'data-dy-grow': '' }),
-                  h('button', {
-                    'data-dy-mini': '', 'data-ok': p.listen ? '' : undefined,
-                    disabled: Boolean(busy),
-                    title: p.listen ? '开着：他来私信小鱼自动接' : '关着：只收日报，来消息不自动接',
-                    onClick: () => toggleListen(i),
-                  }, p.listen ? '👂 听他的话：开' : '听他的话：关'),
-                  h('button', {
-                    'data-dy-mini': '', disabled: Boolean(busy),
-                    onClick: () => removePeer(i),
-                  }, '移除'))))
-              : null,
-
-            people && people.length
-              ? h('div', { 'data-dy-people': '' },
-                people.map((p, i) => {
-                  const added = dmPeers.some((x) => (p.sec_uid && x.sec_uid === p.sec_uid) || (!p.sec_uid && x.nick === p.nick))
-                  return h('button', {
-                    key: 'p' + i,
-                    'data-dy-person': '',
-                    'data-picked': added ? '' : undefined,
-                    disabled: Boolean(busy) || added,
-                    onClick: () => pickPerson(p),
-                  },
-                    h('span', { 'data-dy-person-name': '' }, p.nick),
-                    p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
-                    added ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已在列表') : null,
-                    p.preview ? h('span', { 'data-dy-person-sub': '' }, p.preview) : null)
-                }))
-              : null,
-
-            people && !people.length
-              ? h('div', { 'data-dy-msg': '', 'data-warn': '' }, peopleHint || '会话列表是空的')
-              : null,
-            peopleHint && people && people.length
-              ? h('div', { 'data-dy-sub': '' }, peopleHint)
-              : null,
-
-            /* ⭐ 手动补一个会话列表里没有的人（留活路，但不再是主路径） */
-            h('div', { 'data-dy-row': '' },
-              h('button', {
-                'data-dy-mini': '',
-                onClick: () => setManualDm(manualDm === null ? { nick: '', id: '' } : null),
-              }, manualDm === null ? '手动加一个（会话列表里没有的人）' : '收起')),
-            manualDm !== null
-              ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
-                h('div', { 'data-dy-sub': '' }, '昵称（显示用）'),
-                h('input', {
-                  'data-dy-input': '', value: manualDm.nick, placeholder: '比如：示例好友',
-                  onChange: (e) => setManualDm({ ...manualDm, nick: e.target.value }),
-                }),
-                h('div', { 'data-dy-sub': '' }, '稳定 ID（sec_uid，从「从我的会话里选」拿最方便；没有它没法精确认人）'),
-                h('input', {
-                  'data-dy-input': '', value: manualDm.id, placeholder: 'MS4wLjABAAAA…',
-                  onChange: (e) => setManualDm({ ...manualDm, id: e.target.value }),
-                }),
-                h('div', { 'data-dy-row': '' },
-                  h('button', {
-                    'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy) || !(manualDm.nick.trim() || manualDm.id.trim()),
-                    onClick: async () => {
-                      const cur = Array.isArray(cfg.dmPeers) ? cfg.dmPeers : []
-                      const next = [...cur, { nick: manualDm.nick.trim(), sec_uid: manualDm.id.trim(), listen: false }]
-                      await patch({ dmPeers: next }, `已把「${manualDm.nick.trim() || manualDm.id.trim()}」加进私信对象`)
-                      setManualDm(null)
-                    },
-                  }, '加进列表')))
               : null),
         ),
 
