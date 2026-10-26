@@ -64,6 +64,13 @@ globalThis.document = {
  *    再切成"已登录"渲染一遍 —— 两条路都得能画出来。
  */
 const state = { loggedIn: false, venvReady: false }
+// 🆕 可写的配置（模拟真实宿主：POST /config 写进磁盘，GET 读回来）
+const mockCfg = {
+  perDay: 5, maxPerRun: 12, noon: true, night: true, keywords: ['猫', '搞笑'],
+  windows: [{ start: '09:00', end: '11:00', label: '上午' }],
+  autoSend: true, commentAtMe: false, commentSelfName: '',
+  dmPeers: [], atPeers: [],
+}
 // 桌宠状态 mock（【桌宠】段里会改它再重渲染）
 const petState = { ok: true, state: 'watch', round_active: false, asset_ok: true, pet_on: true, chat: { on: true, result: 'ok', new_text: '', checked_ago: 5 } }
 const MOCK = {
@@ -73,11 +80,7 @@ const MOCK = {
   }),
   '/api/douyin-duty/config': () => ({
     ok: true,
-    config: {
-      perDay: 5, maxPerRun: 12, noon: true, night: true, keywords: ['猫', '搞笑'],
-      windows: [{ start: '09:00', end: '11:00', label: '上午' }],
-      autoSend: true, commentAtMe: false, commentSelfName: '',
-    },
+    config: { ...mockCfg },
   }),
   '/api/douyin-duty/update': () => ({
     ok: true, current: '9.9.9', latest: '9.9.9', checked: true, hasUpdate: false, source: 'npm registry', tried: [],
@@ -152,8 +155,19 @@ const MOCK = {
     hint: '有同名的人 —— 选的时候看「最近一条消息」区分，别选错',
   }),
 }
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, opts = {}) => {
   const path = String(url).split('?')[0]
+  const method = String(opts?.method || 'GET').toUpperCase()
+  // 🆕 POST /config = 写配置（模拟真实宿主：写进磁盘，GET 能读回来）
+  if (method === 'POST' && path === '/api/douyin-duty/config') {
+    let body = {}
+    try { body = JSON.parse(String(opts?.body || '{}')) } catch { body = {} }
+    for (const [k, v] of Object.entries(body)) {
+      if (k === '__clearKeys') continue
+      mockCfg[k] = v
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, config: { ...mockCfg } }) }
+  }
   const make = MOCK[path]
   if (!make) return { ok: false, status: 404, json: async () => ({}) }
   return { ok: true, status: 200, json: async () => make() }
@@ -785,11 +799,13 @@ console.log('\n【群聊限制（明写，不藏 hover）】')
   const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   if (/只能看不能发/.test(src)) console.log('  ✅ 群标签写明「只能看不能发」')
   else { console.log('  ❌ 群标签没写「只能看不能发」'); fail++ }
-  if (/渠道限制|不是账号坏了/.test(src) && /7523/.test(src)) {
-    console.log('  ✅ 面板写明「渠道限制、不是账号坏了」+ 回执 7523')
-  } else { console.log('  ❌ 面板没写清「渠道限制 vs 账号限制」'); fail++ }
-  if (/是不是所有账号都一样/.test(src)) console.log('  ✅ 面板注明「只在鱼号上测过、别的号不确定」')
-  else { console.log('  ❌ 面板没注明测试范围（不许让人误以为所有号都测过）'); fail++ }
+  // ⚠️ 措辞要求：大白话、短句 —— 主人 2026-10-26 令「你这么说谁看得懂，简单点」
+  if (/群里发不出消息/.test(src) && /手机端正常/.test(src)) {
+    console.log('  ✅ 面板用大白话说清「群里发不出消息，手机端正常」')
+  } else { console.log('  ❌ 面板没用大白话（要写「群里发不出消息」「手机端正常」）'); fail++ }
+  if (/7523|服务端收下|渠道限制/.test(src)) {
+    console.log('  ⚠️ 面板还留着行话（7523 / 服务端收下 / 渠道限制）—— 主人嫌绕，建议再删')
+  } else console.log('  ✅ 面板没有行话（7523 那些只留在文档里）')
   // ② 选中群之后必须真的渲染出那条黄条
   //    （会话列表要先点「从我的会话里选」才加载出来；群名在按钮的**子节点**里）
   await clickAndRender('从我的会话里选')
@@ -804,7 +820,7 @@ console.log('\n【群聊限制（明写，不藏 hover）】')
       await flush()
       const gf = walk(await renderNow())
       const gtxt = gf.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
-      if (/假成功|渠道限制|只能看/.test(gtxt)) {
+      if (/群里发不出消息/.test(gtxt) && /手机端正常/.test(gtxt)) {
         console.log('  ✅ 选中群后，面板上出现群聊限制说明（不是藏起来的）')
       } else {
         console.log('  ❌ 选中群后没看到限制说明（提示被藏起来了）'); fail++

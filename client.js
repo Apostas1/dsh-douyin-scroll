@@ -1057,7 +1057,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                   h('span', { 'data-dy-person-name': '' }, p.nick || (p.sec_uid || '').slice(0, 10) + '…'),
                   p.sec_uid
                     ? null
-                    : h('span', { 'data-dy-tag': '', title: '群聊：小鱼能看群消息并转达；网页端在群里发言是「假成功」（服务端不分发，其他人收不到，实测回执 7523）—— 这是渠道限制、不是账号坏了；要在群里说话请用手机端。' }, '群聊 · 只能看不能发'),
+                    : h('span', { 'data-dy-tag': '', title: '群里发不出消息：网页端发的别人收不到，手机端正常。' }, '群聊 · 只能看不能发'),
                   h('span', { 'data-dy-grow': '' }),
                   h('button', {
                     'data-dy-mini': '', disabled: Boolean(busy),
@@ -1069,11 +1069,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
              *    「不在选项上说清吗」—— 选了群的人一眼就能看到这条限制。 */
             dmPeers.some((p) => !p.sec_uid)
               ? h('div', { 'data-dy-msg': '', 'data-warn': '' },
-                '⚠️ 上面选了群聊：**网页端在群里发消息是「假成功」** —— 服务端收下并存着，'
-                + '但群里其他成员永远收不到（回执 7523，实测 2026-10-26）。'
-                + '同一个号手机端发群是正常的 ⇒ 这是**渠道限制，不是账号坏了**。'
-                + '（是不是所有账号都一样，只在鱼号上测过。）'
-                + '所以：看群消息、盯群转达都真能用；**要往群里说话请用手机端**，插件不会替你在群里发言。')
+                '⚠️ **群里发不出消息**：网页端发的，群里其他人收不到（手机端正常）。'
+                + '看群消息没问题，要说话请用手机端。')
               : null,
 
             people && people.length
@@ -1091,7 +1088,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                     p.is_group
                       ? h('span', {
                         'data-dy-tag': '',
-                        title: '群聊：小鱼能看群消息并转达；网页端在群里发言是「假成功」（服务端不分发，其他人收不到，实测回执 7523）—— 这是渠道限制、不是账号坏了；要在群里说话请用手机端。',
+                        title: '群里发不出消息：网页端发的别人收不到，手机端正常。',
                       }, '群聊 · 只能看不能发')
                       : null,
                     p.duplicate && !p.is_group ? h('span', { 'data-dy-tag': '' }, '重名') : null,
