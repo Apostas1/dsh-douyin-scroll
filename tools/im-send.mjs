@@ -201,6 +201,10 @@ const listConversations = (ev) => ev(`(function(){
 /** 从会话项文本里猜昵称（第一段；"示例好友 12:12 最后一句话" → "示例好友"） */
 const nickOf = (text) => String(text || '').split(/\s+/)[0] || ''
 
+/** ⭐ 0.5.5b 群：右栏头部对群是「群名(成员数)」—— 比对前把尾部 (数字) 归一化掉。
+ *  模块层定义：openConversation 和 main 里的发送前闸都要用。 */
+const baseNick = (s) => String(s || '').replace(/\(\d+\)\s*$/, '').trim()
+
 /** 读「当前打开的这个会话」的对端 sec_uid —— 用来校验身份（不同层级包法不一样，多试几种） */
 const currentConvId = (ev) => ev(`(function(){
   function tp(o){
@@ -299,10 +303,8 @@ async function openConversation(ev, send, who, whoId) {
    * ⭐ 判断"当前会话是不是就是他"要用**右栏头部**，不是 bodyText。
    *    右栏头部 = `[class*="componentsRightPanel"]` 的第一行文本，那才是对端昵称。
    *    （bodyText 含左侧列表，任何人都在里面 —— 那正是 bug ① 的根源）
-   * ⭐ 0.5.5b 群：右栏头部对**群**是「群名(成员数)」—— 比对时把尾部 (数字) 归一化掉，
-   *    否则点了群、校验却拿「群名(3)」≠「群名」直接中止（实测踩到）。
+   * ⭐ 0.5.5b 群：比对用模块层的 baseNick（群名带 "(N)" 后缀也能对上）。
    */
-  const baseNick = (s) => String(s || '').replace(/\(\d+\)\s*$/, '').trim()
   const currentWho = async () => {
     const nick = String(await ev(`(function(){
       var r = document.querySelector('[class*="componentsRightPanel"]');
