@@ -141,12 +141,14 @@ const MOCK = {
   '/api/douyin-duty/login/close': () => ({ ok: true, closed: true }),
   '/api/douyin-duty/login/clear': () => { state.loggedIn = false; return { ok: true } },
   '/api/douyin-duty/dm/people': () => ({
-    ok: true, count: 2,
+    ok: true, count: 3,
     people: [
       { nick: '测试好友', sec_uid: 'MS4wLjABAAAA_test1', preview: '30分钟内在线', has_id: true, duplicate: false },
       { nick: '另一个朋友', sec_uid: 'MS4wLjABAAAA_test2', preview: '好的', has_id: true, duplicate: true },
+      // 🔴 群聊：没有 sec_uid（抖音结构如此）—— 面板必须认得出它是群并写明限制
+      { nick: '测试群聊', sec_uid: '', preview: '群里在说话', has_id: false, duplicate: false, is_group: true },
     ],
-    no_id_count: 0,
+    no_id_count: 1,
     hint: '有同名的人 —— 选的时候看「最近一条消息」区分，别选错',
   }),
 }
@@ -225,6 +227,21 @@ function walk(node, out = []) {
 }
 
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0)) }
+
+/** 取某个节点**子树**里的全部文字（按钮里的名字常在子 span 里，findBtn 只看按钮自己的 children 会漏） */
+function textOf(node, flatList) {
+  const list = flatList || flat
+  const i = list.findIndex((n) => n === node)
+  if (i < 0) return ''
+  let depth = 0
+  let out = ''
+  for (let k = i; k < list.length; k++) {
+    const n = list[k]
+    if (k > i && n.tag === 'button') break          // 到下一个按钮就收
+    if (n.tag === '#text') out += n.text
+  }
+  return out
+}
 
 let tree = null
 let renders = 0
@@ -757,6 +774,56 @@ else { console.log('  ❌ 开关关闭态没说明'); fail++ }
   const iAtMe = allText.indexOf('评论区 @ 提醒')
   if (iSend >= 0 && iAtMe > iSend) console.log('  ✅ 位置正确（自动发送下面）')
   else { console.log(`  ❌ 位置不对（自动发送@${iSend} 评论区@提醒@${iAtMe}）`); fail++ }
+}
+
+/* ── 🔴 群聊限制必须写在明面上（主人 2026-10-26：「不在选项上说清吗」） ──
+ *    以前只藏在 hover 的 title 小字里 ⇒ 选了群也不知道发不出去。
+ *    现在：① 群标签写「只能看不能发」② 选了群就出现一条黄条说明。 */
+console.log('\n【群聊限制（明写，不藏 hover）】')
+{
+  // ① 源码里必须有那条黄条（渲染检查读的是源码文案）
+  const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  if (/只能看不能发/.test(src)) console.log('  ✅ 群标签写明「只能看不能发」')
+  else { console.log('  ❌ 群标签没写「只能看不能发」'); fail++ }
+  if (/渠道限制|不是账号坏了/.test(src) && /7523/.test(src)) {
+    console.log('  ✅ 面板写明「渠道限制、不是账号坏了」+ 回执 7523')
+  } else { console.log('  ❌ 面板没写清「渠道限制 vs 账号限制」'); fail++ }
+  if (/是不是所有账号都一样/.test(src)) console.log('  ✅ 面板注明「只在鱼号上测过、别的号不确定」')
+  else { console.log('  ❌ 面板没注明测试范围（不许让人误以为所有号都测过）'); fail++ }
+  // ② 选中群之后必须真的渲染出那条黄条
+  //    （会话列表要先点「从我的会话里选」才加载出来；群名在按钮的**子节点**里）
+  await clickAndRender('从我的会话里选')
+  const gFlat = walk(await renderNow())
+  const gBtn = gFlat.find((n) => n.tag === 'button' && n.props && n.props['data-dy-person'] !== undefined
+    && /测试群聊/.test(textOf(n, gFlat)))
+  if (!gBtn) {
+    console.log('  ❌ 会话列表里找不到群（假数据里得有群才测得了）'); fail++
+  } else {
+    try {
+      await gBtn.props.onClick({ target: { value: '' } })
+      await flush()
+      const gf = walk(await renderNow())
+      const gtxt = gf.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
+      if (/假成功|渠道限制|只能看/.test(gtxt)) {
+        console.log('  ✅ 选中群后，面板上出现群聊限制说明（不是藏起来的）')
+      } else {
+        console.log('  ❌ 选中群后没看到限制说明（提示被藏起来了）'); fail++
+      }
+    } catch (e) { console.log(`  ❌ 点群抛错：${e?.message ?? e}`); fail++ }
+  }
+}
+
+/* ── 🔴 真 @ 的工具名不能写错（2026-10-26 修）──
+ *    值班提示词原来让模型调 douyin_comment_reply + mode:"ui"，
+ *    但真 @ 的工具叫 douyin_comment_mention（reply 只能发普通评论）。 */
+console.log('\n【真 @ 工具名】')
+{
+  const idx = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  if (/douyin_comment_mention/.test(idx)) console.log('  ✅ 值班提示词指向 douyin_comment_mention（真 @ 专用）')
+  else { console.log('  ❌ 值班提示词没提 douyin_comment_mention'); fail++ }
+  if (/mode = "ui"|mode="ui"/.test(idx)) {
+    console.log('  ❌ 值班提示词还在用 mode:"ui"（douyin_comment_reply 没这个参数，会发成普通评论）'); fail++
+  } else console.log('  ✅ 没让模型用不存在的 mode:"ui" 参数')
 }
 
 /* ── 看日志 ── */

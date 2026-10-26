@@ -728,10 +728,12 @@ async function main() {
     const appeared = String(bodyNow).replace(/\s+/g, ' ').includes(text.replace(/\s+/g, ' ').slice(0, 24))
     const ok = Number(leftInBox) === 0 && readback
     /**
-     * ⭐ 0.5.6 实测账号限制（2026-10-26，主人+作者双方确认）：
+     * ⭐ 0.5.6 实测**渠道限制**（2026-10-26，主人+作者双方确认）：
      *    **网页端发群，服务端收下但不分发**（回执 im_callback_status_code=7523）——
      *    自己账号重新登录能看到消息，群里其他成员永远收不到；手机端发同一账号正常。
-     *    ⇒ 发群"成功"只代表本地回显，必须在返回里写明这个限制，调用方/值班别拿它当真发了。
+     *    ⇒ 这是**渠道限制、不是账号坏了**（换号不一定管用）；发群"成功"只代表本地回显，
+     *      必须在返回里写明这个限制，调用方/值班别拿它当真发了。
+     *    ⚠️ 只在鱼号上测过 —— 别的账号有没有差别，未验证。
      *    私聊不受影响（同一条链路实测一直通）。
      */
     const isGroupSend = !target.sec_uid
@@ -749,11 +751,12 @@ async function main() {
       // DOM 顺序是「新的在上」，所以前 3 条就是最新的 3 条
       msgs_sample: afterMsgs.slice(0, 3).map((m) => `${m.from}: ${String(m.text || '').slice(0, 36)}`),
       appeared, box_left: Number(leftInBox),
-      // 🔴 账号限制：网页端发群不分发（7523）—— 发群时必带，别当真发了
+      // 🔴 渠道限制：网页端发群不分发（7523）—— 发群时必带，别当真发了
       ...(isGroupSend ? {
         account_limit: 'web_group_no_fanout',
         warning: '⚠️ 网页端发群是「假成功」：消息只进本账号信箱，群里其他成员收不到（服务端回执 7523，实测 2026-10-26）。' +
-          '手机端同一账号发送正常 —— 要在群里说话请用手机端，或由主人手动发。',
+          '这是**渠道限制、不是账号坏了** —— 同一账号手机端发送正常，换号也不一定管用。' +
+          '要在群里说话请用手机端，或由主人手动发。（是否所有账号都一样，只在鱼号上测过。）',
         delivered_to_others: false,
       } : {}),
       error: ok ? undefined
