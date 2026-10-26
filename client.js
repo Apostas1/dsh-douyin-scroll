@@ -1030,12 +1030,14 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                   'data-picked': p.listen ? '' : undefined,
                 },
                   h('span', { 'data-dy-person-name': '' }, p.nick || (p.sec_uid || '').slice(0, 10) + '…'),
-                  p.sec_uid ? null : h('span', { 'data-dy-tag': '' }, '⚠️ 没有稳定 id，重名可能选错'),
+                  p.sec_uid
+                    ? null
+                    : h('span', { 'data-dy-tag': '' }, '群聊'),
                   h('span', { 'data-dy-grow': '' }),
                   h('button', {
                     'data-dy-mini': '', 'data-ok': p.listen ? '' : undefined,
                     disabled: Boolean(busy),
-                    title: p.listen ? '开着：他来私信小鱼自动接' : '关着：只收日报，来消息不自动接',
+                    title: p.listen ? '开着：来消息小鱼自动看' : '关着：只收日报，来消息不自动接',
                     onClick: () => toggleListen(i),
                   }, p.listen ? '👂 听他的话：开' : '听他的话：关'),
                   h('button', {
@@ -1056,7 +1058,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                     onClick: () => pickPerson(p),
                   },
                     h('span', { 'data-dy-person-name': '' }, p.nick),
-                    p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
+                    p.is_group ? h('span', { 'data-dy-tag': '' }, '群聊') : null,
+                    p.duplicate && !p.is_group ? h('span', { 'data-dy-tag': '' }, '重名') : null,
                     added ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已在列表') : null,
                     p.preview ? h('span', { 'data-dy-person-sub': '' }, p.preview) : null)
                 }))

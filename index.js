@@ -542,8 +542,9 @@ export function apply(ctx, config) {
   }
   /** 主联系人（第一个）—— 值班提示词兼容旧用法时用它 */
   const dmPrimary = () => dmPeersOf()[0] || { nick: '', sec_uid: '', listen: false }
-  /** 「听他的话」的人 —— 值班盯梢只巡这些 */
-  const dmListeners = () => dmPeersOf().filter((p) => p.listen && p.sec_uid)
+  /** 「听他的话」的人 —— 值班盯梢只巡这些
+   *  ⭐ 0.5.5b 群聊：群没有 sec_uid（抖音结构如此），按「群名」身份放行 —— 不许再把群静默跳过 */
+  const dmListeners = () => dmPeersOf().filter((p) => p.listen && (p.sec_uid || p.nick))
   /**
    * 🔴🔴🔴 2026-10-26 凌晨最后一块补丁：**挂载时自己把开关恢复回上次的状态**。
    *
@@ -3192,7 +3193,52 @@ export function apply(ctx, config) {
       for (const peer of listeners) {
       const toId = peer.sec_uid
       const nick = peer.nick
-      const pState = chatWatchPeers[toId] || { lastSeenAt: '', primed: false }
+      const isGroup = !toId && Boolean(nick)   // ⭐ 0.5.5b：群（没 sec_uid，按昵称走浏览器路）
+      const key = toId || ('group:' + nick)    // 群的身份键：group:<群名>
+      const pState = chatWatchPeers[key] || { lastSeenAt: '', primed: false }
+      if (isGroup) {
+        // 🔴 群消息走浏览器路径读（im-http 的身份铁闸只认 sec_uid，群过不去 —— 设计如此）
+        const r = runNodeTool('im-send.mjs', ['--read', '--to', nick], { timeout: 240_000 })
+        const j = pickJson(r.stdout)
+        cwState.checks += 1
+        if (!j || !j.ok) {
+          chatWatchLog(`群「${nick}」读不到：${String((j && (j.error || j.hint)) || '原因未知').slice(0, 100)}`)
+          cwWrite({ lastCheckAt: Date.now(), lastResult: 'error', lastError: `群「${nick}」：${String((j && (j.error || j.hint)) || '读不到').slice(0, 120)}` })
+          continue
+        }
+        const gmsgs = Array.isArray(j.messages) ? j.messages : []
+        // 浏览器路径没有时间戳 ⇒ 以「seen 数组」判新（内容 + 发送者）
+        // ⭐ 群里头像全在左半边 ⇒ 发送者全归 unknown ⇒ 判新只能按「没见过的文本」算，
+        //    them/unknown 都算数（自己的发言也会进来 —— 群转达词里已写明默认不回）
+        const seen = pState.seen || []
+        const fresh = gmsgs.filter((m) => m.from !== 'me' && !seen.includes(String(m.text || '').slice(0, 160)))
+        if (!pState.primed) {
+          chatWatchPeers[key] = { lastSeenAt: '', primed: true, seen: gmsgs.map((m) => String(m.text || '').slice(0, 160)) }
+          cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_prime', lastError: '' })
+          chatWatchLog(`已接上班（群「${nick}」，基准 = 最近 ${gmsgs.length} 条，之前的不重播）`)
+          continue
+        }
+        if (!fresh.length) { cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok', lastError: '' }); continue }
+        chatWatchPeers[key] = {
+          ...pState, primed: true,
+          seen: [...gmsgs.map((m) => String(m.text || '').slice(0, 160)), ...seen].slice(0, 80),
+        }
+        cwState.notified += fresh.length
+        chatWatchLog(`新消息 ${fresh.length} 条（群「${nick}」）：${String(fresh[0].text || '').slice(0, 60)}`)
+        // 转达给值班 —— 群里的话都是素材，值班自己判断要不要回（回个人用 douyin_dm，回群不承诺）
+        const gtext = [
+          `【抖音群聊·自动转达】群「${nick}」来了 ${fresh.length} 条新消息：`,
+          ...fresh.slice(-5).map((m) => `- ${String(m.text || '').slice(0, 100)}`),
+          `（群里谁都在说话，**默认不要回** —— 除非有人 @小鱼 或明确在跟鱼说话；回复只走 douyin_dm 私聊那个人，不在群里刷屏。）`,
+        ].join('\n')
+        try {
+          const w = cfg.chatWatchTarget === 'duty' ? await deliverToDutyFish(gtext) : await tryDeliverToSession(gtext)
+          cwWrite({ lastCheckAt: Date.now(), lastResult: w && w.ok ? 'ok_new' : 'error', lastError: w && w.ok ? '' : String((w && w.reason) || '转达失败').slice(0, 100), lastNewText: String(fresh[fresh.length - 1].text || '').slice(0, 40), toast: w && w.ok ? `群「${nick}」的 ${fresh.length} 条已转给值班` : '群消息看见了但没转出去' })
+        } catch (e) {
+          cwWrite({ lastCheckAt: Date.now(), lastResult: 'error', lastError: '群转达失败：' + String(e?.message ?? e).slice(0, 100) })
+        }
+        continue
+      }
       const r = runPy('im-http.py', ['--read', '--peer-sec-uid', toId, '--limit', '8'], { timeout: 30_000 })
       const j = pickJson(r.stdout)
       cwState.checks += 1

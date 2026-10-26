@@ -299,7 +299,10 @@ async function openConversation(ev, send, who, whoId) {
    * ⭐ 判断"当前会话是不是就是他"要用**右栏头部**，不是 bodyText。
    *    右栏头部 = `[class*="componentsRightPanel"]` 的第一行文本，那才是对端昵称。
    *    （bodyText 含左侧列表，任何人都在里面 —— 那正是 bug ① 的根源）
+   * ⭐ 0.5.5b 群：右栏头部对**群**是「群名(成员数)」—— 比对时把尾部 (数字) 归一化掉，
+   *    否则点了群、校验却拿「群名(3)」≠「群名」直接中止（实测踩到）。
    */
+  const baseNick = (s) => String(s || '').replace(/\(\d+\)\s*$/, '').trim()
   const currentWho = async () => {
     const nick = String(await ev(`(function(){
       var r = document.querySelector('[class*="componentsRightPanel"]');
@@ -321,8 +324,9 @@ async function openConversation(ev, send, who, whoId) {
       /**
        * ⭐ 只有昵称时的判据：右栏头部**精确等于**昵称才算已打开。
        *    ⚠️ 不要用 includes：昵称 "拣" 是 "拣东西" 的前缀；而且这里以前是整个 bodyText。
+       *    ⭐ 0.5.5b：比对走 baseNick（群名带 "(N)" 后缀也能对上）
        */
-      if (cur.nick && cur.nick === who && cur.id) {
+      if (cur.nick && baseNick(cur.nick) === baseNick(who) && cur.id) {
         return { status: 'already-open', matched: { sec_uid: cur.id, nick: cur.nick } }
       }
       // 右栏读不到昵称 ⇒ 不能想当然，落到下面去点列表
@@ -510,7 +514,7 @@ async function openConversation(ev, send, who, whoId) {
   if (whoId && after.id && after.id !== whoId) {
     return { status: 'mismatch', matched: null, want: whoId, got: after.id, hint: '点开的会话对端不是要发的那个人，已中止' }
   }
-  if (!whoId && who && after.nick && after.nick !== who) {
+  if (!whoId && who && after.nick && baseNick(after.nick) !== baseNick(who)) {
     return {
       status: 'mismatch', matched: null, want: who, got: after.nick,
       hint: '点了「' + who + '」但右栏变成「' + after.nick + '」，对不上，已中止',
@@ -554,6 +558,9 @@ async function main() {
           unread: Number(x.unread) || 0,
           /** ⚠️ 是否在可视区 —— false 的话点它没用（另一个列表被平移到屏外） */
           in_view: x.in_view !== false,
+          /** ⭐ 0.5.5b 群：没有 sec_uid 的会话项就是群（或服务号）—— 如实标出来，
+           *  面板靠这个显示「群聊」，不再吓唬用户「没有稳定 id」 */
+          is_group: !x.sec_uid,
         }
       }).filter((p) => p.nick)
       // 同名的人标出来（这种必须用 sec_uid 区分）
@@ -664,7 +671,7 @@ async function main() {
       var lines = (r.innerText || '').split('\\n').map(function(s){return s.trim()}).filter(Boolean);
       return lines.length ? lines[0] : '';
     })()`) || '').trim()
-    if (gateNick && target.nick && gateNick !== target.nick) {
+    if (gateNick && target.nick && baseNick(gateNick) !== baseNick(target.nick)) {
       return out({
         ok: false, sent: false, error: '发送前核对失败：右栏是「' + gateNick + '」，不是「' + target.nick + '」，已中止（没发出去）',
         want: target.nick, got: gateNick, chrome: chromed,
