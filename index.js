@@ -384,6 +384,14 @@ export function apply(ctx, config) {
       else if (typeof base[k] === 'number') { const n = Number(v); if (Number.isFinite(n)) out[k] = n }
       else if (typeof base[k] === 'boolean') { if (typeof v === 'boolean') out[k] = v }
       else if (typeof base[k] === 'string') { if (typeof v === 'string') out[k] = v }
+      // ⭐ 0.5.8 修：对象字段（如 atPeer）—— 之前四个分支都不接，写入被静默丢弃
+      //    （面板点人「没反应」的真凶：请求 ok=true 但字段被扔了）。只收 { 字符串: 字符串 }。
+      else if (typeof base[k] === 'object') {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) continue
+        const o = {}
+        for (const [fk, fv] of Object.entries(v)) if (typeof fv === 'string') o[fk] = fv
+        out[k] = o
+      }
     }
     return out
   }
