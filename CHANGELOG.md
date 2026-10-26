@@ -47,6 +47,12 @@
 - **UTF-8 BOM**：PowerShell 写的 JSON 带 BOM，`JSON.parse` 抛错 ⇒ readJson 静默返回空
   ⇒ 文件肉眼正确、程序当它不存在。现在 `readJson` 会先剥 BOM
 
+### 四、发布前实锤修复（2026-10-26 早）
+
+- **`tools/api-comments.py` / `tools/api-reply.py` / `tools/psd-export.py` 里的路径是没替换的占位符 `<本目录>`**
+  —— 起签名进程时 cwd 是无效目录，拉评论/回评论直接炸 `NotADirectoryError`（WinError 267），装公开包的用户必踩。
+  已改成按脚本自身位置自动算真实路径，不再依赖安装目录写死（`6580a7e`）。
+
 ### 实测
 
 - 自愈：重启后日志 `[自愈] intent=true cfg=false canWork=true` → `已自动恢复`，磁盘变回 true ✅
