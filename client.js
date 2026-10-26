@@ -302,6 +302,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       const [runLog, setRunLog] = React.useState(null)
       // 「在评论区 @ 你」要 @ 的昵称（输入框草稿）
       const [atMeDraft, setAtMeDraft] = React.useState(null)
+      // 0.5.6c「想 @ 别的号」折叠态（默认收起 —— @ 谁默认自动认登录号，不用打字）
+      const [atMeOpen, setAtMeOpen] = React.useState(false)
       // 聊天盯梢间隔的输入草稿（2026-10-24）
       const [cwSecDraft, setCwSecDraft] = React.useState(null)
       // dsh 入口路径（输入框草稿）—— 2026-10-23 加，见「出问题了？」卡片
@@ -1133,19 +1135,28 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                 + '① 电脑上要装了 Chrome；② 要 @ 的昵称必须能在弹层里搜到（一般是关注/互关的人）；'
                 + '③ 只写「@昵称」文字、没走点选的评论，对方收不到通知 —— 这是抖音的限制，不是插件偷懒。')
               : null,
-            /* 想 @ 别的号才需要填 */
+            /* ⭐ 0.5.6c：@ 谁不用打字 —— 默认就是登录的这个号（account.json 自动有昵称）。
+             *    输入框降级成「想 @ 别的号才展开」的折叠项。 */
             cfg.commentAtMe
-              ? h('div', { 'data-dy-row': '' },
-                h('input', {
-                  'data-dy-input': '', style: { flex: '1' },
-                  placeholder: '想 @ 别的号才填昵称（留空 = @ 你登录的这个号）',
-                  value: atMeDraft !== null ? atMeDraft : String(cfg.commentSelfName || ''),
-                  onChange: (e) => setAtMeDraft(e.target.value),
-                }),
-                h('button', {
-                  'data-dy-mini': '', disabled: Boolean(busy) || atMeDraft === null,
-                  onClick: async () => { await patch({ commentSelfName: String(atMeDraft || '').trim() }, '已保存要 @ 的昵称'); setAtMeDraft(null) },
-                }, '保存'))
+              ? (atMeOpen
+                ? h('div', { 'data-dy-row': '' },
+                  h('input', {
+                    'data-dy-input': '', style: { flex: '1' },
+                    placeholder: '要 @ 的昵称（清空保存 = 恢复 @ 登录号）',
+                    value: atMeDraft !== null ? atMeDraft : String(cfg.commentSelfName || ''),
+                    onChange: (e) => setAtMeDraft(e.target.value),
+                  }),
+                  h('button', {
+                    'data-dy-mini': '', disabled: Boolean(busy) || atMeDraft === null,
+                    onClick: async () => { await patch({ commentSelfName: String(atMeDraft || '').trim() }, '已保存要 @ 的昵称'); setAtMeDraft(null) },
+                  }, '保存'),
+                  h('button', { 'data-dy-mini': '', onClick: () => { setAtMeOpen(false); setAtMeDraft(null) } }, '收起'))
+                : h('div', { 'data-dy-row': '' },
+                  h('span', { 'data-dy-sub': '' },
+                    '要 @ 的人：' + (cfg.commentSelfName
+                      ? `「${cfg.commentSelfName}」（手动指定的号）`
+                      : `「${(acc && acc.nick) || '登录的号'}」（默认 = 你登录的这个号，自动认，不用填）`)),
+                  h('button', { 'data-dy-mini': '', onClick: () => { setAtMeOpen(true); setAtMeDraft(cfg.commentSelfName || '') } }, '想 @ 别的号')))
               : null,
 
             /* ⭐⭐ 聊天模式（2026-10-24）：使用者实测的「会话模式」进插件。
