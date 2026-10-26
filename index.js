@@ -800,6 +800,10 @@ export function apply(ctx, config) {
         if (code === 0 && existsSync(venvPy)) {
           await persistCfg({ pythonPath: venvPy })
           appendInstall(`已把 pythonPath 设为 ${venvPy}\n`)
+          // ⭐ 签名器运行时（Issue #2① / #4）：jsdom + 字节 SDK + 真签验货 —— 没它读评论是死的
+          appendInstall('\n=== 签名器运行时（读评论要用） ===\n')
+          const sCode = await spawnTo(process.execPath, [join(pluginDir, 'tools', 'signer-setup.mjs')], { cwd: pluginDir })
+          log(`签名器运行时安装结束：exit=${sCode}`)
         }
         appendInstall(`=== 结束（exit ${code}，venvReady=${venvReadyNow()}）===\n`)
         log(`装主依赖结束：exit=${code} venvReady=${venvReadyNow()}`)

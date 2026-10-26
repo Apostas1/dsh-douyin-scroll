@@ -15,7 +15,7 @@
  *   node tools/doctor.mjs --json     # 机器读的（设置页 / douyin_doctor 用）
  * ============================================================================
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
@@ -88,7 +88,24 @@ try {
   row('无头浏览器', 'warn', String(e?.message ?? e), '跑一次取候选或发私信时会自动拉起')
 }
 
-/* ── 8. 关键文件 ── */
+/* ── 8. 签名器运行时（读评论要用；Issue #2① / #4） ── */
+if (home) {
+  const signerDir = process.env.DY_SIGNER_DIR || join(home, 'signer')
+  const jsdomOk = existsSync(join(signerDir, 'node_modules', 'jsdom', 'package.json'))
+  const sdkNames = ['webmssdk.js', 'secsdk-runtime.js', 'sdk-glue.js', 'slardar.js', 'bdms-signer.js', 'captcha-sdk.js', 'verifycenter.js']
+  const haveSdk = sdkNames.filter((n) => { try { return statSync(join(signerDir, 'sdk', n)).size > 1000 } catch { return false } }).length
+  if (jsdomOk && haveSdk === sdkNames.length) {
+    row('签名器运行时', 'ok', `已装（jsdom + ${haveSdk} 个 SDK）`)
+  } else if (!jsdomOk && haveSdk === 0) {
+    row('签名器运行时', 'warn', '还没装 —— 读评论/回评论会走无头浏览器兜底（能用，但每次慢几秒）',
+      '点「② 装主依赖」会自动带上；或手动 node tools/signer-setup.mjs')
+  } else {
+    row('签名器运行时', 'warn', `装了一半（jsdom:${jsdomOk ? '有' : '缺'}，SDK ${haveSdk}/${sdkNames.length}）`,
+      'node tools/signer-setup.mjs 补齐；真签自检：node tools/signer-setup.mjs --check')
+  }
+}
+
+/* ── 9. 关键文件 ── */
 const pdir = pluginDir()
 const need = ['index.js', 'client.js', 'lib/chrome.mjs', 'lib/paths.mjs',
   'tools/forward-pick.py', 'tools/im-send.mjs', 'tools/card-share.mjs',

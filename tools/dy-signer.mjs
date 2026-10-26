@@ -15,7 +15,7 @@
  *   → {"id":1,"url":"/aweme/v1/...","cookies":{"ttwid":"...","UIFID_TEMP":"..."}}
  *   ← {"id":1,"ok":true,"signedUrl":"https://www.douyin.com/aweme/...&a_bogus=...","headers":{}}
  */
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
@@ -161,7 +161,11 @@ if (isMain) {
   initSdks()
   if (argUrl) {
     const cookies = JSON.parse(process.env.DY_COOKIES || '{}')
-    signOne(argUrl, cookies).then((r) => { console.log(JSON.stringify(r, null, 2)); process.exit(0) }).catch((e) => { console.log('ERR ' + e.message); process.exit(1) })
+    signOne(argUrl, cookies).then((r) => {
+      // 环境变量 DY_SIGNER_OUT：把结果也写进文件（供 signer-setup 验货用 —— 它那边 spawn 不开管道）
+      if (process.env.DY_SIGNER_OUT) { try { writeFileSync(process.env.DY_SIGNER_OUT, JSON.stringify(r)) } catch { /* 写不了就算了 */ } }
+      console.log(JSON.stringify(r, null, 2)); process.exit(0)
+    }).catch((e) => { console.log('ERR ' + e.message); process.exit(1) })
   } else {
     console.log('[signer] ready（无参：只做自检）')
     process.exit(0)
