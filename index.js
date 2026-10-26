@@ -344,8 +344,11 @@ export function apply(ctx, config) {
   // ⭐ 哪些数组字段装的是**对象**（不能按字符串过滤）
   //    之前判断 `base[k].length && typeof base[k][0] === 'object'` —— 但 DEFAULTS 里
   //    `windows: []` 是空的，length=0，于是走了字符串分支，用户存的自定义时段全被吃掉。
-  //    改成显式声明，别靠"数组里恰好有元素"来判断。
-  const OBJECT_ARRAYS = new Set(['windows', 'dmPeers'])  /**
+  // 改成显式声明，别靠"数组里恰好有元素"来判断。
+  // ⭐ 0.5.9：atPeers（@ 名单）也是**对象数组** —— 不登记在这儿会被字符串过滤全滤掉
+  //    （面板点人「没反应」的老坑：请求 ok=true 但字段被扔了）。
+  const OBJECT_ARRAYS = new Set(['windows', 'dmPeers', 'atPeers'])
+  /**
    * 🔴 2026-10-25 晚追加（字符串守卫的姊妹篇）：**数组字段的空不许盖掉非空**。
    *    字符串那套守卫上线后，keywords（数组）继续裸奔 —— 表单给 [] / MCP patch 给 []
    *    都会把磁盘上的非空列表清掉，而且**没有任何日志**（静默丢失，查事故都查不到笔迹）。

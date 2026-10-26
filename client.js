@@ -526,31 +526,42 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       /* 0.5.7 「听他的话」开关已删（主人定稿：聊天模式开着 = 谁私信都接，列表只管发给谁） */
 
       /** 0.5.9 「评论区 @ 提醒」多选：开关管总闸，列表管范围；点人 = 加入/移除
-       *  会话列表复用私信区读到的 people（读一次，不反复拉） */
+       *  会话列表复用私信区读到的 people（读一次，不反复拉）
+       *  🔴 移除到「一个不剩」时必须带 __clearKeys —— 否则空数组会被空值守卫保回磁盘旧值（清不掉） */
+      const patchAtPeers = async (cur, msg) => {
+        await patch(cur.length
+          ? { atPeers: cur }
+          : { atPeers: [], __clearKeys: ['atPeers'] }, msg)
+      }
       const toggleAt = async (p) => {
         const cur = Array.isArray(cfg.atPeers) ? [...cfg.atPeers] : []
         const idx = cur.findIndex((x) => x.nick === p.nick)
         let msg
         if (idx >= 0) { cur.splice(idx, 1); msg = `已把「${p.nick}」移出 @ 名单` }
         else { cur.push({ nick: p.nick }); msg = `@ 名单加了「${p.nick}」（共 ${cur.length} 人）` }
-        await patch({ atPeers: cur }, msg)
+        await patchAtPeers(cur, msg)
       }
       const removeAt = async (idx) => {
         const cur = Array.isArray(cfg.atPeers) ? [...cfg.atPeers] : []
         if (!cur[idx]) return
         const gone = cur.splice(idx, 1)[0]
-        await patch({ atPeers: cur }, `已把「${gone.nick}」移出 @ 名单`)
+        await patchAtPeers(cur, `已把「${gone.nick}」移出 @ 名单`)
       }
       const clearAt = async () => {
-        await patch({ atPeers: [] }, '@ 名单已清空 —— 开关开着也不会 @ 任何人')
+        // 🔴 数组守卫同款：真清空必须带 __clearKeys 显式口子，否则空数组会被保回磁盘旧值（清不掉）
+        await patch({ atPeers: [], __clearKeys: ['atPeers'] }, '@ 名单已清空 —— 开关开着也不会 @ 任何人')
       }
 
-      /** 0.5.5 把某人从列表里移除 */
+      /** 0.5.5 把某人从列表里移除
+       *  🔴 移除到「一个不剩」必须带 __clearKeys（空数组会被守卫保回磁盘旧值） */
       const removePeer = async (idx) => {
         const cur = Array.isArray(cfg.dmPeers) ? [...cfg.dmPeers] : []
         if (!cur[idx]) return
         const gone = cur.splice(idx, 1)[0]
-        await patch({ dmPeers: cur }, `已把「${gone.nick || gone.sec_uid}」移出私信对象`)
+        await patch(cur.length
+          ? { dmPeers: cur }
+          : { dmPeers: [], __clearKeys: ['dmPeers'] },
+          `已把「${gone.nick || gone.sec_uid}」移出私信对象`)
       }
 
       /** 展开 / 收起「怎么用」（新手流程） */
