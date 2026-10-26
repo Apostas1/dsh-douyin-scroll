@@ -749,8 +749,8 @@ else { console.log('  ❌ 没说清适用范围'); fail++ }
 console.log('\n【评论区 @ 提醒】')
 if (/评论区 @ 提醒/.test(allText)) console.log('  ✅ 有「评论区 @ 提醒」区块（0.5.8 无开关设计）')
 else { console.log('  ❌ 没有「评论区 @ 提醒」'); fail++ }
-if (/关（没选人 = 不 @）|想开就点下面一个人/.test(allText)) console.log('  ✅ 未选人时的关闭态说明清楚了')
-else { console.log('  ❌ 未选人时的关闭态没说明'); fail++ }
+if (/总闸关着 —— 选了人也不 @/.test(allText)) console.log('  ✅ 开关关闭态说明清楚了（0.5.9 总闸+多选）')
+else { console.log('  ❌ 开关关闭态没说明'); fail++ }
 // 位置：必须在「自动发送」之后
 {
   const iSend = allText.indexOf('自动发送')

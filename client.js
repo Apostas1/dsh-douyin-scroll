@@ -300,8 +300,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       const [chatText, setChatText] = React.useState('')
       // 最近一轮的日志
       const [runLog, setRunLog] = React.useState(null)
-      // 「评论区 @ 提醒」（0.5.8）：没有开关、没有输入框 —— atPeer 一个状态管一切
-      const [showAtPicker, setShowAtPicker] = React.useState(false)
+      // 「评论区 @ 提醒」（0.5.9）：开关 = 总闸，atPeers 多选 = 范围；会话列表只读一次
       // 聊天盯梢间隔的输入草稿（2026-10-24）
       const [cwSecDraft, setCwSecDraft] = React.useState(null)
       // dsh 入口路径（输入框草稿）—— 2026-10-23 加，见「出问题了？」卡片
@@ -526,14 +525,24 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
 
       /* 0.5.7 「听他的话」开关已删（主人定稿：聊天模式开着 = 谁私信都接，列表只管发给谁） */
 
-      /** 0.5.8 「评论区 @ 提醒」选人 —— 没有开关：选了人 = 功能开，清掉 = 关
-       *  选人数据复用私信区已加载的 people（读一次两边都能选） */
-      const pickAt = async (p) => {
-        await patch({ atPeer: { nick: p.nick } }, `挑到好视频时会在评论区 @「${p.nick}」`)
-        setShowAtPicker(false)
+      /** 0.5.9 「评论区 @ 提醒」多选：开关管总闸，列表管范围；点人 = 加入/移除
+       *  会话列表复用私信区读到的 people（读一次，不反复拉） */
+      const toggleAt = async (p) => {
+        const cur = Array.isArray(cfg.atPeers) ? [...cfg.atPeers] : []
+        const idx = cur.findIndex((x) => x.nick === p.nick)
+        let msg
+        if (idx >= 0) { cur.splice(idx, 1); msg = `已把「${p.nick}」移出 @ 名单` }
+        else { cur.push({ nick: p.nick }); msg = `@ 名单加了「${p.nick}」（共 ${cur.length} 人）` }
+        await patch({ atPeers: cur }, msg)
+      }
+      const removeAt = async (idx) => {
+        const cur = Array.isArray(cfg.atPeers) ? [...cfg.atPeers] : []
+        if (!cur[idx]) return
+        const gone = cur.splice(idx, 1)[0]
+        await patch({ atPeers: cur }, `已把「${gone.nick}」移出 @ 名单`)
       }
       const clearAt = async () => {
-        await patch({ atPeer: { nick: '' }, commentAtMe: false }, '已清掉 @ 对象 —— 「在评论区 @ 你」关闭')
+        await patch({ atPeers: [] }, '@ 名单已清空 —— 开关开着也不会 @ 任何人')
       }
 
       /** 0.5.5 把某人从列表里移除 */
@@ -817,9 +826,9 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
 
       const kwText = kws !== null ? kws : (Array.isArray(cfg.keywords) ? cfg.keywords.join('\n') : '')
 
-      /* ⭐ 0.5.5 私信对象列表的小工具（面板侧只读展示用）；0.5.7 加 @ 对象 */
+      /* ⭐ 0.5.5 私信对象列表的小工具（面板侧只读展示用）；0.5.9 @ 多选列表 */
       const dmPeers = Array.isArray(cfg.dmPeers) ? cfg.dmPeers.filter((p) => p && (p.nick || p.sec_uid)) : []
-      const atNick = String((cfg.atPeer && cfg.atPeer.nick) || '').trim()
+      const atPeers = Array.isArray(cfg.atPeers) ? cfg.atPeers.filter((p) => p && String(p.nick || '').trim()) : []
 
       /* ════════════════════════════════════════════════════════════════════════
        * 面板结构（2026-10-25 重排：20+ 张卡 → 3 组 / 7 张卡）
@@ -1098,43 +1107,72 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               : null),
 
 
-            /* ⭐⭐ 评论区 @ 提醒（0.5.8 主人定稿）—— **没有开关**：
-             *    选了人 = 功能开；没选人 = 功能关。一个状态管一切，不再有第二份状态。
-             *    选人数据复用私信区已加载的 people（读一次两边都能选）。 */
+            /* ⭐⭐ 评论区 @ 提醒（0.5.9 主人定稿）—— 开关 = 总闸，选人 = 范围（可多个）：
+             *    开关开着 + 名单有人 = 会 @；开关关 = 选了人也不 @；开着没选 = 待命（值班跳过）。
+             *    会话列表只读一次（复用私信区的 people），不反复拉。 */
             h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
               h('div', { 'data-dy-grow': '' },
                 h('div', { 'data-dy-title': '' }, '评论区 @ 提醒'),
                 h('div', { 'data-dy-sub': '' },
                   !cfg.autoSend
                     ? '先打开上面的「自动发送」，这个才有用。'
-                    : atNick
-                      ? `开：挑到最值得的那条时，在它的评论区发一条 @「${atNick}」的评论（他刷抖音就能收到通知）。`
-                      : '关（没选人 = 不 @）。想开就点下面一个人。')),
-              cfg.autoSend && !atNick
-                ? h('button', {
-                  'data-dy-mini': '', disabled: busy === 'people' || !st.loggedIn, onClick: () => { if (!people) loadPeople(); setShowAtPicker(true) },
-                }, busy === 'people' ? '读取中…' : '选人')
-                : null),
-            cfg.autoSend && (showAtPicker || !atNick)
+                    : !cfg.commentAtMe
+                      ? '总闸关着 —— 选了人也不 @。'
+                      : atPeers.length
+                        ? `开：挑到最值得的那条时，在评论区 @ ${atPeers.map((p) => p.nick).join('、')}（他刷抖音就能收到通知）。`
+                        : '开着但还没选人 —— 待命中，选了人就开始 @。')),
+              h(Switch, {
+                on: Boolean(cfg.commentAtMe),
+                disabled: !cfg.autoSend || busy === 'patch',
+                onChange: (v) => {
+                  if (!atPeers.length && v) { if (!people) loadPeople(); setShowAtPicker(true) }
+                  patch({ commentAtMe: v }, v ? '✅ 评论区 @ 提醒：开（选了人就开始 @）' : '已关闭 —— 选了人也不 @')
+                },
+              })),
+            cfg.autoSend && cfg.commentAtMe
+              ? h('div', { 'data-dy-sub': '' },
+                atPeers.length
+                  ? `要 @ 的人（${atPeers.length}）：${atPeers.map((p) => p.nick).join('、')}`
+                  : '要 @ 的人：（还没选 —— 点下面列表里的人）')
+              : null,
+            cfg.autoSend && cfg.commentAtMe && !people
+              ? h('div', { 'data-dy-row': '' },
+                h('button', {
+                  'data-dy-mini': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
+                }, busy === 'people' ? '读取会话列表中…' : '读一次会话列表（两个选人区共用，不反复拉）'))
+              : null,
+            cfg.autoSend && cfg.commentAtMe
               ? h('div', { 'data-dy-people': '' },
                 people && people.length
-                  ? people.map((p, i) => h('button', {
-                    key: 'at' + i,
-                    'data-dy-person': '',
-                    'data-picked': atNick === p.nick ? '' : undefined,
-                    disabled: Boolean(busy) || p.is_group,
-                    onClick: () => pickAt(p),
-                  },
-                    h('span', { 'data-dy-person-name': '' }, p.nick),
-                    p.is_group ? h('span', { 'data-dy-tag': '' }, '群不能 @') : null,
-                    atNick === p.nick ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ @ 他') : null))
-                  : h('div', { 'data-dy-sub': '' }, busy === 'people' ? '读取会话列表中…' : '先点上面「私信发给谁」的「从我的会话里选」读一次列表，这里共用'))
+                  ? people.map((p, i) => {
+                    const added = atPeers.some((x) => x.nick === p.nick)
+                    return h('button', {
+                      key: 'at' + i,
+                      'data-dy-person': '',
+                      'data-picked': added ? '' : undefined,
+                      disabled: Boolean(busy) || p.is_group,
+                      onClick: () => toggleAt(p),
+                    },
+                      h('span', { 'data-dy-person-name': '' }, p.nick),
+                      p.is_group ? h('span', { 'data-dy-tag': '' }, '群不能 @') : null,
+                      added ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 要 @') : null)
+                  })
+                  : h('div', { 'data-dy-sub': '' }, busy === 'people' ? '读取中…' : '会话列表还没读'))
               : null,
-            atNick
+            atPeers.length
               ? h('div', { 'data-dy-row': '' },
-                h('button', { 'data-dy-mini': '', disabled: Boolean(busy), onClick: clearAt }, '不 @ 了（关）'))
+                atPeers.map((p, i) => h('span', {
+                  key: 'atp' + i, 'data-dy-tag': '', 'data-ok': '', style: { marginRight: '6px' },
+                },
+                  p.nick + ' ',
+                  h('button', {
+                    'data-dy-mini': '', disabled: Boolean(busy), style: { marginLeft: '2px' },
+                    onClick: () => removeAt(i),
+                  }, '×'))),
+                h('span', { 'data-dy-grow': '' }),
+                h('button', { 'data-dy-mini': '', disabled: Boolean(busy), onClick: clearAt }, '全清（不 @ 了）'))
               : null,
-            atNick && cfg.autoSend
+            cfg.commentAtMe && cfg.autoSend
               ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px', opacity: '.78' } },
                 '💡 真 @ 需要起无头 Chrome 走「点选弹层」流程（约 20-40 秒）；@ 的昵称必须能在弹层里搜到（一般是关注/互关的人）。')
               : null,

@@ -135,11 +135,13 @@ export const Config = !z ? undefined : z.object({
    */
   commentAtMe: z.boolean().default(false).extra('volatile', true),
   /**
-   * ⭐ 0.5.7（主人定稿）「在评论区 @ 你」要 @ 谁 —— **从会话列表点选**（{nick}）。
-   *    没选人 ⇒ @ 功能关闭（不再「保底 @ 登录号」）。commentSelfName 作废不读。
+   * ⭐ 0.5.9（主人定稿）「评论区 @ 提醒」：
+   *   commentAtMe = 总闸开关（开/关跟选人解耦 —— 开着可以暂时没人，关着选了人也无效）
+   *   atPeers = @ 对象列表（多选，{nick}）；会话列表只读一次，两个区块共用
+   *   ⚠️ 旧字段 atPeer（单选）/commentSelfName 作废不读。
    */
-  atPeer: z.object({ nick: z.string().default('') }).default({}).extra('volatile', true),
-  /** ⚠️ 作废（0.5.7）：@ 的人改走 atPeer 点选。字段留着不读，防止老 config.json 报未知键 */
+  atPeers: z.array(z.object({ nick: z.string().default('') })).default([]).extra('volatile', true),
+  /** ⚠️ 作废（0.5.9）：@ 改走 atPeers 多选。字段留着不读，防止老 config.json 报未知键 */
   commentSelfName: z.string().default('').extra('volatile', true),
   /** 评论执行器：off / builtin（不可用）/ browser / http */
   commentExecutor: z.string().default('off').extra('volatile', true),
@@ -322,7 +324,7 @@ export function apply(ctx, config) {
     windows: [],
     keywords: [], channels: [], authors: [],
     minDescLen: 12, minComments: 3,
-    autoComment: false, autoSend: true, commentAtMe: false, atPeer: {}, commentSelfName: '',
+    autoComment: false, autoSend: true, commentAtMe: false, atPeers: [], commentSelfName: '',
     commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
     mentionName: '', httpCommentUrl: '',
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
@@ -2660,31 +2662,35 @@ export function apply(ctx, config) {
            *    但「有人 @ 我，回他」是另一回事：有 comment_id ⇒ 必须**直接回复**，不许用 @。
            *    规则一句话：**有评论可回就回复，没评论可回才 @。**
            */
-          (cfg.commentAtMe || String(cfg.atPeer?.nick || '').trim()
+          (cfg.commentAtMe
             ? (() => {
-              // ⭐ 0.5.8（主人定稿）：面板已无开关 —— @ 对象（atPeer.nick）一个状态管一切。
-              //    commentAtMe 只是旧配置残余；为老用户平滑，两个字段任一有值都算开。
-              const who = String(cfg.atPeer?.nick || '').trim() || String(cfg.commentSelfName || '').trim()
-              if (!who) {
+              // ⭐ 0.5.9（主人定稿）：总闸 commentAtMe + 多选 atPeers。
+              //   开着但名单空 ⇒ 待命（值班跳过 @，报告里说明）；关着 ⇒ 名单无效。
+              const nicks = (Array.isArray(cfg.atPeers) ? cfg.atPeers : [])
+                .map((p) => String(p?.nick || '').trim()).filter(Boolean)
+              if (!nicks.length) {
                 return `「评论区 @ 提醒」开着但还没选 @ 谁 —— 这一轮**跳过 @ 评论**，只写报告。`
               }
-              return `🔴 **「在评论区 @ 你」开着 —— 这是这一轮的重点任务**：\n`
-                + `   ⭐ 为什么这里用 @ 而不是"直接回复"：这个视频下面**没有他的评论可回**，\n`
+              const who = nicks[0]
+              const allNicks = nicks.join('、')
+              return `🔴 **「评论区 @ 提醒」开着 —— 这是这一轮的重点任务**：\n`
+                + `   要 @ 的人（${nicks.length} 个）：${allNicks}\n`
+                + `   ⭐ 为什么这里用 @ 而不是"直接回复"：这些视频下面**没有他们的评论可回**，\n`
                 + `      只能靠 @ 通知把他叫过来。这是 @ 唯一该用的场景。\n`
                 + `   挑到**最值得的那 1 条**（只挑 1 条，别贪）之后：\n`
                 + `   ① 调 \`douyin_comment_reply\`，**mode = "ui"**（真 @，UI 点选，会起无头 Chrome，约 20-40 秒），参数：\n`
                 + `      - aweme_id = 那条视频的 ID\n`
                 + `      - mode = "ui"\n`
-                + `      - mention_name = "${who}"（**必须和对方昵称完全一致**）\n`
+                + `      - mention_name = "${who}"（**用名单第一个人**；其余人在正文里顺带说明即可，mention token 只放这一个）\n`
                 + `      - text = 一句 20-60 字的话（**不要自己写 @${who}**，工具会自动加这个 mention）\n`
                 + `      - confirm = true（自动跑，不用再问）\n`
-                + `      ⚠️ 如果返回 \`@ 弹层里没找到这个名字\` ⇒ 这一轮**放弃 @**，在报告里写明\n`
+                + `      ⚠️ 如果返回 \`@ 弹层里没找到这个名字\` ⇒ 换名单里下一个人再试一次；全都不行才放弃，在报告里写明\n`
                 + `        「真 @ 没成（昵称搜不到）」—— **不要**改成发普通评论凑数（那是刷屏）。\n`
                 + `   ② 评论内容像这样：「这条我觉得你会喜欢 —— <一句话理由>」\n`
                 + `   ③ 发完在报告里写一行「已在评论区 @ 你：<视频ID>」\n`
                 + `   ⚠️ 只在**最值得的那一条**发，不要每条都发（会被当成刷屏）。`
             })()
-            : `📝 「在评论区 @ 你」：关着，不要发这类评论。`),
+            : `📝 「评论区 @ 提醒」：总闸关着，选了人也不 @，不要发这类评论。`),
         ].filter(Boolean).join('\n'))
       + `\n⭐ 保底：不管发生什么，**报告至少留一行**（哪怕只写「本轮失败：原因是 X」），别让 out/ 空着。`
       + `\n最后用两三句话汇报你挑到了什么。`
