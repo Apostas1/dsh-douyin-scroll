@@ -4372,6 +4372,14 @@ export function apply(ctx, config) {
       installTail: tail(installLogFile),
       report: reportFileOf(new Date()),
       version: myVersion(),
+      // ⭐ 0.5.9c：面板构建号 —— 浏览器里跑的是哪份 client.js（排障盲区：面板角标只有主人看得见）
+      panelBuild: (() => {
+        try {
+          const c = readFileSync(join(pluginDir, 'client.js'), 'utf8')
+          const m = /PANEL_BUILD\s*=\s*(\d+)/.exec(c)
+          return m ? Number(m[1]) : 0
+        } catch { return 0 }
+      })(),
       cookieFile: cookiePath(stateDir),
     }
   }

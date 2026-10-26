@@ -940,11 +940,15 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                   '峰谷时段自动刷一轮，把值得看的挑出来写成日报。不催你、不刷屏。')),
               h('button', { 'data-dy-mini': '', disabled: busy === 'guide', onClick: toggleGuide },
                 guide === null ? '怎么用？' : '收起说明'),
-              /* ⭐ 面板构建号 —— 改完面板对一下这个数，就知道浏览器有没有拿到新代码 */
+              /* ⭐ 面板构建号 —— 改完面板对一下这个数，就知道浏览器有没有拿到新代码。
+               *    括号里是**宿主**那边的构建号（宿主读磁盘上的 client.js）：
+               *    两者不一致 = 浏览器还在跑旧 bundle（刷新页面 / 重启 dsh）。 */
               h('span', {
                 'data-dy-badge': '', title: '面板构建版本（改完面板对一下这个数）',
                 style: { fontVariantNumeric: 'tabular-nums' },
-              }, 'v' + (st.version || '?') + '·b' + PANEL_BUILD)),
+              }, 'v' + (st.version || '?') + '·b' + PANEL_BUILD
+                + (st.panelBuild && st.panelBuild !== PANEL_BUILD
+                  ? `（宿主 b${st.panelBuild} ≠ 浏览器 b${PANEL_BUILD} ⇒ 刷新页面）` : ''))),
             h('div', { 'data-dy-row': '' },
               h('span', {
                 'data-dy-badge': '',
