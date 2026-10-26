@@ -17,6 +17,9 @@
 - **`tools/api-comments.py` / `tools/api-reply.py` / `tools/psd-export.py` 里的路径是没替换的占位符 `<本目录>`**
   —— 起签名进程时 cwd 是无效目录，拉评论/回评论直接炸 `NotADirectoryError`（WinError 267），装公开包的用户必踩。
   已改成按脚本自身位置自动算真实路径，不再依赖安装目录写死（`6580a7e`）。
+- **`tools/api-comments.py` 错误处理反转**（Issue #2 报的）：node 没输出时 `sign()` 返回 `{"err": ""}`，
+  空串是假值 ⇒ 绕过报错分支直接 `KeyError: signedUrl`。
+  已改成 `err` 和 `signedUrl` 一起判，失败时明确说「签名不可用」。
 
 ---
 

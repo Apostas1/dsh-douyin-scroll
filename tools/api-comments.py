@@ -58,8 +58,9 @@ def main():
     for page in range(4):
         rel = "/aweme/v1/web/comment/list/?" + qs({**COMMON, "aweme_id": aweme, "count": 20, "cursor": page * 20, "item_type": 0})
         s = sign(rel)
-        if s.get("err"):
-            print(json.dumps({"ok": False, "err": s["err"]}, ensure_ascii=False))
+        # 兼容「node 没输出任何 JSON」的情况：err 可能是空串，得连 signedUrl 一起判（Issue #2）
+        if s.get("err") or not s.get("signedUrl"):
+            print(json.dumps({"ok": False, "err": s.get("err") or "签名不可用（检查 signer 运行时）"}, ensure_ascii=False))
             return 1
         u = s["signedUrl"]
         if not u.startswith("http"):
