@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
      *    面板看起来"没变化"，很难判断是代码错了还是没加载。
      *    对一下面板右上角显示的 `v<版本>·b<N>` 就知道。
      */
-    const PANEL_BUILD = 21
+    const PANEL_BUILD = 22
 
     const asJson = async (res) => {
       if (res.ok) return res.json()
@@ -515,10 +515,31 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
         finally { setBusy('') }
       }
 
-      /** 选定一个人：把 dmTo（昵称）+ dmToId（sec_uid）一起存 */
+      /** 0.5.5 私信对象列表：点选 = 追加进 dmPeers（去重），不再覆盖单值 */
       const pickPerson = async (p) => {
-        await patch({ dmTo: p.nick, dmToId: p.sec_uid || '' },
-          p.sec_uid ? `已选「${p.nick}」` : `已选「${p.nick}」，但没拿到稳定 id`)
+        const cur = Array.isArray(cfg.dmPeers) ? cfg.dmPeers : []
+        const same = cur.some((x) => (p.sec_uid && x.sec_uid === p.sec_uid) || (!p.sec_uid && x.nick === p.nick))
+        if (same) { say(`「${p.nick}」已经在列表里了`, 'warn'); return }
+        const next = [...cur, { nick: p.nick, sec_uid: p.sec_uid || '', listen: false }]
+        await patch({ dmPeers: next }, `已把「${p.nick}」加进私信对象（共 ${next.length} 人）—— 默认只收日报，不自动接话；想让他也能跟鱼聊，点他旁边的「听他的话」`)
+      }
+
+      /** 0.5.5 切换某人的「听他的话」 */
+      const toggleListen = async (idx) => {
+        const cur = Array.isArray(cfg.dmPeers) ? [...cfg.dmPeers] : []
+        if (!cur[idx]) return
+        cur[idx] = { ...cur[idx], listen: !cur[idx].listen }
+        await patch({ dmPeers: cur }, cur[idx].listen
+          ? `「${cur[idx].nick}」说话小鱼会接了（值班自动回他）`
+          : `「${cur[idx].nick}」改为只收日报，来消息不自动接`)
+      }
+
+      /** 0.5.5 把某人从列表里移除 */
+      const removePeer = async (idx) => {
+        const cur = Array.isArray(cfg.dmPeers) ? [...cfg.dmPeers] : []
+        if (!cur[idx]) return
+        const gone = cur.splice(idx, 1)[0]
+        await patch({ dmPeers: cur }, `已把「${gone.nick || gone.sec_uid}」移出私信对象`)
       }
 
       /** 展开 / 收起「怎么用」（新手流程） */
@@ -748,6 +769,20 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
         finally { setBusy('') }
       }
 
+      /* ⭐ 0.5.5 自动检查更新（主人 2026-10-26：「自动检查更新放最上面」）：
+       *    面板打开 3 秒后静默查一次（force=1 不吃缓存），有新版本就弹在顶部卡里，
+       *    不打扰、不自动装（「检查更新只查不装」是 selfcheck 的红线）。 */
+      React.useEffect(() => {
+        let alive = true
+        const t = setTimeout(async () => {
+          try {
+            const r = await jget('/update?force=1')
+            if (alive) setUpd(r)
+          } catch { /* 静默：查不到不打扰 */ }
+        }, 3000)
+        return () => { alive = false; clearTimeout(t) }
+      }, [])
+
       const loadAi = async () => {
         setBusy('ai')
         try {
@@ -780,6 +815,11 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
 
       const kwText = kws !== null ? kws : (Array.isArray(cfg.keywords) ? cfg.keywords.join('\n') : '')
 
+      /* ⭐ 0.5.5 私信对象列表的小工具（面板侧只读展示用） */
+      const dmPeers = Array.isArray(cfg.dmPeers) ? cfg.dmPeers.filter((p) => p && (p.nick || p.sec_uid)) : []
+      const dmListening = dmPeers.filter((p) => p.listen)
+      const dmNames = (arr) => arr.map((p) => p.nick || (p.sec_uid || '').slice(0, 8) + '…').join('、')
+
       /* ════════════════════════════════════════════════════════════════════════
        * 面板结构（2026-10-25 重排：20+ 张卡 → 3 组 / 7 张卡）
        *   组 ①「常开必看」永远展开 —— 卡①开始使用 / 卡②刷抖音 / 卡③自动发送
@@ -795,6 +835,18 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
         h('div', { 'data-dy-group': '' },
           h('span', { 'data-dy-groupname': '' }, '常开必看'),
           h('span', { 'data-dy-grouphint': '' }, '装好之后天天要用的三张')),
+
+        /* ── 卡 ⓪ 检查更新（0.5.5 主人令：放最上面）──
+         *    面板打开 3 秒自动查一次；有新版就黄条提醒 + 给升级命令，没有就轻描淡写一行。 */
+        (upd && upd.checked && upd.hasUpdate)
+          ? h('div', { 'data-dy-card': '', 'data-dy-highlight': '' },
+            h('div', { 'data-dy-row': '' },
+              h('div', { 'data-dy-grow': '' },
+                h('div', { 'data-dy-title': '' }, `🆙 有新版本 v${upd.latest}（当前 v${upd.current}）`),
+                h('div', { 'data-dy-sub': '' }, (upd.source ? '来源：' + upd.source + '。' : '')
+                  + (upd.how || '用命令行升级，装完重启 dsh 生效。'))),
+              h('button', { 'data-dy-mini': '', disabled: busy === 'update', onClick: () => onCheckUpdate(true) }, '再查一次')))
+          : null,
 
         /* ── 卡 ① 开始使用 ── */
   /* ── 开始使用：三步装机 + 扫码登录（⭐ 2026-10-24 主人令：放最上面，
@@ -948,7 +1000,9 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               h('span', { 'data-dy-badge': '', 'data-on': cfg.autoSend ? '' : undefined, 'data-off': cfg.autoSend ? undefined : '' },
                 cfg.autoSend ? '会自动发' : '只写报告'),
               h('span', { 'data-dy-sub': '' },
-                '发给：' + (cfg.dmTo ? cfg.dmTo : '（还没选私信对象，去下面「私信发给谁」选一个）'))),
+                '发给：' + (dmPeers.length
+                  ? dmNames(dmPeers)
+                  : (cfg.dmTo || '（还没选私信对象，去下面「私信发给谁」选）')))),
             h('div', { 'data-dy-sub': '' },
               '⚠️ 只管「插件自己在后台跑的轮次」。你当场在对话里让它发，不受这个开关影响。'),
 
@@ -1019,29 +1073,28 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                  *      ③ 正常         ⇒ 说功能状态
                  */
                 h('div', { 'data-dy-sub': '' },
-                  !cfg.dmToId
-                    ? '⚠️ 这个开关现在是**灰的、点不动** —— 不是坏了，是因为还没选「私信发给谁」（在下面选一个人）。没选人它就没有可盯的对象，所以先锁住。'
+                  !dmListening.length
+                    ? '⚠️ 还没有开着「听他的话」的私信对象 —— 开关能打开，但得去下面「私信发给谁」选人并打开那个开关，小鱼才知道该接谁的话。'
                     : busy === 'patch'
                       ? '保存中…'
                       : (cfg.chatWatch
-                        ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${cfg.dmTo || '私信对象'}」有没有新消息；看见了就把话转给值班的小鱼接（状态屏能看到有没有接上）。不弹桌面通知，不起浏览器，很轻。`
+                        ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${dmNames(dmListening) || '私信对象'}」有没有新消息；看见了就把话转给值班的小鱼接（状态屏能看到有没有接上）。不弹桌面通知，不起浏览器，很轻。`
                         : '关着（默认是开的）。关了之后他来消息就没人接话——小鱼睡缸底。想恢复再打开。'))),
               h(Switch, {
                 on: Boolean(cfg.chatWatch),
-                disabled: !cfg.dmToId || busy === 'patch',
+                disabled: busy === 'patch',
                 /* 变灰时点它也给一句话——比"毫无反应"好，主人至少知道点到了 */
                 onChange: (v) => {
-                  if (!cfg.dmToId) { say('先在下面「私信发给谁」选一个人，这个开关才能用', 'warn'); return }
                   patch({ chatWatch: v }, v
-                    ? '✅ 已打开聊天模式（静默盯消息）'
+                    ? (dmListening.length ? '✅ 已打开聊天模式（静默盯消息）' : '聊天模式开了 —— 记得去下面给某个人打开「听他的话」，不然小鱼不知道接谁的')
                     : '已关闭聊天模式')
                 },
               })),
             busy === 'patch'
               ? h('div', { 'data-dy-sub': '' }, '保存中…')
               : null,
-            !cfg.dmToId
-              ? h('div', { 'data-dy-sub': '' }, '（先在下面「私信发给谁」选好对象，这个才有用）')
+            !dmListening.length
+              ? h('div', { 'data-dy-sub': '' }, '（还没有人开着「听他的话」—— 在下面「私信发给谁」里选人并打开）')
               : null,
             cfg.chatWatch
               ? h('div', { 'data-dy-row': '' },
@@ -1112,9 +1165,9 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               h('div', { 'data-dy-grow': '' },
                 h('div', { 'data-dy-title': '' }, '私信发给谁'),
                 h('div', { 'data-dy-sub': '' },
-                  cfg.dmTo
-                    ? `现在是「${cfg.dmTo}」${cfg.dmToId ? '' : '（⚠️ 没记下稳定 id，重名时可能选错）'}`
-                    : '想让插件把好玩的发给你，先在这里选一个人。不选也行 —— 那就只写日报，不发私信。')),
+                  dmPeers.length
+                    ? `已选 ${dmPeers.length} 人：${dmNames(dmPeers)}。日报和分享卡片发给每一个人；开着「听他的话」的人来私信，值班小鱼自动接。`
+                    : '想让插件把好玩的发给你，先在这里选一个人（可以多选）。不选也行 —— 那就只写日报，不发私信。')),
               h('button', {
                 'data-dy-btn': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
               }, busy === 'people' ? '读取中…' : (people === null ? '从我的会话里选' : '重新读取'))),
@@ -1123,22 +1176,45 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               ? h('div', { 'data-dy-sub': '' }, '（要先在上面扫码登录，才能读到你的人）')
               : null,
 
+            /* ⭐ 0.5.5 已选列表：每人一行 —— 昵称 + 「听他的话」开关 + 移除 */
+            dmPeers.length
+              ? h('div', { 'data-dy-people': '' },
+                dmPeers.map((p, i) => h('div', {
+                  key: 'peer' + i,
+                  'data-dy-person': '',
+                  'data-picked': p.listen ? '' : undefined,
+                },
+                  h('span', { 'data-dy-person-name': '' }, p.nick || (p.sec_uid || '').slice(0, 10) + '…'),
+                  p.sec_uid ? null : h('span', { 'data-dy-tag': '' }, '⚠️ 没有稳定 id，重名可能选错'),
+                  h('span', { 'data-dy-grow': '' }),
+                  h('button', {
+                    'data-dy-mini': '', 'data-ok': p.listen ? '' : undefined,
+                    disabled: Boolean(busy),
+                    title: p.listen ? '开着：他来私信小鱼自动接' : '关着：只收日报，来消息不自动接',
+                    onClick: () => toggleListen(i),
+                  }, p.listen ? '👂 听他的话：开' : '听他的话：关'),
+                  h('button', {
+                    'data-dy-mini': '', disabled: Boolean(busy),
+                    onClick: () => removePeer(i),
+                  }, '移除'))))
+              : null,
+
             people && people.length
               ? h('div', { 'data-dy-people': '' },
-                people.map((p, i) => h('button', {
-                  key: 'p' + i,
-                  'data-dy-person': '',
-                  'data-picked': (cfg.dmToId && p.sec_uid && cfg.dmToId === p.sec_uid)
-                    || (!cfg.dmToId && cfg.dmTo === p.nick) ? '' : undefined,
-                  disabled: Boolean(busy),
-                  onClick: () => pickPerson(p),
-                },
-                  h('span', { 'data-dy-person-name': '' }, p.nick),
-                  p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
-                  p.preview ? h('span', { 'data-dy-person-sub': '' }, p.preview) : null,
-                  ((cfg.dmToId && p.sec_uid && cfg.dmToId === p.sec_uid) || (!cfg.dmToId && cfg.dmTo === p.nick))
-                    ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已选')
-                    : null)))
+                people.map((p, i) => {
+                  const added = dmPeers.some((x) => (p.sec_uid && x.sec_uid === p.sec_uid) || (!p.sec_uid && x.nick === p.nick))
+                  return h('button', {
+                    key: 'p' + i,
+                    'data-dy-person': '',
+                    'data-picked': added ? '' : undefined,
+                    disabled: Boolean(busy) || added,
+                    onClick: () => pickPerson(p),
+                  },
+                    h('span', { 'data-dy-person-name': '' }, p.nick),
+                    p.duplicate ? h('span', { 'data-dy-tag': '' }, '重名') : null,
+                    added ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已在列表') : null,
+                    p.preview ? h('span', { 'data-dy-person-sub': '' }, p.preview) : null)
+                }))
               : null,
 
             people && !people.length
@@ -1148,12 +1224,12 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               ? h('div', { 'data-dy-sub': '' }, peopleHint)
               : null,
 
-            /* ⭐ 也可以自己写 —— 不想从会话里选，或者那个人不在最近会话里 */
+            /* ⭐ 手动补一个会话列表里没有的人（留活路，但不再是主路径） */
             h('div', { 'data-dy-row': '' },
               h('button', {
                 'data-dy-mini': '',
-                onClick: () => setManualDm(manualDm === null ? { nick: cfg.dmTo || '', id: cfg.dmToId || '' } : null),
-              }, manualDm === null ? '自己写' : '收起')),
+                onClick: () => setManualDm(manualDm === null ? { nick: '', id: '' } : null),
+              }, manualDm === null ? '手动加一个（会话列表里没有的人）' : '收起')),
             manualDm !== null
               ? h('div', { 'data-dy-inner': '', style: { background: 'transparent', border: 'none', padding: 0, gap: '8px' } },
                 h('div', { 'data-dy-sub': '' }, '昵称（显示用）'),
@@ -1161,21 +1237,21 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                   'data-dy-input': '', value: manualDm.nick, placeholder: '比如：示例好友',
                   onChange: (e) => setManualDm({ ...manualDm, nick: e.target.value }),
                 }),
-                h('div', { 'data-dy-sub': '' }, '稳定 ID（可选 —— 重名时才有用；从「从我的会话里选」拿最方便）'),
+                h('div', { 'data-dy-sub': '' }, '稳定 ID（sec_uid，从「从我的会话里选」拿最方便；没有它没法精确认人）'),
                 h('input', {
-                  'data-dy-input': '', value: manualDm.id, placeholder: 'MS4wLjABAAAA…（可以留空）',
+                  'data-dy-input': '', value: manualDm.id, placeholder: 'MS4wLjABAAAA…',
                   onChange: (e) => setManualDm({ ...manualDm, id: e.target.value }),
                 }),
                 h('div', { 'data-dy-row': '' },
                   h('button', {
-                    'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy),
+                    'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy) || !(manualDm.nick.trim() || manualDm.id.trim()),
                     onClick: async () => {
-                      await patch({ dmTo: manualDm.nick.trim(), dmToId: manualDm.id.trim() },
-                        manualDm.nick.trim() ? `已保存「${manualDm.nick.trim()}」` : '已清空私信对象')
+                      const cur = Array.isArray(cfg.dmPeers) ? cfg.dmPeers : []
+                      const next = [...cur, { nick: manualDm.nick.trim(), sec_uid: manualDm.id.trim(), listen: false }]
+                      await patch({ dmPeers: next }, `已把「${manualDm.nick.trim() || manualDm.id.trim()}」加进私信对象`)
                       setManualDm(null)
                     },
-                  }, '保存'),
-                  h('div', { 'data-dy-sub': '' }, '留空 = 不发私信，只写日报')))
+                  }, '加进列表')))
               : null),
         ),
 

@@ -222,6 +222,18 @@ export const Config = !z ? undefined : z.object({
    * 留空时：只有在会话列表里昵称**唯一**才允许发；重名会直接拒绝并列出候选。
    */
   dmToId: z.string().default('').extra('volatile', true),
+  /**
+   * ⭐ 0.5.5 私信对象**列表**（主人 2026-10-26 定）：每人 { nick, sec_uid, listen }。
+   *   - 日报/分享卡片发给列表里**每一个**人；面板从会话列表点选，不再手填名字。
+   *   - listen = 「听他的话」：开了才自动接他的私信（值班盯梢只巡 listen 的人）。
+   *   - 旧配置 dmTo/dmToId 启动时一次性迁进来（listen=true，行为不变）；
+   *     迁移前 dmPeersOf() 也会拿旧值兜底，绝不因为升级丢收件人。
+   */
+  dmPeers: z.array(z.object({
+    nick: z.string().default(''),
+    sec_uid: z.string().default(''),
+    listen: z.boolean().default(false),
+  })).default([]).extra('volatile', true),
   webhookUrl: z.string().default('').extra('volatile', true),
   webhookPreset: z.string().default('custom').extra('volatile', true),
   /**
@@ -315,6 +327,7 @@ export function apply(ctx, config) {
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
     updateUrl: '',
     dmTo: '', dmToId: '',
+    dmPeers: [],
     // ⭐ 聊天模式（2026-10-26 主人改口：**默认关闭**，用户明确点开才工作）。
     //    ⚠️ DEFAULTS / zod 必须同步（漏改过 ⇒ 开关点了没反应）。
     chatWatch: false, chatWatchSec: 30, chatWatchTarget: 'lead',
@@ -329,7 +342,7 @@ export function apply(ctx, config) {
   //    之前判断 `base[k].length && typeof base[k][0] === 'object'` —— 但 DEFAULTS 里
   //    `windows: []` 是空的，length=0，于是走了字符串分支，用户存的自定义时段全被吃掉。
   //    改成显式声明，别靠"数组里恰好有元素"来判断。
-  const OBJECT_ARRAYS = new Set(['windows'])
+  const OBJECT_ARRAYS = new Set(['windows', 'dmPeers'])
   /**
    * 🔴 2026-10-25 晚追加（字符串守卫的姊妹篇）：**数组字段的空不许盖掉非空**。
    *    字符串那套守卫上线后，keywords（数组）继续裸奔 —— 表单给 [] / MCP patch 给 []
@@ -495,6 +508,42 @@ export function apply(ctx, config) {
   }
   const cfg = loadCfg()
   const refreshCfg = () => { Object.assign(cfg, loadCfg()) }
+
+  /* ── 0.5.5 私信对象列表（dmPeers）：一次性迁移 + 取人助手 ─────────────────
+   * 主人 2026-10-26 定的 设计：
+   *   · 名字不用手填 —— 面板从会话列表点选（会话列表本来就有昵称 + sec_uid）；
+   *   · 可以选**多个人**，日报/分享卡片发给列表里每一个；
+   *   · 每人一个「听他的话」开关 —— 开了值班才自动接他的私信。
+   * 旧配置 dmTo/dmToId 启动时一次性迁成列表第一个人（listen=true，行为不变）。
+   */
+  try {
+    const peers = Array.isArray(cfg.dmPeers) ? cfg.dmPeers : []
+    const legacyTo = String(cfg.dmTo || '').trim()
+    const legacyId = String(cfg.dmToId || '').trim()
+    if (!peers.length && (legacyTo || legacyId)) {
+      const migrated = [{ nick: legacyTo, sec_uid: legacyId, listen: true }]
+      const onDisk = readJson(cfgFile, {})
+      onDisk.dmPeers = migrated
+      writeJson(cfgFile, onDisk)
+      cfg.dmPeers = migrated
+      log(`私信对象已迁移成列表（1 人：${legacyTo || legacyId}，听他的话=开）—— 老配置 dmTo/dmToId 原样保留兜底`)
+    }
+  } catch (e) { log(`dmPeers 迁移失败（不影响旧配置工作）：${e?.message ?? e}`) }
+
+  /** 全部私信对象：dmPeers 优先；空的拿旧 dmTo/dmToId 兜底（迁移失败也不丢收件人） */
+  const dmPeersOf = () => {
+    const peers = (Array.isArray(cfg.dmPeers) ? cfg.dmPeers : [])
+      .map((p) => ({ nick: String(p?.nick || '').trim(), sec_uid: String(p?.sec_uid || '').trim(), listen: Boolean(p?.listen) }))
+      .filter((p) => p.nick || p.sec_uid)
+    if (peers.length) return peers
+    const t = String(cfg.dmTo || '').trim()
+    const i = String(cfg.dmToId || '').trim()
+    return (t || i) ? [{ nick: t, sec_uid: i, listen: true }] : []
+  }
+  /** 主联系人（第一个）—— 值班提示词兼容旧用法时用它 */
+  const dmPrimary = () => dmPeersOf()[0] || { nick: '', sec_uid: '', listen: false }
+  /** 「听他的话」的人 —— 值班盯梢只巡这些 */
+  const dmListeners = () => dmPeersOf().filter((p) => p.listen && p.sec_uid)
   /**
    * 🔴🔴🔴 2026-10-26 凌晨最后一块补丁：**挂载时自己把开关恢复回上次的状态**。
    *
@@ -521,9 +570,10 @@ export function apply(ctx, config) {
   // 挂载自愈：只有"上次明确开着"才恢复，且必须真的能干活（有登录 + 有对象）
   try {
     const intent = readChatIntent()
-    const canWork = Boolean(String(cfg.dmToId || '').trim()) && hasCredential(stateDir)
+    const hasPeers = dmPeersOf().some((p) => p.sec_uid)
+    const canWork = hasPeers && hasCredential(stateDir)
     // 🔍 诊断行（常驻保留，成本一行，省掉"它为什么没自动开"的整晚排查）：
-    log(`[自愈] intent=${JSON.stringify(intent.wantOn)} cfg=${cfg.chatWatch} canWork=${canWork}（dmToId=${String(cfg.dmToId || '').length}字 登录=${hasCredential(stateDir)}）`)
+    log(`[自愈] intent=${JSON.stringify(intent.wantOn)} cfg=${cfg.chatWatch} canWork=${canWork}（dmPeers=${dmPeersOf().length}人 登录=${hasCredential(stateDir)}）`)
     if (intent.wantOn === true && cfg.chatWatch === false && canWork) {
       cfg.chatWatch = true
       /**
@@ -551,7 +601,7 @@ export function apply(ctx, config) {
      */
     if (intent.wantOn === true && cfg.chatWatch === false && !canWork) {
       const miss = []
-      if (!String(cfg.dmToId || '').trim()) miss.push('还没选私信对象')
+      if (!dmPeersOf().some((p) => p.sec_uid)) miss.push('还没选私信对象')
       if (!hasCredential(stateDir)) miss.push('还没登录')
       log(`聊天模式：本来是开着的，但现在还差 ${miss.join('、')} —— 条件齐了会自动开回来`)
     }
@@ -1215,8 +1265,10 @@ export function apply(ctx, config) {
       // 🔴 0.5.4 修：to 和 to_id 不许各兜各的默认 —— 只传昵称时绝不能偷偷兜配置里的 dmToId，
       //    否则快路径拿 A 的 sec_uid 匹配、顶着 B 的昵称返回（「私信发给谁读取不到」的根因）。
       //    传了昵称 ⇒ to_id 留空按昵称找；传了 to_id ⇒ to 留空别冒用配置昵称；两个都没传才用配置默认。
-      const to = String(args.to || (args.to_id ? '' : cfg.dmTo) || '').trim()
-      const toId = String(args.to_id || (args.to ? '' : cfg.dmToId) || '').trim()
+      //    0.5.5：配置默认 = dmPeers 列表的主联系人（第一个）。
+      const prim = dmPrimary()
+      const to = String(args.to || (args.to_id ? '' : prim.nick) || '').trim()
+      const toId = String(args.to_id || (args.to ? '' : prim.sec_uid) || '').trim()
       if (!to && !toId) return { ok: false, error: '不知道发给谁', hint: '传 to / to_id，或在设置里填「私信发给谁」+「稳定 ID」' }
       let file = ''
       if (args.from_list) {
@@ -1279,8 +1331,10 @@ export function apply(ctx, config) {
     },
     async execute(args = {}) {
       // 🔴 0.5.4 修：同 douyin_dm —— 昵称和稳定 id 不许各兜各的默认（会张冠李戴）
-      const to = String(args.to || (args.to_id ? '' : cfg.dmTo) || '').trim()
-      const toId = String(args.to_id || (args.to ? '' : cfg.dmToId) || '').trim()
+      //    0.5.5：配置默认 = dmPeers 列表的主联系人（第一个）。
+      const prim = dmPrimary()
+      const to = String(args.to || (args.to_id ? '' : prim.nick) || '').trim()
+      const toId = String(args.to_id || (args.to ? '' : prim.sec_uid) || '').trim()
       if (!to && !toId) return { ok: false, error: '不知道发给谁', hint: '传 to / to_id，或在设置里填「私信发给谁」+「稳定 ID」' }
       const reasonText = String(args.reason || '').trim()
       const gapSec = args.reason_delay_sec === undefined ? 5 : Math.max(0, Math.min(Number(args.reason_delay_sec) || 0, 60))
@@ -1887,8 +1941,10 @@ export function apply(ctx, config) {
       //    否则快路径拿配置那人的 sec_uid 匹配、却顶着传入的昵称返回，读出来的人和名字对不上
       //    （评论区「私信发给谁读取不到」就是这个）。传了昵称 ⇒ to_id 留空走浏览器按昵称找；
       //    要快路径请显式传 to_id。args 两个都没传 ⇒ 才一起用配置默认（同一个人，无错位）。
-      const to = String(args.to || (args.to_id ? '' : cfg.dmTo) || '').trim()
-      const toId = String(args.to_id || (args.to ? '' : cfg.dmToId) || '').trim()
+      //    0.5.5：配置默认 = dmPeers 列表的主联系人（第一个）。
+      const prim = dmPrimary()
+      const to = String(args.to || (args.to_id ? '' : prim.nick) || '').trim()
+      const toId = String(args.to_id || (args.to ? '' : prim.sec_uid) || '').trim()
       if (!to && !toId) return { ok: false, error: '不知道读谁的会话', hint: '传 to / to_id，或在设置里填私信对象' }
       const limit = Math.max(1, Math.min(Number(args.limit) || 30, 60))
 
@@ -2577,8 +2633,8 @@ export function apply(ctx, config) {
           `🟡 **自动发送开着 —— 挑到推荐（加了 \`###\` 那条）后必须发**：\n`
           + `   ① **必发分享卡片**：调 \`douyin_share_card\`，参数：\n`
           + `      - aweme_id = 推荐那条的 ID\n`
-          + `      - to_id = '${String(cfg.dmToId || '').trim()}'（**私信目标**，配置里的稳定 id）\n`
-          + `      - to = '${String(cfg.dmTo || '').trim()}'（只用于显示的昵称）\n`
+          + `      - to_id = '${dmPeersOf().filter((p) => p.sec_uid).map((p) => p.sec_uid).join("','")}'（**所有私信对象**的稳定 id，一个一个发 —— 每次调用只给一个 id）\n`
+          + `      - to = '${dmPeersOf().filter((p) => p.nick).map((p) => p.nick).join("','")}'（对应的昵称，同序）\n`
           + `      - reason = 为什么值得看，30-80 字\n`
           + `      - confirm = true\n`
           + `      ⚠️ 不要再单独调 \`douyin_dm\` 补文字 —— reason 会自动排成「先卡片、后理由」\n`
@@ -3096,9 +3152,9 @@ export function apply(ctx, config) {
    * 🔴 定时器回调必须自己兜异常（同上）；盯梢失败只记日志、不重试轰炸。
    */
   let chatWatchLastMs = 0            // 上次盯梢时刻（节流用）
-  let chatWatchLastSeenAt = ''       // 已经提醒过的最新一条「对方消息」时间戳
+  // ⭐ 0.5.5 多人盯梢：每个「听他的话」的人独立对表（sec_uid → { lastSeenAt, primed }）
+  let chatWatchPeers = {}
   let chatWatchBusy = false
-  let chatWatchPrimed = false        // 启动后第一拍只「对表」不提醒（不把历史消息重播一遍）
   const chatWatchLog = (s) => { try { appendFileSync(join(stateDir, 'chat-watch.log'), `[${new Date().toISOString()}] ${s}\n`, 'utf8') } catch { /* 日志写不进就算了 */ } }
   /** ⭐ 每一拍都把状态写进 chat-watch-state.json —— 面板轮询它，用户能实时看到
    *    「几秒前看过 · 结果如何 · 通知弹没弹 · 错在哪」（2026-10-24 使用者要求）。 */
@@ -3110,7 +3166,8 @@ export function apply(ctx, config) {
       writeFileSync(cwStateFile, JSON.stringify({
         ...cwState, ts: Date.now(), on: Boolean(cfg.chatWatch),
         sec: Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300)),
-        to: cfg.dmTo || '', via: 'http（不启浏览器）',
+        to: dmListeners().map((p) => p.nick || p.sec_uid.slice(0, 10)).join('、') || '',
+        via: 'http（不启浏览器）',
       }, null, 1), 'utf8')
     } catch { /* 状态写不进也不能出事 */ }
   }
@@ -3125,9 +3182,17 @@ export function apply(ctx, config) {
     try {
       refreshCfg()
       if (!cfg.chatWatch) { cwWrite({ lastResult: 'off' }); return }
-      const toId = String(cfg.dmToId || '').trim()
-      if (!toId) { cwWrite({ lastResult: 'skip_no_to' }); return } // 身份铁闸要 sec_uid
       if (!hasCredential(stateDir)) { cwWrite({ lastResult: 'skip_no_login' }); return }
+      // ⭐ 0.5.5 多人盯梢：巡所有开着「听他的话」的人；一个人坏了不许拖死别人
+      const listeners = dmListeners()
+      if (!listeners.length) {
+        cwWrite({ lastResult: 'skip_no_to', lastNote: '还没有开着「听他的话」的私信对象 —— 到「私信发给谁」里勾一个' })
+        return
+      }
+      for (const peer of listeners) {
+      const toId = peer.sec_uid
+      const nick = peer.nick
+      const pState = chatWatchPeers[toId] || { lastSeenAt: '', primed: false }
       const r = runPy('im-http.py', ['--read', '--peer-sec-uid', toId, '--limit', '8'], { timeout: 30_000 })
       const j = pickJson(r.stdout)
       cwState.checks += 1
@@ -3162,20 +3227,20 @@ export function apply(ctx, config) {
             : /401|403|login|cookie|登录/i.test(errText)
               ? '登录状态可能过期了，需要重新扫码'
               : '抖音私信接口报错')
-        const notifyKey = human
+        const notifyKey = (nick || toId.slice(0, 10)) + '|' + human
         if (cwState.failStreak >= 3 && cwState.notifiedKey !== notifyKey) {
           cwState.notifiedKey = notifyKey
           try {
-            toastSend({ title: '小鱼读不到私信了', body: `${human}。已经连续 ${cwState.failStreak} 次没读到，会自己重试；要是很久都不好，打开设置页看「聊天模式」那一栏。` })
+            toastSend({ title: '小鱼读不到私信了', body: `${nick || '私信对象'}：${human}。已经连续 ${cwState.failStreak} 次没读到，会自己重试；要是很久都不好，打开设置页看「聊天模式」那一栏。` })
           } catch { /* 通知失败不影响重试 */ }
-          chatWatchLog(`⚠️ 连续 ${cwState.failStreak} 次读不到私信：${human}（已提醒用户）`)
+          chatWatchLog(`⚠️ ${nick || toId.slice(0, 10)}：连续 ${cwState.failStreak} 次读不到私信：${human}（已提醒用户）`)
         }
         cwWrite({
-          lastCheckAt: Date.now(), lastResult: 'error', lastError: errText,
+          lastCheckAt: Date.now(), lastResult: 'error', lastError: (nick || toId.slice(0, 10)) + '：' + errText,
           failStreak: cwState.failStreak,
           lastNote: cwState.failStreak >= 3 ? `${human}（已连续 ${cwState.failStreak} 次，正在自动重试）` : '刚出问题，自动重试中',
         })
-        return
+        continue
       }
       // 读取恢复正常 —— 记一笔并清掉去重标记（下次再坏还能提醒）
       if (cwState.failStreak) {
@@ -3185,28 +3250,27 @@ export function apply(ctx, config) {
         chatWatchLog(`已恢复（之前连续失败 ${n} 次）`)
       }
       if (!j.matched) {
-        cwWrite({ lastCheckAt: Date.now(), lastResult: 'no_match', lastNote: String(j.match_note || ''), lastError: '' })
-        return
+        cwWrite({ lastCheckAt: Date.now(), lastResult: 'no_match', lastNote: `${nick || toId.slice(0, 10)}：${String(j.match_note || '')}`, lastError: '' })
+        continue
       }
       const msgs = Array.isArray(j.matched.messages) ? j.matched.messages : []
       // 合并进记忆（这样面板/值班轮打开就能看到，不会"刚读到却说没聊过"）
-      try { mergeDmMemory(stateDir, toId, cfg.dmTo || j.matched.nickname || '', msgs) } catch { /* 记忆失败不影响盯梢 */ }
-      const theirs = msgs.filter((m) => m.from === 'them' && m.at && m.at > chatWatchLastSeenAt)
+      try { mergeDmMemory(stateDir, toId, nick || j.matched.nickname || '', msgs) } catch { /* 记忆失败不影响盯梢 */ }
+      const theirs = msgs.filter((m) => m.from === 'them' && m.at && m.at > pState.lastSeenAt)
       // 第一拍只「对表」：以最新一条为基准，不把历史消息重播一遍
-      if (!chatWatchPrimed) {
-        chatWatchPrimed = true
+      if (!pState.primed) {
         const newestTheirs = msgs.filter((m) => m.from === 'them' && m.at)
-        chatWatchLastSeenAt = newestTheirs.length ? newestTheirs[newestTheirs.length - 1].at : ''
+        chatWatchPeers[toId] = { lastSeenAt: newestTheirs.length ? newestTheirs[newestTheirs.length - 1].at : '', primed: true }
         cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_prime', lastError: '' })
-        chatWatchLog(`已接上班（基准 = ${chatWatchLastSeenAt || '无对方消息'}，之前的不重播）`)
-        return
+        chatWatchLog(`已接上班（${nick || toId.slice(0, 10)}，基准 = ${pState.lastSeenAt || '无对方消息'}，之前的不重播）`)
+        continue
       }
-      if (!theirs.length) { cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok', lastError: '' }); return }
+      if (!theirs.length) { cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok', lastError: '' }); continue }
       // 基准推进：推进只说明「这一条我处理过了」，不代表已经有人接话。
-      chatWatchLastSeenAt = theirs[theirs.length - 1].at
+      chatWatchPeers[toId] = { ...pState, lastSeenAt: theirs[theirs.length - 1].at, primed: true }
       cwState.notified += theirs.length
       const head = theirs[0].text.slice(0, 60)
-      chatWatchLog(`新消息 ${theirs.length} 条（${cfg.dmTo || toId}）：${head}`)
+      chatWatchLog(`新消息 ${theirs.length} 条（${nick || toId.slice(0, 10)}）：${head}`)
       // 通知：2026-10-24 使用者要求「不用弹这种通知」⇒ 聊天模式**不弹** Windows 通知，
       //    只写日志 + 状态屏（回话由 AI 值班做，本来也不需要桌面通知提醒人）。
       //    webhook 仍按配置走（有人拿它接手机推送，不在这条指令范围内）。
@@ -3225,13 +3289,12 @@ export function apply(ctx, config) {
       let toastState = 'off（使用者 2026-10-24 关的：聊天模式不弹通知）'
       const mode = String(cfg.notifyMode || 'toast')
       if (mode === 'webhook' || mode === 'both') {
-        sendWebhook({ url: cfg.webhookUrl, preset: cfg.webhookPreset, title: `${cfg.dmTo || '私信'} 来消息了`, markdown: theirs.map((m) => `- ${m.text.slice(0, 100)}`).join('\n') }).catch(() => { /* webhook 失败不影响 */ })
+        sendWebhook({ url: cfg.webhookUrl, preset: cfg.webhookPreset, title: `${nick || '私信'} 来消息了`, markdown: theirs.map((m) => `- ${m.text.slice(0, 100)}`).join('\n') }).catch(() => { /* webhook 失败不影响 */ })
       }
       // 传话（异步，别把盯梢拍卡住）：成功与否都写进状态屏，主人能看见接没接上。
       // ⭐ 2026-10-25 深夜「探明呗」成果：私信可以投给**常驻值班鱼**（Agent Teams 队友
       //    dm-duty-fish）——独立会话收信，私聊不占前台上下文；前台模式照旧排队投 Lead。
       //    投递优先级：cfg.chatWatchTarget 指哪打哪；值班鱼不在时自动退回前台。
-      const nick = String(cfg.dmTo || '').trim()
       const transcript = msgs
         .map((m) => `${m.from === 'them' ? '他' : '我'}：${String(m.text || '').slice(0, 120)}`)
         .join('\n')
@@ -3279,6 +3342,7 @@ export function apply(ctx, config) {
         chatWatchLog(`⚠️ 转给${via}失败：${(wake && wake.reason) || '原因未知'}`)
       }
       cwWrite({ lastCheckAt: Date.now(), lastResult: 'ok_new', lastError: '', lastNewAt: theirs[theirs.length - 1].at, lastNewText: theirs[theirs.length - 1].text.slice(0, 40), toast: toastState })
+      } // ⭐ 0.5.5 多人巡检循环结束（每个「听他的话」的人各走一遍）
     } catch (e) {
       chatWatchLog(`这一拍出错（已兜住）：${e?.message ?? e}`)
       cwWrite({ lastCheckAt: Date.now(), lastResult: 'error', lastError: String(e?.message ?? e).slice(0, 160) })
@@ -3319,9 +3383,9 @@ export function apply(ctx, config) {
     const st = rollDay()
     const greeted = st.greet && typeof st.greet === 'object' ? st.greet : {}
     if (greeted[key] === today) return { ok: false, skipped: true, reason: `今天已经打过招呼（${key}），明天再见` }
-    const to = String(cfg.dmTo || '').trim()
-    const toId = String(cfg.dmToId || '').trim()
-    if (!toId) return { ok: false, reason: '没选私信对象，不知道跟谁说' }
+    // ⭐ 0.5.5：报号发给**所有**开了「听他的话」的人（主人 2026-10-26 定）
+    const targets = dmListeners()
+    if (!targets.length) return { ok: false, reason: '还没选私信对象，不知道跟谁说' }
     if (!hasCredential(stateDir)) return { ok: false, reason: '还没登录，说不了' }
     // 台词按场景给：贴合"刚开开关"或"重启接班"，深夜另有说法，不写死一句
     const hour = new Date().getHours()
@@ -3335,20 +3399,27 @@ export function apply(ctx, config) {
         : `小鱼接班啦——聊天模式还是开着的，记录对好了表，主人发消息我就接 (๑•̀ㅂ•́)و✧`,
     }
     const text = lines[scene] || lines.resumed
-    const r = await runNodeToolAsync('im-send.mjs', ['--to', to, '--to-id', toId, '--text', text], { timeout: 240_000 })
-    const res = pickJson(r.stdout)
-    const okSent = Boolean(res && res.ok && res.sent)
+    let okSent = false
+    let lastErr = ''
+    for (const p of targets) {
+      if (!p.sec_uid) continue
+      const r = await runNodeToolAsync('im-send.mjs', ['--to', p.nick, '--to-id', p.sec_uid, '--text', text], { timeout: 240_000 })
+      const res = pickJson(r.stdout)
+      const sent = Boolean(res && res.ok && res.sent)
+      if (sent) okSent = true
+      else lastErr = String((res && (res.error || res.note)) || r.stderr || '原因未知').slice(0, 120)
+      if (sent) {
+        try { noteSent(stateDir, p.sec_uid, p.nick, text, 'text') } catch { /* 记忆失败不影响 */ }
+      }
+    }
     if (okSent) {
       // 只有真发出去才记当天 —— 失败留着重试的机会（触发点就两处：开关、重启，不会轰炸）
       bumpState({ greet: { ...greeted, [key]: today } })
-      chatWatchLog(`上岗报号（${scene}）已发：${text.slice(0, 40)}`)
-      try {
-        noteSent(stateDir, toId, to, text, 'text')
-      } catch { /* 记忆失败不影响 */ }
+      chatWatchLog(`上岗报号（${scene}）已发给 ${targets.length} 人：${text.slice(0, 40)}`)
     } else {
-      chatWatchLog(`上岗报号（${scene}）没发出去：${String((res && (res.error || res.note)) || r.stderr || '原因未知').slice(0, 120)}`)
+      chatWatchLog(`上岗报号（${scene}）没发出去：${lastErr || '原因未知'}`)
     }
-    return { ok: okSent, text: okSent ? text : '', reason: okSent ? '' : String((res && (res.error || res.note)) || '发送失败') }
+    return { ok: okSent, text: okSent ? text : '', reason: okSent ? '' : lastErr }
   }
 
   // 触发点①：重启后（apply 完成几秒后）发现「开关是开着的」 ⇒ 接班报号。
@@ -4677,8 +4748,9 @@ export function apply(ctx, config) {
     /* ── ⭐ 聊天模式：读某个人的完整上下文（面板「跟他聊」用） ── */
     if (req.method === 'POST' && path === '/api/douyin-duty/chat/read') {
       const body = await readBody(req)
-      const toId = String(body?.to_id || cfg.dmToId || '').trim()
-      const to = String(body?.to || cfg.dmTo || '').trim()
+      // 0.5.5：面板显式选谁就读谁 —— 不再兜底 cfg 单值（那是「读错人」的老根子）
+      const toId = String(body?.to_id || '').trim()
+      const to = String(body?.to || '').trim()
       if (!toId && !to) return sendJson(res, 200, { ok: false, error: '不知道读谁的会话' })
       /**
        * ⭐ 快路径（2026-10-24）：有 to_id 就先走 HTTP（im-http.py，~1.1 秒、不启浏览器、
@@ -4742,8 +4814,9 @@ export function apply(ctx, config) {
     /* ── ⭐ 聊天模式：发一条（带记忆，确认后才发） ── */
     if (req.method === 'POST' && path === '/api/douyin-duty/chat/send') {
       const body = await readBody(req)
-      const toId = String(body?.to_id || cfg.dmToId || '').trim()
-      const to = String(body?.to || cfg.dmTo || '').trim()
+      // 0.5.5：面板显式发给谁就发给谁 —— 不再兜底 cfg 单值（防张冠李戴）
+      const toId = String(body?.to_id || '').trim()
+      const to = String(body?.to || '').trim()
       const text = String(body?.text || '').trim()
       if (!text) return sendJson(res, 200, { ok: false, error: '正文是空的' })
       // 🔴 用户闸：面板点「发送」= 当场同意，所以这里直接放行（前端已经二次确认过）
@@ -4969,15 +5042,15 @@ export function apply(ctx, config) {
           human = '还差一步：得用抖音 App 扫码登录，这个我替不了你。'
           return sendJson(res, 200, { ok: false, fixed, need_user: needUser, human })
         }
-        // ③ 私信对象
-        const toId = String(cfg.dmToId || '').trim()
-        if (!toId) {
+        // ③ 私信对象（0.5.5：看 dmPeers 列表，旧单值兜底）
+        const fixPeer = dmPrimary()
+        if (!fixPeer.sec_uid) {
           needUser = { what: '选人', how: '在下面「私信发给谁」里点「从我的会话里选」，挑一个人。' }
           human = '还差一步：得先告诉我要盯谁的私信。'
           return sendJson(res, 200, { ok: false, fixed, need_user: needUser, human })
         }
         // ④ 真读一次，看能不能读到
-        const r = runPy('im-http.py', ['--read', '--peer-sec-uid', toId, '--limit', '3'], { timeout: 30_000 })
+        const r = runPy('im-http.py', ['--read', '--peer-sec-uid', fixPeer.sec_uid, '--limit', '3'], { timeout: 30_000 })
         const j = pickJson(r.stdout)
         if (!j || !j.ok) {
           const err = String((j && j.error) || r.stderr || '没返回可解析结果')

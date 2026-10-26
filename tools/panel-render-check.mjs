@@ -581,8 +581,9 @@ if (rPeople) {
       await flush()
       const f = walk(await renderNow())
       const txt = f.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
-      if (/已选/.test(txt)) console.log('  ✅ 点人能选中（显示"已选"）')
-      else { console.log('  ❌ 点人没选中'); fail++ }
+      // 0.5.5：点人 = 加进 dmPeers 列表（不再是"已选"单选）
+      if (/已在列表|加进私信对象|已把/.test(txt)) console.log('  ✅ 点人能加进私信对象列表（0.5.5 多人）')
+      else { console.log('  ❌ 点人没加进列表'); fail++ }
     } catch (e) { console.log(`  ❌ 点人抛错：${e?.message ?? e}`); fail++ }
   } else { console.log('  ❌ 找不到可点的人'); fail++ }
 }
@@ -602,9 +603,9 @@ else { console.log('  ❌ 没显示账号昵称 —— 用户不知道在给谁�
 if (/9999000011112222/.test(allText)) { console.log('  ❌ 还显示了账号 ID —— 用户说只要昵称就行'); fail++ }
 else console.log('  ✅ 只显示昵称，不显示 ID')
 
-/* ── 私信对象：也要能自己写 ── */
-console.log('\n【私信对象：自己写】')
-const rManual = await clickAndRender('自己写')
+/* ── 私信对象：手动加人（0.5.5 按钮改名「手动加一个」） ── */
+console.log('\n【私信对象：手动加】')
+const rManual = await clickAndRender('手动加一个')
 if (rManual) {
   const nickInput = rManual.flat.find((n) => n.tag === 'input' && n.props && String(n.props.placeholder || '').includes('示例好友'))
   const idInput = rManual.flat.find((n) => n.tag === 'input' && n.props && String(n.props.placeholder || '').includes('MS4wLjABAAAA'))
