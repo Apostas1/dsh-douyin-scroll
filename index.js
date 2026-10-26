@@ -2652,13 +2652,13 @@ export function apply(ctx, config) {
            *    但「有人 @ 我，回他」是另一回事：有 comment_id ⇒ 必须**直接回复**，不许用 @。
            *    规则一句话：**有评论可回就回复，没评论可回才 @。**
            */
-          (cfg.commentAtMe
+          (cfg.commentAtMe || String(cfg.atPeer?.nick || '').trim()
             ? (() => {
-              // ⭐ 0.5.7（主人定稿）：@ 的人 = 「在评论区 @ 你」自己选的人（atPeer）—— 跟私信列表无关；
-              //    没选人 ⇒ @ 功能关闭，跳过。不再「保底 @ 登录号」。
-              const who = String(cfg.atPeer?.nick || '').trim()
+              // ⭐ 0.5.8（主人定稿）：面板已无开关 —— @ 对象（atPeer.nick）一个状态管一切。
+              //    commentAtMe 只是旧配置残余；为老用户平滑，两个字段任一有值都算开。
+              const who = String(cfg.atPeer?.nick || '').trim() || String(cfg.commentSelfName || '').trim()
               if (!who) {
-                return `「在评论区 @ 你」开着，但还没选 @ 谁 —— 这一轮**跳过 @ 评论**，只写报告。`
+                return `「评论区 @ 提醒」开着但还没选 @ 谁 —— 这一轮**跳过 @ 评论**，只写报告。`
               }
               return `🔴 **「在评论区 @ 你」开着 —— 这是这一轮的重点任务**：\n`
                 + `   ⭐ 为什么这里用 @ 而不是"直接回复"：这个视频下面**没有他的评论可回**，\n`

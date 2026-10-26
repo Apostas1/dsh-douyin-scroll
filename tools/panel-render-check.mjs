@@ -745,18 +745,18 @@ else { console.log('  ❌ 没说清适用范围'); fail++ }
   else { console.log(`  ❌ 卡片顺序不对（开始使用@${iStart} 自动发送@${iAuto}）—— 开始使用应置顶`); fail++ }
 }
 
-/* ── 「在评论区 @ 你」（0.5.7：没选 @ 对象 = 关闭，文案要说明） ── */
-console.log('\n【在评论区 @ 你】')
-if (/在评论区 @ 你/.test(allText)) console.log('  ✅ 有「在评论区 @ 你」开关')
-else { console.log('  ❌ 没有「在评论区 @ 你」'); fail++ }
-if (/不选 = 这个功能关闭|还没选 @ 谁/.test(allText)) console.log('  ✅ 未选人时的关闭态说明清楚了（0.5.7）')
+/* ── 「评论区 @ 提醒」（0.5.8：没有开关，选人即开、清掉即关） ── */
+console.log('\n【评论区 @ 提醒】')
+if (/评论区 @ 提醒/.test(allText)) console.log('  ✅ 有「评论区 @ 提醒」区块（0.5.8 无开关设计）')
+else { console.log('  ❌ 没有「评论区 @ 提醒」'); fail++ }
+if (/关（没选人 = 不 @）|想开就点下面一个人/.test(allText)) console.log('  ✅ 未选人时的关闭态说明清楚了')
 else { console.log('  ❌ 未选人时的关闭态没说明'); fail++ }
-// 位置：必须在「自动发送」之后（重排后开始使用在最顶，不再约束与它的相对位置）
+// 位置：必须在「自动发送」之后
 {
   const iSend = allText.indexOf('自动发送')
-  const iAtMe = allText.indexOf('在评论区 @ 你')
+  const iAtMe = allText.indexOf('评论区 @ 提醒')
   if (iSend >= 0 && iAtMe > iSend) console.log('  ✅ 位置正确（自动发送下面）')
-  else { console.log(`  ❌ 位置不对（自动发送@${iSend} 评论区@我@${iAtMe}）`); fail++ }
+  else { console.log(`  ❌ 位置不对（自动发送@${iSend} 评论区@提醒@${iAtMe}）`); fail++ }
 }
 
 /* ── 看日志 ── */
