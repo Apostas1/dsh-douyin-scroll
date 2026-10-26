@@ -797,12 +797,16 @@ console.log('\n【群聊限制（明写，不藏 hover）】')
 {
   // ① 源码里必须有那条黄条（渲染检查读的是源码文案）
   const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
-  if (/只能看不能发/.test(src)) console.log('  ✅ 群标签写明「只能看不能发」')
-  else { console.log('  ❌ 群标签没写「只能看不能发」'); fail++ }
+  if (/可能发不出/.test(src)) console.log('  ✅ 群标签写明「可能发不出」（不把一次观察说成铁律）')
+  else { console.log('  ❌ 群标签没写「可能发不出」'); fail++ }
   // ⚠️ 措辞要求：大白话、短句 —— 主人 2026-10-26 令「你这么说谁看得懂，简单点」
-  if (/群里发不出消息/.test(src) && /手机端正常/.test(src)) {
-    console.log('  ✅ 面板用大白话说清「群里发不出消息，手机端正常」')
-  } else { console.log('  ❌ 面板没用大白话（要写「群里发不出消息」「手机端正常」）'); fail++ }
+  if (/群里可能发不出消息/.test(src) && /手机端正常/.test(src)) {
+    console.log('  ✅ 面板用大白话说清「群里可能发不出消息，手机端正常」')
+  } else { console.log('  ❌ 面板没用大白话（要写「群里可能发不出消息」「手机端正常」）'); fail++ }
+  // ⚠️ 主人 2026-10-26 令：「不要说这么绝对，要说可能，你又没用别的号试过」
+  if (/在我这个号上试的|别的号不一定/.test(src)) {
+    console.log('  ✅ 面板注明「只在一个号上试过，别的号不一定」')
+  } else { console.log('  ❌ 面板没注明测试范围（别把一次观察说成铁律）'); fail++ }
   if (/7523|服务端收下|渠道限制/.test(src)) {
     console.log('  ⚠️ 面板还留着行话（7523 / 服务端收下 / 渠道限制）—— 主人嫌绕，建议再删')
   } else console.log('  ✅ 面板没有行话（7523 那些只留在文档里）')
@@ -820,7 +824,7 @@ console.log('\n【群聊限制（明写，不藏 hover）】')
       await flush()
       const gf = walk(await renderNow())
       const gtxt = gf.filter((n) => n.tag === '#text').map((n) => n.text).join(' | ')
-      if (/群里发不出消息/.test(gtxt) && /手机端正常/.test(gtxt)) {
+      if (/群里可能发不出消息/.test(gtxt) && /手机端正常/.test(gtxt)) {
         console.log('  ✅ 选中群后，面板上出现群聊限制说明（不是藏起来的）')
       } else {
         console.log('  ❌ 选中群后没看到限制说明（提示被藏起来了）'); fail++

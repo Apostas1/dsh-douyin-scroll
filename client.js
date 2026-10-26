@@ -1057,7 +1057,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                   h('span', { 'data-dy-person-name': '' }, p.nick || (p.sec_uid || '').slice(0, 10) + '…'),
                   p.sec_uid
                     ? null
-                    : h('span', { 'data-dy-tag': '', title: '群里发不出消息：网页端发的别人收不到，手机端正常。' }, '群聊 · 只能看不能发'),
+                    : h('span', { 'data-dy-tag': '', title: '群里可能发不出消息：在我这个号上试的，网页端发的别人收不到，手机端正常。别的号不一定这样。' }, '群聊 · 可能发不出'),
                   h('span', { 'data-dy-grow': '' }),
                   h('button', {
                     'data-dy-mini': '', disabled: Boolean(busy),
@@ -1066,11 +1066,12 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               : null,
 
             /* 🔴 群聊限制写在明面上（不是 hover 小字）—— 主人 2026-10-26 令：
-             *    「不在选项上说清吗」—— 选了群的人一眼就能看到这条限制。 */
+             *    「不在选项上说清吗」—— 选了群的人一眼就能看到这条限制。
+             *    ⚠️ 措辞留余地：只在鱼号上试过，别把一次观察说成铁律（主人 2026-10-26 令）。 */
             dmPeers.some((p) => !p.sec_uid)
               ? h('div', { 'data-dy-msg': '', 'data-warn': '' },
-                '⚠️ **群里发不出消息**：网页端发的，群里其他人收不到（手机端正常）。'
-                + '看群消息没问题，要说话请用手机端。')
+                '⚠️ **群里可能发不出消息**：在我这个号上试的，网页端发的群里人收不到，手机端正常。'
+                + '别的号不一定这样。看群消息没问题，要说话请用手机端。')
               : null,
 
             people && people.length
@@ -1088,8 +1089,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                     p.is_group
                       ? h('span', {
                         'data-dy-tag': '',
-                        title: '群里发不出消息：网页端发的别人收不到，手机端正常。',
-                      }, '群聊 · 只能看不能发')
+                        title: '群里可能发不出消息：在我这个号上试的，网页端发的别人收不到，手机端正常。别的号不一定这样。',
+                      }, '群聊 · 可能发不出')
                       : null,
                     p.duplicate && !p.is_group ? h('span', { 'data-dy-tag': '' }, '重名') : null,
                     added ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ 已在列表') : null,
