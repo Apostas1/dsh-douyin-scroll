@@ -135,10 +135,11 @@ export const Config = !z ? undefined : z.object({
    */
   commentAtMe: z.boolean().default(false).extra('volatile', true),
   /**
-   * ⭐ 「在评论区 @ 你」要 @ 谁 —— 填**你自己抖音昵称**。
-   *    留空就用登录账号的昵称（account.json 里那个），所以一般不用填。
-   *    只有当你的登录号跟"你想被 @ 的那个号"不是同一个时才需要。
+   * ⭐ 0.5.7（主人定稿）「在评论区 @ 你」要 @ 谁 —— **从会话列表点选**（{nick}）。
+   *    没选人 ⇒ @ 功能关闭（不再「保底 @ 登录号」）。commentSelfName 作废不读。
    */
+  atPeer: z.object({ nick: z.string().default('') }).default({}).extra('volatile', true),
+  /** ⚠️ 作废（0.5.7）：@ 的人改走 atPeer 点选。字段留着不读，防止老 config.json 报未知键 */
   commentSelfName: z.string().default('').extra('volatile', true),
   /** 评论执行器：off / builtin（不可用）/ browser / http */
   commentExecutor: z.string().default('off').extra('volatile', true),
@@ -321,7 +322,7 @@ export function apply(ctx, config) {
     windows: [],
     keywords: [], channels: [], authors: [],
     minDescLen: 12, minComments: 3,
-    autoComment: false, autoSend: true, commentAtMe: false, commentSelfName: '',
+    autoComment: false, autoSend: true, commentAtMe: false, atPeer: {}, commentSelfName: '',
     commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
     mentionName: '', httpCommentUrl: '',
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
@@ -342,8 +343,7 @@ export function apply(ctx, config) {
   //    之前判断 `base[k].length && typeof base[k][0] === 'object'` —— 但 DEFAULTS 里
   //    `windows: []` 是空的，length=0，于是走了字符串分支，用户存的自定义时段全被吃掉。
   //    改成显式声明，别靠"数组里恰好有元素"来判断。
-  const OBJECT_ARRAYS = new Set(['windows', 'dmPeers'])
-  /**
+  const OBJECT_ARRAYS = new Set(['windows', 'dmPeers'])  /**
    * 🔴 2026-10-25 晚追加（字符串守卫的姊妹篇）：**数组字段的空不许盖掉非空**。
    *    字符串那套守卫上线后，keywords（数组）继续裸奔 —— 表单给 [] / MCP patch 给 []
    *    都会把磁盘上的非空列表清掉，而且**没有任何日志**（静默丢失，查事故都查不到笔迹）。
@@ -530,21 +530,18 @@ export function apply(ctx, config) {
     }
   } catch (e) { log(`dmPeers 迁移失败（不影响旧配置工作）：${e?.message ?? e}`) }
 
-  /** 全部私信对象：dmPeers 优先；空的拿旧 dmTo/dmToId 兜底（迁移失败也不丢收件人） */
+  /** 全部私信对象：dmPeers 优先；空的拿旧 dmTo/dmToId 兜底（迁移失败也不丢收件人）
+   *  ⭐ 0.5.7（主人定稿）：listen 开关删除 —— 列表只管「发给谁」，聊天模式 = 谁私信都接 */
   const dmPeersOf = () => {
     const peers = (Array.isArray(cfg.dmPeers) ? cfg.dmPeers : [])
-      .map((p) => ({ nick: String(p?.nick || '').trim(), sec_uid: String(p?.sec_uid || '').trim(), listen: Boolean(p?.listen) }))
+      .map((p) => ({ nick: String(p?.nick || '').trim(), sec_uid: String(p?.sec_uid || '').trim() }))
       .filter((p) => p.nick || p.sec_uid)
     if (peers.length) return peers
     const t = String(cfg.dmTo || '').trim()
     const i = String(cfg.dmToId || '').trim()
-    return (t || i) ? [{ nick: t, sec_uid: i, listen: true }] : []
+    return (t || i) ? [{ nick: t, sec_uid: i }] : []
   }
-  /** 主联系人（第一个）—— 值班提示词兼容旧用法时用它 */
-  const dmPrimary = () => dmPeersOf()[0] || { nick: '', sec_uid: '', listen: false }
-  /** 「听他的话」的人 —— 值班盯梢只巡这些
-   *  ⭐ 0.5.5b 群聊：群没有 sec_uid（抖音结构如此），按「群名」身份放行 —— 不许再把群静默跳过 */
-  const dmListeners = () => dmPeersOf().filter((p) => p.listen && (p.sec_uid || p.nick))
+  const dmPrimary = () => dmPeersOf()[0] || { nick: '', sec_uid: '' }
   /**
    * 🔴🔴🔴 2026-10-26 凌晨最后一块补丁：**挂载时自己把开关恢复回上次的状态**。
    *
@@ -2657,10 +2654,11 @@ export function apply(ctx, config) {
            */
           (cfg.commentAtMe
             ? (() => {
-              const who = String(cfg.commentSelfName || '').trim() || (readJson(join(stateDir, 'account.json'), {})?.nick || '')
+              // ⭐ 0.5.7（主人定稿）：@ 的人 = 「在评论区 @ 你」自己选的人（atPeer）—— 跟私信列表无关；
+              //    没选人 ⇒ @ 功能关闭，跳过。不再「保底 @ 登录号」。
+              const who = String(cfg.atPeer?.nick || '').trim()
               if (!who) {
-                return `⚠️ 「在评论区 @ 你」开着，但**不知道要 @ 谁**（commentSelfName 空、account.json 也没有昵称）`
-                  + ` ⇒ 这一轮**跳过 @ 评论**，只写报告。`
+                return `「在评论区 @ 你」开着，但还没选 @ 谁 —— 这一轮**跳过 @ 评论**，只写报告。`
               }
               return `🔴 **「在评论区 @ 你」开着 —— 这是这一轮的重点任务**：\n`
                 + `   ⭐ 为什么这里用 @ 而不是"直接回复"：这个视频下面**没有他的评论可回**，\n`
@@ -3167,7 +3165,7 @@ export function apply(ctx, config) {
       writeFileSync(cwStateFile, JSON.stringify({
         ...cwState, ts: Date.now(), on: Boolean(cfg.chatWatch),
         sec: Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300)),
-        to: dmListeners().map((p) => p.nick || p.sec_uid.slice(0, 10)).join('、') || '',
+        to: dmPeersOf().map((p) => p.nick || p.sec_uid.slice(0, 10)).join('、') || '',
         via: 'http（不启浏览器）',
       }, null, 1), 'utf8')
     } catch { /* 状态写不进也不能出事 */ }
@@ -3184,10 +3182,10 @@ export function apply(ctx, config) {
       refreshCfg()
       if (!cfg.chatWatch) { cwWrite({ lastResult: 'off' }); return }
       if (!hasCredential(stateDir)) { cwWrite({ lastResult: 'skip_no_login' }); return }
-      // ⭐ 0.5.5 多人盯梢：巡所有开着「听他的话」的人；一个人坏了不许拖死别人
-      const listeners = dmListeners()
+      // ⭐ 0.5.7 盯梢对象 = 全部私信对象（listen 开关已删，主人定稿：聊天模式 = 谁私信都接）
+      const listeners = dmPeersOf()
       if (!listeners.length) {
-        cwWrite({ lastResult: 'skip_no_to', lastNote: '还没有开着「听他的话」的私信对象 —— 到「私信发给谁」里勾一个' })
+        cwWrite({ lastResult: 'skip_no_to', lastNote: '还没选私信对象 —— 到「私信发给谁」里点选一个' })
         return
       }
       for (const peer of listeners) {
@@ -3431,8 +3429,8 @@ export function apply(ctx, config) {
     const st = rollDay()
     const greeted = st.greet && typeof st.greet === 'object' ? st.greet : {}
     if (greeted[key] === today) return { ok: false, skipped: true, reason: `今天已经打过招呼（${key}），明天再见` }
-    // ⭐ 0.5.5：报号发给**所有**开了「听他的话」的人（主人 2026-10-26 定）
-    const targets = dmListeners()
+    // ⭐ 0.5.7：报号发给**所有**私信对象（listen 开关已删）
+    const targets = dmPeersOf()
     if (!targets.length) return { ok: false, reason: '还没选私信对象，不知道跟谁说' }
     if (!hasCredential(stateDir)) return { ok: false, reason: '还没登录，说不了' }
     // 台词按场景给：贴合"刚开开关"或"重启接班"，深夜另有说法，不写死一句

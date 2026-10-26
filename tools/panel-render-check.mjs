@@ -745,12 +745,12 @@ else { console.log('  ❌ 没说清适用范围'); fail++ }
   else { console.log(`  ❌ 卡片顺序不对（开始使用@${iStart} 自动发送@${iAuto}）—— 开始使用应置顶`); fail++ }
 }
 
-/* ── 「在评论区 @ 你」（加在自动发送下面） ── */
+/* ── 「在评论区 @ 你」（0.5.7：没选 @ 对象 = 关闭，文案要说明） ── */
 console.log('\n【在评论区 @ 你】')
 if (/在评论区 @ 你/.test(allText)) console.log('  ✅ 有「在评论区 @ 你」开关')
 else { console.log('  ❌ 没有「在评论区 @ 你」'); fail++ }
-if (/关着：不往评论区发任何东西/.test(allText)) console.log('  ✅ 默认显示"关着"')
-else { console.log('  ❌ 默认状态没说'); fail++ }
+if (/不选 = 这个功能关闭|还没选 @ 谁/.test(allText)) console.log('  ✅ 未选人时的关闭态说明清楚了（0.5.7）')
+else { console.log('  ❌ 未选人时的关闭态没说明'); fail++ }
 // 位置：必须在「自动发送」之后（重排后开始使用在最顶，不再约束与它的相对位置）
 {
   const iSend = allText.indexOf('自动发送')

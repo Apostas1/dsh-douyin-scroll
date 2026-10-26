@@ -300,10 +300,8 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       const [chatText, setChatText] = React.useState('')
       // 最近一轮的日志
       const [runLog, setRunLog] = React.useState(null)
-      // 「在评论区 @ 你」要 @ 的昵称（输入框草稿）
+      // 「在评论区 @ 你」要 @ 的昵称（0.5.7：输入框已删，atPeer 点选；草稿态仅留清空确认用）
       const [atMeDraft, setAtMeDraft] = React.useState(null)
-      // 0.5.6c「想 @ 别的号」折叠态（默认收起 —— @ 谁默认自动认登录号，不用打字）
-      const [atMeOpen, setAtMeOpen] = React.useState(false)
       // 聊天盯梢间隔的输入草稿（2026-10-24）
       const [cwSecDraft, setCwSecDraft] = React.useState(null)
       // dsh 入口路径（输入框草稿）—— 2026-10-23 加，见「出问题了？」卡片
@@ -522,18 +520,18 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
         const cur = Array.isArray(cfg.dmPeers) ? cfg.dmPeers : []
         const same = cur.some((x) => (p.sec_uid && x.sec_uid === p.sec_uid) || (!p.sec_uid && x.nick === p.nick))
         if (same) { say(`「${p.nick}」已经在列表里了`, 'warn'); return }
-        const next = [...cur, { nick: p.nick, sec_uid: p.sec_uid || '', listen: false }]
-        await patch({ dmPeers: next }, `已把「${p.nick}」加进私信对象（共 ${next.length} 人）—— 默认只收日报，不自动接话；想让他也能跟鱼聊，点他旁边的「听他的话」`)
+        const next = [...cur, { nick: p.nick, sec_uid: p.sec_uid || '' }]
+        await patch({ dmPeers: next }, `已把「${p.nick}」加进私信对象（共 ${next.length} 人）`)
       }
 
-      /** 0.5.5 切换某人的「听他的话」 */
-      const toggleListen = async (idx) => {
-        const cur = Array.isArray(cfg.dmPeers) ? [...cfg.dmPeers] : []
-        if (!cur[idx]) return
-        cur[idx] = { ...cur[idx], listen: !cur[idx].listen }
-        await patch({ dmPeers: cur }, cur[idx].listen
-          ? `「${cur[idx].nick}」说话小鱼会接了（值班自动回他）`
-          : `「${cur[idx].nick}」改为只收日报，来消息不自动接`)
+      /* 0.5.7 「听他的话」开关已删（主人定稿：聊天模式开着 = 谁私信都接，列表只管发给谁） */
+
+      /** 0.5.7 「在评论区 @ 你」选人（自己的列表，跟私信列表互不相干） */
+      const pickAt = async (p) => {
+        await patch({ atPeer: { nick: p.nick } }, `挑到好视频时会在评论区 @「${p.nick}」`)
+      }
+      const clearAt = async () => {
+        await patch({ atPeer: { nick: '' }, commentAtMe: false }, '已清掉 @ 对象 —— 「在评论区 @ 你」关闭')
       }
 
       /** 0.5.5 把某人从列表里移除 */
@@ -817,10 +815,9 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
 
       const kwText = kws !== null ? kws : (Array.isArray(cfg.keywords) ? cfg.keywords.join('\n') : '')
 
-      /* ⭐ 0.5.5 私信对象列表的小工具（面板侧只读展示用） */
+      /* ⭐ 0.5.5 私信对象列表的小工具（面板侧只读展示用）；0.5.7 加 @ 对象 */
       const dmPeers = Array.isArray(cfg.dmPeers) ? cfg.dmPeers.filter((p) => p && (p.nick || p.sec_uid)) : []
-      const dmListening = dmPeers.filter((p) => p.listen)
-      const dmNames = (arr) => arr.map((p) => p.nick || (p.sec_uid || '').slice(0, 8) + '…').join('、')
+      const atNick = String((cfg.atPeer && cfg.atPeer.nick) || '').trim()
 
       /* ════════════════════════════════════════════════════════════════════════
        * 面板结构（2026-10-25 重排：20+ 张卡 → 3 组 / 7 张卡）
@@ -1002,7 +999,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                 cfg.autoSend ? '会自动发' : '只写报告'),
               h('span', { 'data-dy-sub': '' },
                 '发给：' + (dmPeers.length
-                  ? dmNames(dmPeers)
+                  ? dmPeers.map((p) => p.nick || (p.sec_uid || '').slice(0, 8) + '…').join('、')
                   : (cfg.dmTo || '（还没选私信对象，去下面「私信发给谁」选）')))),
             h('div', { 'data-dy-sub': '' },
               '⚠️ 只管「插件自己在后台跑的轮次」。你当场在对话里让它发，不受这个开关影响。'),
@@ -1013,7 +1010,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                 h('div', { 'data-dy-title': '' }, '私信发给谁'),
                 h('div', { 'data-dy-sub': '' },
                   dmPeers.length
-                    ? `已选 ${dmPeers.length} 人：${dmNames(dmPeers)}。日报和分享卡片发给每一个人；开着「听他的话」的人来私信，值班小鱼自动接。`
+                    ? `已选 ${dmPeers.length} 人：${dmPeers.map((p) => p.nick || (p.sec_uid || '').slice(0, 8) + '…').join('、')}。日报和分享卡片发给每一个人。`
                     : '想让插件把好玩的发给你，先在这里选一个人（可以多选）。不选也行 —— 那就只写日报，不发私信。')),
               h('button', {
                 'data-dy-btn': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
@@ -1029,19 +1026,13 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                 dmPeers.map((p, i) => h('div', {
                   key: 'peer' + i,
                   'data-dy-person': '',
-                  'data-picked': p.listen ? '' : undefined,
+                  'data-picked': p.sec_uid ? '' : undefined,
                 },
                   h('span', { 'data-dy-person-name': '' }, p.nick || (p.sec_uid || '').slice(0, 10) + '…'),
                   p.sec_uid
                     ? null
                     : h('span', { 'data-dy-tag': '', title: '群聊：小鱼能看群消息并转达；但网页端在群里发言是「假成功」（服务端不分发，其他人收不到，实测回执 7523）。要在群里说话请用手机端。' }, '群聊'),
                   h('span', { 'data-dy-grow': '' }),
-                  h('button', {
-                    'data-dy-mini': '', 'data-ok': p.listen ? '' : undefined,
-                    disabled: Boolean(busy),
-                    title: p.listen ? '开着：来消息小鱼自动看' : '关着：只收日报，来消息不自动接',
-                    onClick: () => toggleListen(i),
-                  }, p.listen ? '👂 听他的话：开' : '听他的话：关'),
                   h('button', {
                     'data-dy-mini': '', disabled: Boolean(busy),
                     onClick: () => removePeer(i),
@@ -1097,7 +1088,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                     'data-dy-btn': '', 'data-primary': '', disabled: Boolean(busy) || !(manualDm.nick.trim() || manualDm.id.trim()),
                     onClick: async () => {
                       const cur = Array.isArray(cfg.dmPeers) ? cfg.dmPeers : []
-                      const next = [...cur, { nick: manualDm.nick.trim(), sec_uid: manualDm.id.trim(), listen: false }]
+                      const next = [...cur, { nick: manualDm.nick.trim(), sec_uid: manualDm.id.trim() }]
                       await patch({ dmPeers: next }, `已把「${manualDm.nick.trim() || manualDm.id.trim()}」加进私信对象`)
                       setManualDm(null)
                     },
@@ -1105,58 +1096,57 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
               : null),
 
 
-            /* ⭐⭐ 「在评论区 @ 你」—— 用户 2026-10-22 要求，加在自动发送下面 */
+            /* ⭐⭐ 「在评论区 @ 你」（0.5.7 主人定稿）—— 自己的选人列表：
+             *    选中谁 → 挑到好视频就在评论区 @ 谁；没选人 = 功能整个关闭。
+             *    跟「私信发给谁」互不相干（可以发 A、@ B）。昵称自动带出，不用打字。 */
             h('div', { 'data-dy-row': '', style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08))' } },
               h('div', { 'data-dy-grow': '' },
                 h('div', { 'data-dy-title': '' }, '在评论区 @ 你'),
                 h('div', { 'data-dy-sub': '' },
-                  (cfg.commentAtMe
-                    ? '✅ 开着：挑到最值得的那条时，会在它的评论区发一条 @ 你的评论 —— 你刷抖音就能看到通知。'
-                    : '关着：不往评论区发任何东西。'))),
+                  !cfg.autoSend
+                    ? '先打开上面的「自动发送」，这个才有用。'
+                    : !atNick
+                      ? '还没选 @ 谁 —— 下面点选一个人就自动打开；不选 = 这个功能关闭。'
+                      : `✅ 开着：挑到最值得的那条时，会在它的评论区发一条 @「${atNick}」的评论（他刷抖音就能收到通知）。`)),
               h(Switch, {
                 on: Boolean(cfg.commentAtMe),
-                disabled: !cfg.autoSend,
-                onChange: (v) => patch({ commentAtMe: v }, v
-                  ? '✅ 已打开「在评论区 @ 你」'
-                  : '已关闭「在评论区 @ 你」'),
+                disabled: !cfg.autoSend || !atNick,
+                title: !atNick ? '先在下面选 @ 谁，这个开关才能打开' : '',
+                onChange: (v) => {
+                  if (!atNick) { say('先在下面选 @ 谁，这个开关才能打开', 'warn'); return }
+                  patch({ commentAtMe: v }, v ? '✅ 已打开「在评论区 @ 你」' : '已关闭「在评论区 @ 你」')
+                },
               })),
-            !cfg.autoSend
-              ? h('div', { 'data-dy-sub': '' }, '（先打开上面的「自动发送」，这个才有用）')
+            cfg.autoSend
+              ? h('div', { 'data-dy-sub': '' },
+                atNick
+                  ? `要 @ 的人：「${atNick}」`
+                  : '要 @ 的人：（还没选 —— 下面点一个）')
               : null,
-            cfg.commentAtMe && cfg.autoSend
-              ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px' } },
-                '会在**最值得的那一条**下发一次，提醒内容以「@你的昵称」开头。'
-                + (cfg.commentSelfName ? `（会 @「${cfg.commentSelfName}」）` : '（会 @ 你登录的这个号）'))
+            cfg.autoSend
+              ? h('div', { 'data-dy-people': '' },
+                people && people.length
+                  ? people.map((p, i) => h('button', {
+                    key: 'at' + i,
+                    'data-dy-person': '',
+                    'data-picked': atNick === p.nick ? '' : undefined,
+                    disabled: Boolean(busy) || p.is_group,
+                    onClick: () => pickAt(p),
+                  },
+                    h('span', { 'data-dy-person-name': '' }, p.nick),
+                    p.is_group ? h('span', { 'data-dy-tag': '' }, '群不能 @') : null,
+                    atNick === p.nick ? h('span', { 'data-dy-tag': '', 'data-ok': '' }, '✓ @ 他') : null))
+                  : h('button', {
+                    'data-dy-mini': '', disabled: busy === 'people' || !st.loggedIn, onClick: loadPeople,
+                  }, busy === 'people' ? '读取会话列表…' : '从我的会话里选 @ 谁'))
               : null,
-            /* 🔴 2026-10-23：使用者反馈「@ 不出来」—— 这里必须讲清楚真 @ 的前提 */
+            atNick
+              ? h('div', { 'data-dy-row': '' },
+                h('button', { 'data-dy-mini': '', disabled: Boolean(busy), onClick: clearAt }, '清掉 @ 对象（关闭功能）'))
+              : null,
             cfg.commentAtMe && cfg.autoSend
               ? h('div', { 'data-dy-sub': '', style: { marginTop: '4px', opacity: '.78' } },
-                '💡 真 @ 需要起无头 Chrome 走「点选弹层」流程（约 20-40 秒）：'
-                + '① 电脑上要装了 Chrome；② 要 @ 的昵称必须能在弹层里搜到（一般是关注/互关的人）；'
-                + '③ 只写「@昵称」文字、没走点选的评论，对方收不到通知 —— 这是抖音的限制，不是插件偷懒。')
-              : null,
-            /* ⭐ 0.5.6c：@ 谁不用打字 —— 默认就是登录的这个号（account.json 自动有昵称）。
-             *    输入框降级成「想 @ 别的号才展开」的折叠项。 */
-            cfg.commentAtMe
-              ? (atMeOpen
-                ? h('div', { 'data-dy-row': '' },
-                  h('input', {
-                    'data-dy-input': '', style: { flex: '1' },
-                    placeholder: '要 @ 的昵称（清空保存 = 恢复 @ 登录号）',
-                    value: atMeDraft !== null ? atMeDraft : String(cfg.commentSelfName || ''),
-                    onChange: (e) => setAtMeDraft(e.target.value),
-                  }),
-                  h('button', {
-                    'data-dy-mini': '', disabled: Boolean(busy) || atMeDraft === null,
-                    onClick: async () => { await patch({ commentSelfName: String(atMeDraft || '').trim() }, '已保存要 @ 的昵称'); setAtMeDraft(null) },
-                  }, '保存'),
-                  h('button', { 'data-dy-mini': '', onClick: () => { setAtMeOpen(false); setAtMeDraft(null) } }, '收起'))
-                : h('div', { 'data-dy-row': '' },
-                  h('span', { 'data-dy-sub': '' },
-                    '要 @ 的人：' + (cfg.commentSelfName
-                      ? `「${cfg.commentSelfName}」（手动指定的号）`
-                      : `「${(acc && acc.nick) || '登录的号'}」（默认 = 你登录的这个号，自动认，不用填）`)),
-                  h('button', { 'data-dy-mini': '', onClick: () => { setAtMeOpen(true); setAtMeDraft(cfg.commentSelfName || '') } }, '想 @ 别的号')))
+                '💡 真 @ 需要起无头 Chrome 走「点选弹层」流程（约 20-40 秒）；@ 的昵称必须能在弹层里搜到（一般是关注/互关的人）。')
               : null,
 
             /* ⭐⭐ 聊天模式（2026-10-24）：使用者实测的「会话模式」进插件。
@@ -1181,28 +1171,28 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                  *      ③ 正常         ⇒ 说功能状态
                  */
                 h('div', { 'data-dy-sub': '' },
-                  !dmListening.length
-                    ? '⚠️ 还没有开着「听他的话」的私信对象 —— 开关能打开，但得去下面「私信发给谁」选人并打开那个开关，小鱼才知道该接谁的话。'
+                  !dmPeers.length
+                    ? '⚠️ 还没选私信对象 —— 去下面「私信发给谁」点选一个人，小鱼才知道有消息时状态屏该显示谁。'
                     : busy === 'patch'
                       ? '保存中…'
                       : (cfg.chatWatch
-                        ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒静默看一眼「${dmNames(dmListening) || '私信对象'}」有没有新消息；看见了就把话转给值班的小鱼接（状态屏能看到有没有接上）。不弹桌面通知，不起浏览器，很轻。`
-                        : '关着（默认是开的）。关了之后他来消息就没人接话——小鱼睡缸底。想恢复再打开。'))),
+                        ? `✅ 开着：每 ${Math.max(10, Math.min(Number(cfg.chatWatchSec || 30), 300))} 秒看一眼私信，**谁来的都看**（${dmPeers.map((p) => p.nick || (p.sec_uid || '').slice(0, 8) + '…').join('、')}）；有新消息就转给值班的小鱼接。不弹桌面通知，不起浏览器，很轻。`
+                        : '关着（默认是开的）。关了之后来消息就没人接话——小鱼睡缸底。想恢复再打开。'))),
               h(Switch, {
                 on: Boolean(cfg.chatWatch),
                 disabled: busy === 'patch',
                 /* 变灰时点它也给一句话——比"毫无反应"好，主人至少知道点到了 */
                 onChange: (v) => {
                   patch({ chatWatch: v }, v
-                    ? (dmListening.length ? '✅ 已打开聊天模式（静默盯消息）' : '聊天模式开了 —— 记得去下面给某个人打开「听他的话」，不然小鱼不知道接谁的')
+                    ? (dmPeers.length ? '✅ 已打开聊天模式（谁私信都接）' : '聊天模式开了 —— 建议先去「私信发给谁」点选对象，状态屏才好显示')
                     : '已关闭聊天模式')
                 },
               })),
             busy === 'patch'
               ? h('div', { 'data-dy-sub': '' }, '保存中…')
               : null,
-            !dmListening.length
-              ? h('div', { 'data-dy-sub': '' }, '（还没有人开着「听他的话」—— 在下面「私信发给谁」里选人并打开）')
+            !dmPeers.length
+              ? h('div', { 'data-dy-sub': '' }, '（还没选私信对象 —— 在下面「私信发给谁」里点选）')
               : null,
             cfg.chatWatch
               ? h('div', { 'data-dy-row': '' },
