@@ -1032,7 +1032,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                   h('span', { 'data-dy-person-name': '' }, p.nick || (p.sec_uid || '').slice(0, 10) + '…'),
                   p.sec_uid
                     ? null
-                    : h('span', { 'data-dy-tag': '' }, '群聊'),
+                    : h('span', { 'data-dy-tag': '', title: '群聊：小鱼能看群消息并转达；但网页端在群里发言是「假成功」（服务端不分发，其他人收不到，实测回执 7523）。要在群里说话请用手机端。' }, '群聊'),
                   h('span', { 'data-dy-grow': '' }),
                   h('button', {
                     'data-dy-mini': '', 'data-ok': p.listen ? '' : undefined,

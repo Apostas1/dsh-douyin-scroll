@@ -3229,7 +3229,9 @@ export function apply(ctx, config) {
         const gtext = [
           `【抖音群聊·自动转达】群「${nick}」来了 ${fresh.length} 条新消息：`,
           ...fresh.slice(-5).map((m) => `- ${String(m.text || '').slice(0, 100)}`),
-          `（群里谁都在说话，**默认不要回** —— 除非有人 @小鱼 或明确在跟鱼说话；回复只走 douyin_dm 私聊那个人，不在群里刷屏。）`,
+          `（群里谁都在说话，**默认不要回** —— 除非有人 @小鱼 或明确在跟鱼说话；`,
+          `🔴 账号限制（实测 2026-10-26）：网页端往群里发消息是「假成功」—— 服务端不分发，其他成员永远收不到（回执 7523）。`,
+          `所以**绝对不要**用 douyin_dm/im-send 往这个群里发任何东西；真要回话就douyin_dm 私聊那个人，或者记下来等主人在的时候说。）`,
         ].join('\n')
         try {
           const w = cfg.chatWatchTarget === 'duty' ? await deliverToDutyFish(gtext) : await tryDeliverToSession(gtext)
