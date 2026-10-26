@@ -77,6 +77,32 @@ for (const f of ['index.js', 'client.js',
   else bad(`${f}：${(r.stderr || '').split('\n').slice(0, 3).join(' ')}`)
 }
 
+/* ── 4a-1. 面板状态 setter 不许有悬空引用（2026-10-26 血的教训）──
+ * 起因：删一个 useState（比如 showAtPicker）时漏删了引用它的 onClick ⇒
+ *   运行时 ReferenceError ⇒ onChange 整个崩 ⇒ **面板点开关「没反应」**。
+ *   而 `node --check` 查不出来（不是语法错误），面板渲染检查也查不出来（那个路径没被点）。
+ *   ⇒ 必须静态扫：所有 setXxx( 调用，setXxx 必须在 useState 解构里定义过。
+ */
+console.log('\n4a-1. 面板状态 setter 引用完整')
+try {
+  const c = readFileSync(join(here, 'client.js'), 'utf8')
+  const defined = new Set()
+  for (const m of c.matchAll(/const\s*\[\s*\w+\s*,\s*(set\w+)\s*\]\s*=\s*React\.useState/g)) defined.add(m[1])
+  const called = new Set()
+  for (const m of c.matchAll(/\b(set[A-Z]\w*)\s*\(/g)) called.add(m[1])
+  const IGNORE = new Set(['setTimeout', 'setInterval', 'setAttribute', 'setState', 'setImmediate'])
+  const dangling = [...called].filter((x) => !defined.has(x) && !IGNORE.has(x))
+  // useState 之外的普通函数（setWinAt 之类）也认：扫 const 声明
+  for (const d of dangling) {
+    if (!new RegExp(`const\\s+${d}\\s*=`).test(c)) {
+      bad(`client.js 里 ${d}(...) 没有定义 —— 面板点它会 ReferenceError（2026-10-26「点了没反应」的真凶）`)
+    }
+  }
+  if (!dangling.some((d) => !new RegExp(`const\\s+${d}\\s*=`).test(c))) {
+    ok('面板状态 setter 都有定义（没有会崩的悬空引用）')
+  }
+} catch (e) { bad(`检查 client.js 状态引用失败：${e.message}`) }
+
 /* ── 4b. 私信「谁发的」判据不能被退回去 ── */
 console.log('\n4b. 私信发送方判据')
 try {
@@ -763,12 +789,15 @@ try {
   if (/\.lost-/.test(saveCfgBody)) ok('真要丢非空值会先备份成 .lost-<时间戳>')
   else bad('没有备份 —— 丢了只能靠翻日志猜')
   // ④ 面板：disabled 必须解释原因（不许只变灰）
+  //    0.5.9d 起「评论区 @ 提醒」改成「开关永远能点 + 点开即选人」，
+  //    所以这里的判据从旧文案（「点不动 —— 不是坏了」）改成新设计（不许再有变灰的死开关）。
   const cli11 = readIf(join(here, 'client.js'))
-  if (/点不动\*\* —— 不是坏了|不是坏了，是因为还没选/.test(cli11)) {
-    ok('面板在开关变灰时明说"为什么点不了"（不许让主人猜）')
-  } else bad('开关变灰但不说原因 —— 主人会以为软件坏了（这次就是这么被报的）')
-  if (/先在下面「私信发给谁」选一个人/.test(cli11)) ok('变灰时点它也给一句提示（不是毫无反应）')
-  else bad('变灰时点了毫无反应')
+  if (/disabled: !cfg\.autoSend \|\| busy === 'patch'/.test(cli11) && !/disabled: !cfg\.autoSend \|\| !atNick/.test(cli11)) {
+    ok('面板没有「缺前置条件就变灰」的死开关（0.5.9d：@ 开关永远能点，点开即选人）')
+  } else bad('面板又有变灰的死开关 —— 主人点了没反应会以为软件坏了')
+  if (/if \(!atPeers\.length && v && !people\) loadPeople\(\)/.test(cli11)) {
+    ok('@ 开关点开时自动读会话列表并选人（不会点了没反应）')
+  } else bad('@ 开关点开后没有自动读列表/选人 —— 点了像没反应')
 } catch (e) { bad(`4j-11 检查跑不起来：${e.message}`) }
 
 /* ── 4j-7 结束 ── */
@@ -1123,12 +1152,15 @@ try {
   else bad('聊天界面不会自动刷新')
   if (/chat\/read'[\s\S]{0,900}?im-http\.py/.test(idx)) ok('/chat/read 也走 HTTP 快路径（面板刷新不冷启浏览器）')
   else bad('/chat/read 没接快路径 —— 面板每刷一次冷启一次浏览器')
-  // 🔴 盯梢不许**自己发**：循环里出现 im-send / sendDm / --text 直发就报红。
+  // 🔴 盯梢不许**自己发**：循环里出现「带正文发出去」的调用就报红。
   //    2026-10-25 晚口径更新：盯梢「看见」之后允许**转进值班会话**（tryDeliverToSession，
   //    这是传话不是代发），真正的私信发送只许值班会话在常设许可下做。
-  const cwLoop = idx.slice(idx.indexOf('chatWatchTick ='), idx.indexOf('chatWatchTick =') + 4800)
-  if (/im-send|sendDm|runNodeTool/.test(cwLoop)) bad('盯梢循环里出现了直发代码 —— 只许「看见 + 转给值班」，不许自己发')
-  else ok('盯梢循环不直发（看见 → 转给值班会话，发送是值班的事）')
+  //    ⭐ 0.5.9b 补：群里读消息用 im-send --read（**只读**）—— 那是「看」不是「发」，
+  //    所以判据从「出现 im-send 字样」收紧成「出现带 --text/--file 的发信调用」。
+  const cwLoop = idx.slice(idx.indexOf('chatWatchTick ='), idx.indexOf('chatWatchTick =') + 5200)
+  const sendsInLoop = /im-send\.mjs['"],\s*\[[^\]]*(--text|--file)|sendDm\(/.test(cwLoop)
+  if (sendsInLoop) bad('盯梢循环里出现了直发代码 —— 只许「看见 + 转给值班」，不许自己发')
+  else ok('盯梢循环不直发（看见 → 转给值班会话，发送是值班的事；群里 im-send --read 只是读）')
   // ⭐ 2026-10-25 晚：看见必须转进值班会话（之前这里是整个 bug 的后半截——
   //    看见了没人接话，状态屏的"值班会接话"是空头支票）
   if (/tryDeliverToSession\(wakeText\)/.test(idx)) ok('看见新消息会转进值班会话（followup，不碰会话日志）')
@@ -1150,7 +1182,9 @@ try {
   // 🔴 状态屏必须拟人（2026-10-24 使用者要求：「小鱼在干啥」「抱着手机等着你发消息」）
   if (/抱着手机/.test(cl) && /下次去看还有/.test(cl)) ok('状态屏是拟人版（小鱼抱着手机等消息 + 倒计时）')
   else bad('状态屏还是机器腔 —— 使用者点名要「小鱼在干啥」的拟人描述')
-  if (/chatWatchPrimed/.test(idx)) ok('首拍只「对表」不提醒（不会把历史消息重播一遍）')
+  // ⭐ 0.5.9b：首拍对表改成**每人一份**（chatWatchPeers[sec] = {primed, lastSeenAt}）——
+  //    变量名从 chatWatchPrimed 变成 pState.primed，判据跟着改。
+  if (/chatWatchPeers/.test(idx) && /primed/.test(idx)) ok('首拍只「对表」不提醒（不会把历史消息重播一遍；0.5.9b 改成每人一份）')
   else bad('没有首拍对表 —— 一开机可能把旧消息全弹一遍')
   // ⑥ 自动回话已拆（2026-10-24 使用者定稿：「我要的是迁移，不是开发新功能」）：
   //    插件只留「眼睛」（读+通知+状态屏）；「回话」由 AI 值班（常驻会话）做——
@@ -1212,8 +1246,10 @@ try {
   //    快路径碰不到这个文件，所以静默坏了两天没人发现）。
     const imSend = readIf(join(here, 'tools', 'im-send.mjs'))
     if (imSend) {
-      if (/data-e2e="conversation-item"/.test(imSend) && !/主/.test(imSend)) ok('im-send.mjs 选择器引号完好（没被批量替换弄坏）')
-      else bad('im-send.mjs 选择器坏了（引号被换成别的字符）—— 发送会永远报"没登录"')
+      // ⭐ 0.5.9d：判据收紧到**选择器里**的「主」—— 中文文案（"由主人手动发"）不算坏
+      const selBad = /\[(?:data-e2e|contenteditable|class)\*?=[^\]]*主/.test(imSend)
+      if (/data-e2e="conversation-item"/.test(imSend) && !selBad) ok('im-send.mjs 选择器引号完好（没被批量替换弄坏）')
+      else bad('im-send.mjs 选择器坏了（引号被换成「主」字）—— 发送会永远报"没登录"')
     } else bad('tools/im-send.mjs 不见了 —— 发送器没了')
     // ⑥ 值班鱼投递（2026-10-25 深夜两轮探查后的正式实现）：插件自有常驻会话
     if (/chatWatchTarget: z\.string\(\)\.default\('lead'\)/.test(idxM) && /chatWatchTarget: 'lead'/.test(idxM) && /chatWatchTarget: \['lead', 'duty'\]/.test(idxM)) ok('chatWatchTarget 三处齐（zod 默认 + DEFAULTS + ENUMS 钳制）')
@@ -1347,23 +1383,23 @@ try {
     else bad(`卡片顺序不对（开始使用@${iStart} 自动发送@${iAuto}）—— 开始使用应置顶`)
   }
 
-  /* ── ④ 「在评论区 @ 你」（用户 2026-10-22 要求，加在自动发送下面） ── */
-  if (/commentAtMe:\s*z\.boolean\(\)\.default\(false\)/.test(idx)) ok('commentAtMe 配置项在，默认 false')
+  /* ── ④ 「评论区 @ 提醒」（0.5.9：开关=总闸 + atPeers 多选） ── */
+  if (/commentAtMe:\s*z\.boolean\(\)\.default\(false\)/.test(idx)) ok('commentAtMe 配置项在，默认 false（它是总闸）')
   else bad('缺 commentAtMe 配置项')
-  if (/commentSelfName:\s*z\.string\(\)/.test(idx)) ok('commentSelfName 配置项在（想 @ 别的号时用）')
-  else bad('缺 commentSelfName')
-  if (/在评论区 @ 你/.test(cl)) ok('面板有「在评论区 @ 你」开关')
-  else bad('面板没有「在评论区 @ 你」')
+  if (/atPeers:\s*z\.array\(z\.object/.test(idx)) ok('atPeers 配置项在（@ 名单，多选）')
+  else bad('缺 atPeers（@ 名单）')
+  if (/评论区 @ 提醒/.test(cl)) ok('面板有「评论区 @ 提醒」区块')
+  else bad('面板没有「评论区 @ 提醒」')
   // 位置：自动发送之后（2026-10-24 重排后它在开始使用/状态卡之后的自动发送卡里）
   {
     const iSend = cl.indexOf("'自动发送'")
-    const iAtMe = cl.indexOf("'在评论区 @ 你'")
-    if (iSend >= 0 && iAtMe > iSend) ok('「在评论区 @ 你」位置正确（自动发送下面）')
-    else bad(`「在评论区 @ 你」位置不对（自动发送@${iSend} @你@${iAtMe}）`)
+    const iAtMe = cl.indexOf("'评论区 @ 提醒'")
+    if (iSend >= 0 && iAtMe > iSend) ok('「评论区 @ 提醒」位置正确（自动发送下面）')
+    else bad(`「评论区 @ 提醒」位置不对（自动发送@${iSend} @提醒@${iAtMe}）`)
   }
   // 提示词必须真的让模型去做这件事
-  if (/「在评论区 @ 你」开着 —— 这是这一轮的重点任务/.test(idx)) ok('提示词写了「在评论区 @ 你」的具体做法')
-  else bad('提示词没写怎么在评论区 @ 你 —— 开了也不会发')
+  if (/「评论区 @ 提醒」开着 —— 这是这一轮的重点任务/.test(idx)) ok('提示词写了「评论区 @ 提醒」的具体做法')
+  else bad('提示词没写怎么在评论区 @ 提醒 —— 开了也不会发')
   if (/只在\*\*最值得的那一条\*\*发/.test(idx)) ok('限制只发最值得的 1 条（不会刷屏）')
   else bad('没限制条数 —— 可能每条都发')
   if (/只管「插件自己在后台跑的轮次」/.test(cl)) ok('面板说清了适用范围（只管后台轮次，不影响当场对话）')

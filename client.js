@@ -1140,7 +1140,10 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                 on: Boolean(cfg.commentAtMe),
                 disabled: !cfg.autoSend || busy === 'patch',
                 onChange: (v) => {
-                  if (!atPeers.length && v) { if (!people) loadPeople(); setShowAtPicker(true) }
+                  // 🔴 0.5.9d：这里以前调 setShowAtPicker（那版 state 已删）⇒ 运行时
+                  //    ReferenceError ⇒ onChange 整个崩 ⇒ patch 从没执行 ⇒ 主人点开关「没反应」。
+                  //    教训：删 state 时要连引用一起删光；这类崩 node --check 查不出来。
+                  if (!atPeers.length && v && !people) loadPeople()
                   patch({ commentAtMe: v }, v ? '✅ 评论区 @ 提醒：开（选了人就开始 @）' : '已关闭 —— 选了人也不 @')
                 },
               })),
