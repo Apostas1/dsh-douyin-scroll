@@ -7,13 +7,40 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 
-const PROF = process.env.DSH_PROFILE_DIR || 'D:\\DeepSeek\\dsh-data\\profiles\\desktop'
+/**
+ * 🔴 找 DSH 的 profile 目录 —— **不写死任何人的本机路径**（公开仓库里带路径 = 泄露主人机器信息）。
+ * 顺序：环境变量 → DSH_HOME 环境变量 → 按平台猜常见位置 → 找不到就让用户用环境变量指定。
+ */
+function findProfileDir() {
+  const env = process.env.DSH_PROFILE_DIR
+  if (env && existsSync(env)) return env
+  const home = process.env.DSH_HOME
+  if (home) {
+    const p = join(home, 'profiles', 'desktop')
+    if (existsSync(p)) return p
+  }
+  const guesses = [
+    process.platform === 'win32'
+      ? join(process.env.LOCALAPPDATA || '', 'DeepSeek', 'dsh-data', 'profiles', 'desktop')
+      : join(process.env.HOME || '', '.dsh', 'profiles', 'desktop'),
+    join(process.env.HOME || '', '.dsh', 'profiles', 'desktop'),
+  ].filter(Boolean)
+  for (const g of guesses) if (g && existsSync(g)) return g
+  return env || ''
+}
+
+const PROF = findProfileDir()
 const PKG = 'dsh-douyin-scroll'
 
 const ok = (m) => console.log('✅ ' + m)
 const bad = (m, fix) => { console.log('❌ ' + m); if (fix) console.log('     → ' + fix) }
 
 console.log('=== 1. 包能不能被解析 ===')
+if (!PROF) {
+  bad('找不到 DSH 的 profile 目录',
+    '用环境变量指定：set DSH_PROFILE_DIR=<你的 dsh-data\\profiles\\desktop> 然后重跑')
+  process.exit(1)
+}
 let pkgJson = ''
 try {
   const req = createRequire(join(PROF, 'package.json'))
