@@ -55,7 +55,7 @@ try {
     var r=ic.getBoundingClientRect();
     return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});
   })()`))
-  if (!pos.x) { out({ ok: false, error: '找不到分享图标（视频页没加载好）' }); process.exit(1) }
+  if (!pos.x) { out({ ok: false, error: '找不到分享图标（视频页没加载好）' }); await _c?.close(); process.exit(1) }
 
   // 真实轨迹 hover（必须；el.click() 打不开）
   await mv(20, 20); await sleep(250)
@@ -70,7 +70,7 @@ try {
     var sc=document.querySelector('[data-e2e="video-share-container"]');
     return sc ? (sc.innerText||'').replace(/\\s+/g,' ').slice(0,400) : '';
   })()`)
-  if (!panel) { out({ ok: false, error: '分享面板没展开' }); process.exit(1) }
+  if (!panel) { out({ ok: false, error: '分享面板没展开' }); await _c?.close(); process.exit(1) }
 
   // --peek：把面板里每一行连同它 fiber 里的 id 都打出来（排查重名用）
   if (PEEK) {
@@ -104,7 +104,7 @@ try {
       return JSON.stringify(u.slice(0,12));
     })()`)
     out({ ok: true, peek: true, panel, rows: JSON.parse(rows || '[]') })
-    _c.close(); process.exit(0)
+    await _c.close(); process.exit(0)
   }
 
   // 找「WHO」那一行：同时拿到 昵称 + **sec_uid** + 「分享」按钮坐标 —— 昵称会重名，sec_uid 不会
@@ -154,12 +154,12 @@ try {
 
   let f = {}
   try { f = JSON.parse(found) } catch { f = { err: 'bad-json' } }
-  if (f.err) { out({ ok: false, error: '找不到该好友那一行', detail: f, panel }); process.exit(1) }
+  if (f.err) { out({ ok: false, error: '找不到该好友那一行', detail: f, panel }); await _c?.close(); process.exit(1) }
 
   let cands = f.candidates || []
   if (TOID) {
     cands = cands.filter((c) => c.sec_uid === TOID)
-    if (!cands.length) { out({ ok: false, error: `分享面板里没有 sec_uid=${TOID} 这个人（面板只列最近分享过的人）`, panel }); process.exit(1) }
+    if (!cands.length) { out({ ok: false, error: `分享面板里没有 sec_uid=${TOID} 这个人（面板只列最近分享过的人）`, panel }); await _c?.close(); process.exit(1) }
   }
   if (cands.length > 1) {
     out({
@@ -169,11 +169,11 @@ try {
       candidates: cands.map((c) => ({ sec_uid: c.sec_uid })),
       hint: '请改用 --to-id <sec_uid> 指定',
     })
-    process.exit(1)
+    await _c?.close(); process.exit(1)
   }
   const b = cands[0].btn
   const target = { nick: WHO, sec_uid: cands[0].sec_uid || TOID || '' }
-  if (DRY) { out({ ok: true, dry: true, panel, btn: b, target, chrome: chromed, matched_by: TOID ? 'sec_uid' : 'nickname(唯一)' }); _c.close(); process.exit(0) }
+  if (DRY) { out({ ok: true, dry: true, panel, btn: b, target, chrome: chromed, matched_by: TOID ? 'sec_uid' : 'nickname(唯一)' }); await _c.close(); process.exit(0) }
 
   await click(b.x, b.y)
   await sleep(2500)
@@ -193,6 +193,6 @@ try {
 } catch (e) {
   out({ ok: false, error: String(e?.message ?? e) })
 } finally {
-  _c.close()
+  await _c.close()
 }
 process.exit(process.exitCode || 0)

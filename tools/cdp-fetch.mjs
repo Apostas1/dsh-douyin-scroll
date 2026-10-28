@@ -10,8 +10,8 @@
  *   ③ 要用 **XHR**，不能用 fetch（bdms 只挂钩 XHR）。
  *
  * 所以本脚本：
- *   A. ensureChrome 拿端口 → 找视频页 tab
- *   B. 没有就把现有 tab 导航过去（SPA 路由；期间连接会断，分两段连）
+ *   A. openPage 在已验证的浏览器中创建本次专用视频页
+ *   B. 不导航任何已有页面；结束时只关闭本次页面
  *   C. 轮询等「XHR 已被接管」（openIsPatched，~20s）
  *   D. 页面上下文 XHR → stdout 只吐响应体（日志走 stderr）
  *
@@ -20,7 +20,7 @@
  *   node tools/cdp-fetch.mjs --url  "https://www.douyin.com/aweme/v1/web/…"
  * ============================================================================
  */
-import { ensureChrome } from '../lib/chrome.mjs'
+import { openPage, waitForPageSigner } from '../lib/chrome.mjs'
 
 const argv = process.argv.slice(2)
 const argOf = (k) => {
@@ -38,46 +38,6 @@ const abs = pathOrUrl.startsWith('http')
   : 'https://www.douyin.com' + (pathOrUrl.startsWith('/') ? pathOrUrl : '/' + pathOrUrl)
 
 const log = (s) => console.error('[cdp-fetch] ' + s)
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-/** 连一个 tab 的 CDP，返回 { send, ev, close } */
-async function connect(target) {
-  const ws = new WebSocket(target.webSocketDebuggerUrl)
-  let id = 0
-  const pend = new Map()
-  await new Promise((res, rej) => {
-    ws.addEventListener('open', res, { once: true })
-    ws.addEventListener('error', () => rej(new Error('连不上 CDP WebSocket')), { once: true })
-  })
-  ws.addEventListener('message', (e) => {
-    let m; try { m = JSON.parse(e.data) } catch { return }
-    if (m.id && pend.has(m.id)) {
-      const { res, rej } = pend.get(m.id); pend.delete(m.id)
-      m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result)
-    }
-  })
-  const send = (method, params = {}) => new Promise((res, rej) => {
-    const mid = ++id; pend.set(mid, { res, rej })
-    ws.send(JSON.stringify({ id: mid, method, params }))
-  })
-  const ev = async (expr) => {
-    const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true, userGesture: true })
-    if (r.exceptionDetails) throw new Error('页面里抛错: ' + JSON.stringify(r.exceptionDetails).slice(0, 240))
-    return r.result?.value
-  }
-  return { send, ev, close: () => { try { ws.close() } catch { /* 已关 */ } } }
-}
-
-const listTargets = async (port) => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json())
-  .filter((t) => t.type === 'page')
-
-/** 页面 SDK 是否已接管 XHR（app 起来的标志） */
-const appReadyExpr = `(() => {
-  try {
-    const s = XMLHttpRequest.prototype.open.toString()
-    return !s.includes('[native code]') && typeof window.bdms === 'object'
-  } catch (e) { return false }
-})()`
 
 /** 页面上下文 XHR（bdms 会自动补 a_bogus） */
 const xhrExpr = (url) => `(async () => {
@@ -96,51 +56,27 @@ const xhrExpr = (url) => `(async () => {
   })
 })()`
 
+let page
 try {
-  const { port } = await ensureChrome()
-  const mId = /aweme_id=(\d+)/.exec(abs)?.[1] || ''
-  const videoUrl = mId ? `https://www.douyin.com/video/${mId}` : 'https://www.douyin.com/'
-
-  // A. 找视频页 tab（SPA 路由页也算：/video/ /note/ /search/ 都带 SDK）
-  let targets = await listTargets(port)
-  let video = targets.find((t) => /\/(video|note|search)\//.test(t.url || ''))
-
-  // B. 没有 → 拿任意 douyin tab 导航过去（期间 WS 会断，先发导航再重连）
-  if (!video) {
-    const anyTab = targets.find((t) => String(t.url).includes('douyin')) || targets[0]
-    if (!anyTab) { log('Chrome 里一个 page tab 都没有'); process.exit(1) }
-    log(`没有视频页 tab，把 ${String(anyTab.url).slice(0, 60)} 导航到视频页…`)
-    let c = await connect(anyTab)
-    await c.ev(`location.href = ${JSON.stringify(videoUrl)}`).catch(() => { /* 导航中断连接属正常 */ })
-    c.close()
+  const requestUrl = new URL(abs)
+  if (requestUrl.origin !== 'https://www.douyin.com' || requestUrl.username || requestUrl.password
+    || !['/aweme/v1/web/comment/list/', '/aweme/v1/web/comment/list/reply/'].includes(requestUrl.pathname)) {
+    throw new Error('CDP 兜底只允许抖音评论列表只读接口')
   }
-
-  // C. 轮询：等视频页 tab 出现 + XHR 被接管
-  let page = null
-  for (let i = 0; i < 40; i++) {
-    await sleep(1000)
-    try {
-      targets = await listTargets(port)
-      video = targets.find((t) => /\/(video|note|search)\//.test(t.url || ''))
-      if (!video) continue
-      const c = await connect(video)
-      const ok = await c.ev(appReadyExpr).catch(() => false)
-      if (ok) { page = { tab: video, c }; break }
-      c.close()
-    } catch { /* 导航中，接着等 */ }
-  }
-  if (!page) { log('等了 40s，页面签名 SDK 还是没就绪（XHR 未被接管）'); process.exit(1) }
-  log(`页面就绪：${String(page.tab.url).slice(0, 70)}`)
-
-  // D. XHR 拉数据
+  const videoId = requestUrl.searchParams.get('aweme_id') || ''
+  if (!/^\d+$/.test(videoId)) throw new Error('缺少有效 aweme_id，无法初始化视频页签名 SDK')
+  page = await openPage({ url: `https://www.douyin.com/video/${videoId}` })
+  await waitForPageSigner(page)
+  log('独立视频页签名 SDK 就绪')
   const t0 = Date.now()
-  const r = await page.c.ev(xhrExpr(abs))
-  page.c.close()
-  if (!r || !r.body) { log(`HTTP ${r?.status ?? '?'} 空 body（风控软拒或页面态丢了）`); process.exit(1) }
+  const r = await page.ev(xhrExpr(abs))
+  if (!r || !r.body) throw new Error(`HTTP ${r?.status ?? '?'} 空 body（风控软拒或页面态丢了）`)
   log(`HTTP ${r.status}，${r.body.length} 字节，${Date.now() - t0}ms`)
   process.stdout.write(r.body)
-  process.exit(r.status === 200 ? 0 : 1)
+  process.exitCode = r.status === 200 ? 0 : 1
 } catch (e) {
   log('失败：' + String(e?.message ?? e).slice(0, 300))
-  process.exit(1)
+  process.exitCode = 1
+} finally {
+  await page?.close()
 }

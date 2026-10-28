@@ -32,7 +32,7 @@
  * 输出一行 JSON：{ ok, http, cid, reply_to, root, text, raw?, error? }
  */
 import { readFileSync } from 'node:fs'
-import { openPage, sleep } from '../lib/chrome.mjs'
+import { openPage, sleep, waitForPageSigner } from '../lib/chrome.mjs'
 
 const argv = process.argv.slice(2)
 const argOf = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? (argv[i + 1] ?? d) : d }
@@ -75,16 +75,13 @@ if (wantsMention) {
   process.exit(1)
 }
 
+let c
 try {
-  const c = await openPage()
+  c = await openPage({ url: `https://www.douyin.com/video/${encodeURIComponent(AWEME)}` })
   const chromed = c.status
 
-  // 必须站在 douyin.com 上，相对路径 fetch 才带得上 cookie / 页面签名器
-  const cur = String(await c.ev('location.href'))
-  if (!cur.includes('douyin.com')) {
-    await c.send('Page.navigate', { url: 'https://www.douyin.com/' })
-    await sleep(6000)
-  }
+  // 每次都是新视频页，先等签名器加载再请求。
+  await waitForPageSigner(c)
 
   /**
    * ⭐ 解析「楼根」和「具体回哪条」。
@@ -165,7 +162,7 @@ try {
   try { plan = JSON.parse(await c.ev(resolveJs)) } catch { plan = { ok: false, hint: '楼根解析没返回可解析结果' } }
 
   if (!plan.ok) {
-    c.close()
+    await c.close()
     await sleep(200)
     out({
       ok: false,
@@ -179,7 +176,7 @@ try {
   }
 
   if (DRY) {
-    c.close()
+    await c.close()
     await sleep(200)
     out({
       ok: true, dry: true, aweme_id: AWEME,
@@ -286,11 +283,11 @@ try {
   })()`
 
   const raw = await c.ev(js)
-  c.close()
+  await c.close()
   await sleep(200)   // 等 WebSocket 真正关掉再退出，否则 libuv 会断言
 
   let res
-  try { res = JSON.parse(raw) } catch { out({ ok: false, error: '页面没返回可解析结果', raw: String(raw).slice(0, 400), chrome: chromed }); process.exit(1) }
+  try { res = JSON.parse(raw) } catch { out({ ok: false, error: '页面没返回可解析结果', raw: String(raw).slice(0, 400), chrome: chromed }); await c?.close(); process.exit(1) }
 
   const cid = String(res.cid || '')
   const ok = res.http === 200 && !!cid
@@ -350,4 +347,6 @@ try {
   })
 } catch (e) {
   out({ ok: false, error: String(e?.message ?? e) })
+} finally {
+  await c?.close().catch(() => {})
 }

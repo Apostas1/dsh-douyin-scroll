@@ -12,23 +12,28 @@
  *   node tools/im-send.mjs --to "示例好友" --read               # 只读：把会话读出来（带「谁发的」）
  *
  * 输出：一行 JSON
- *   发送：{ok, sent, to, len, readback, my_msg_before, my_msg_after, newest_from, msgs_sample, …}
+ *   发送：{ok, sent, to, len, readback, my_msg_before, my_msg_after, submitted, pending, retry_safe, stage, …}
  *   只读：{ok, mode:'read', count, mine, them, unknown, messages:[{from,text,…}]}（messages 旧的在前）
  *
  * ⚠️ 「谁发的」判据是**头像落在列表左半边还是右半边**，不是 `isMyMessage`
  *    （`isMyMessage` 恒为 true，连对方发的也是 true —— 实测过，别再用）。
  * ============================================================================
  */
-import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { readFileSync, appendFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { homeDir } from '../lib/paths.mjs'
 
 import { openPage, sleep } from '../lib/chrome.mjs'
+import { deliverIm, deliveryDiagnostic } from '../lib/im-delivery.mjs'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
-
-const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode = o.ok ? 0 : 1 }
+const out = (o) => {
+  if (!READ && !LIST && !DRY) {
+    const diagnostic = deliveryDiagnostic({ submitted: false, pending: false, stage: 'prepare', ...o })
+    try { appendFileSync(join(homeDir(), 'im-delivery.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...diagnostic }) + '\n', { mode: 0o600 }) }
+    catch { console.error('[im-send] 无法写入投递诊断日志') }
+  }
+  console.log(JSON.stringify(o, null, 1)); process.exitCode = o.ok ? 0 : 1
+}
 
 const argv = process.argv.slice(2)
 const argOf = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? (argv[i + 1] ?? '') : d }
@@ -41,7 +46,6 @@ const READ = argv.includes('--read')
 /** ⭐ --list：只列出会话里的人（昵称 + sec_uid），不发东西 */
 const LIST = argv.includes('--list')
 
-const bodyText = async (ev) => (await ev(`(document.body?document.body.innerText:'')||''`)) || ''
 
 /**
  * ⭐ 回读消息列表 + 判定「这条到底是谁发的」。
@@ -585,7 +589,7 @@ async function main() {
             : '这些都是你最近聊过的人，直接选一个就行')
           : '会话列表是空的 —— 先在抖音里跟要发的人聊一句，再回来这里选',
       })
-    } finally { c.close() }
+    } finally { await c.close() }
   }
 
   const text = FILE ? readFileSync(FILE, 'utf8').trim() : String(TEXT || '').trim()
@@ -657,76 +661,20 @@ async function main() {
       })
     }
 
-    const before = (await bodyText(c.ev)).length
     const beforeMsgs = await readMessages(c.ev)
     if (DRY) return out({ ok: true, sent: false, dry: true, to: target.nick, to_sec_uid: target.sec_uid || undefined, len: text.length, matched_by: matchedBy, msgs_in_view: beforeMsgs.length, chrome: chromed })
 
-    /**
-     * 🔴 打字前的最后一道身份核对（2026-10-23 加）。
-     *    前面 openConversation 已经核过一次，但"点输入框"这一步本身也可能
-     *    因为页面重渲染而落到别的会话上。**真发之前再确认右栏是不是他** ——
-     *    这一步很便宜（一次 evaluate），但它是"发错人"的最后一道闸。
-     */
-    const gateNick = String(await c.ev(`(function(){
-      var r = document.querySelector('[class*="componentsRightPanel"]');
-      if (!r) return '';
-      var lines = (r.innerText || '').split('\\n').map(function(s){return s.trim()}).filter(Boolean);
-      return lines.length ? lines[0] : '';
-    })()`) || '').trim()
-    if (gateNick && target.nick && baseNick(gateNick) !== baseNick(target.nick)) {
-      return out({
-        ok: false, sent: false, error: '发送前核对失败：右栏是「' + gateNick + '」，不是「' + target.nick + '」，已中止（没发出去）',
-        want: target.nick, got: gateNick, chrome: chromed,
-      })
+    // 发送前核对失败必须中止；输入之后、回读之前也核对，不能只检查昵称一次。
+    const verifyTarget = async () => {
+      const gateNick = String(await c.ev(`(() => {
+        const panel = document.querySelector('[class*="componentsRightPanel"]');
+        return panel ? (panel.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean)[0] || '' : '';
+      })()`) || '').trim()
+      if (!gateNick || !target.nick || baseNick(gateNick) !== baseNick(target.nick)) return false
+      return !target.sec_uid || String(await currentConvId(c.ev) || '') === String(target.sec_uid)
     }
-
-    // 点输入框
-    const pos = JSON.parse(await c.ev(`(function(){
-      var eds=Array.prototype.slice.call(document.querySelectorAll('[contenteditable="true"], textarea'));
-      for (var i=0;i<eds.length;i++){var e=eds[i];var r=e.getBoundingClientRect();if(r.width>80&&r.height>10)return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});}
-      return '{}';
-    })()`))
-    await c.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pos.x, y: pos.y, button: 'left', clickCount: 1 })
-    await c.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pos.x, y: pos.y, button: 'left', clickCount: 1 })
-    await sleep(400)
-    await c.send('Input.insertText', { text })
-    await sleep(800)
-
-    const typed = await c.ev(`(function(){
-      var e=document.querySelector('[contenteditable="true"], textarea');
-      return e ? String(e.innerText||e.value||'').replace(/[\\u200b\\r]/g,'') : '';
-    })()`)
-    if (!String(typed).trim()) return out({ ok: false, error: '正文没进输入框（可能被风控拦截）', chrome: chromed })
-
-    await c.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 })
-    await c.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 })
-    await sleep(2600)
-
-    const bodyNow = await bodyText(c.ev)
-    const leftInBox = await c.ev(`(function(){
-      var e=document.querySelector('[contenteditable="true"], textarea');
-      return (e?String(e.innerText||e.value||''):'').replace(/[\\u200b\\s]/g,'').length;
-    })()`)
-    // ⭐ 第 ③ 步：**回读消息列表**，而且只数 `from === 'me'` 的
-    //
-    // 2026-10-21 上半场还以为"读不出谁发的"，当时是错用了 `isMyMessage`（恒 true）。
-    // 后来挖到头像左右这个判据，回读才算真的完整：
-    //   「这段正文在**我发的**消息里从 N 条变成 N+1 条」—— 这才叫发成功了。
-    // 如果光数总数，别人刚好发了同样的话就会假阳性。
-    const afterMsgs = await readMessages(c.ev)
-    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim()
-    const sentText = norm(text)
-    const head = sentText.slice(0, 20)
-    const isMine = (m) => m.from === 'me' && m.text
-      && (norm(m.text) === sentText || norm(m.text).startsWith(head))
-    const beforeCnt = beforeMsgs.filter(isMine).length
-    const afterCnt = afterMsgs.filter(isMine).length
-    const readback = afterCnt > beforeCnt
-    // 列表里最新那条是谁发的（我发完，这里应该翻成 'me'）
-    const newest = afterMsgs[0] || null
-    // 页面上出现过（弱证据，留作参考）
-    const appeared = String(bodyNow).replace(/\s+/g, ' ').includes(text.replace(/\s+/g, ' ').slice(0, 24))
-    const ok = Number(leftInBox) === 0 && readback
+    const receipt = await deliverIm({ page: c, text, beforeMessages: beforeMsgs,
+      readMessages: () => readMessages(c.ev), verifyTarget })
     /**
      * ⭐ 0.5.6 实测**渠道限制**（2026-10-26，主人+作者双方确认）：
      *    **网页端发群，服务端收下但没分发**（回执 im_callback_status_code=7523）——
@@ -737,19 +685,9 @@ async function main() {
      */
     const isGroupSend = !target.sec_uid
     return out({
-      ok, sent: ok, to: target.nick, to_sec_uid: target.sec_uid || undefined, len: text.length,
-      matched_by: TOID ? 'sec_uid' : 'nickname(唯一)',
-      from: before, to_len: String(bodyNow).length, clicked: opened.status, chrome: chromed,
-      // ⭐ 回读证据（只数我发的）
-      readback,
-      my_msg_before: beforeCnt, my_msg_after: afterCnt,
+      ...receipt, to: target.nick, to_sec_uid: target.sec_uid || undefined, len: text.length,
+      matched_by: matchedBy, clicked: opened.status, chrome: chromed, page_fresh: c.fresh === true,
       sender_attribution: 'avatar-side（36px 头像落在列表左/右半边）',
-      newest_from: newest ? newest.from : undefined,
-      newest_text: newest ? String(newest.text || '').slice(0, 40) : undefined,
-      msgs_in_view_before: beforeMsgs.length, msgs_in_view_after: afterMsgs.length,
-      // DOM 顺序是「新的在上」，所以前 3 条就是最新的 3 条
-      msgs_sample: afterMsgs.slice(0, 3).map((m) => `${m.from}: ${String(m.text || '').slice(0, 36)}`),
-      appeared, box_left: Number(leftInBox),
       // 🔴 渠道限制：网页端发群可能不分发（7523）—— 发群时必带，别当真发了
       ...(isGroupSend ? {
         account_limit: 'web_group_no_fanout',
@@ -757,10 +695,8 @@ async function main() {
           + '要在群里说话建议用手机端。',
         delivered_to_others: false,
       } : {}),
-      error: ok ? undefined
-        : (!readback ? '回读没在「我发的」消息里找到这条（可能没发出去）' : '输入框没清空'),
     })
-  } finally { c.close() }
+  } finally { await c.close() }
 }
 
 main().catch((e) => out({ ok: false, error: String(e?.message ?? e) }))
