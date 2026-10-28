@@ -17,7 +17,9 @@
     "mcp": "node tools/mcp-server.mjs",
     "mcp:test": "node tools/mcp-server.mjs --selftest",
     "panel": "node tools/panel-render-check.mjs",
-    "smoke": "python tools/smoke.py"
+    "smoke": "python tools/smoke.py",
+    "test": "node --test tests/safety.test.mjs",
+    "test:python": "python3 -m unittest discover -s tests -p \"test_*.py\""
   },
   "license": "MIT",
   "type": "module",
@@ -46,7 +48,10 @@
     "PUBLISH.md",
     "selfcheck.mjs",
     "check-client.mjs",
-    "LICENSE"
+    "LICENSE",
+    "ISSUE-TRIAGE.md",
+    "tests/safety.test.mjs",
+    "tests/test_portability.py"
   ],
   "engines": {
     "dsh": ">=0.1.7-rc.1",

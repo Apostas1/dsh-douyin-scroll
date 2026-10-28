@@ -11,16 +11,17 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _home import home_str  # noqa: E402
+from _home import home_str, node_bin  # noqa: E402
 import urllib.parse
 
 import httpx
 
 HOME = home_str()
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NODE = r"C:\Program Files\nodejs\node.exe"
+NODE = node_bin()
 SIGNER = os.path.join(PLUGIN, "tools", "dy-signer.mjs")
-COOKIE = open(os.path.join(HOME, "douyin_cookie.txt"), encoding="utf-8").read().strip()
+with open(os.path.join(HOME, "douyin_cookie.txt"), encoding="utf-8") as cookie_file:
+    COOKIE = cookie_file.read().strip()
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 JAR = {}
@@ -43,12 +44,21 @@ qs = lambda d: "&".join("%s=%s" % (urllib.parse.quote(str(k)), urllib.parse.quot
 
 def sign(rel):
     env = dict(os.environ, DY_COOKIES=json.dumps(JAR, ensure_ascii=False), DOUYIN_HOME=HOME)
-    p = subprocess.run([NODE, SIGNER, rel], capture_output=True, cwd=PLUGIN, env=env, timeout=240)
+    try:
+        p = subprocess.run([NODE, SIGNER, rel], capture_output=True, cwd=PLUGIN, env=env, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"err": "签名进程不可用: %s" % e}
     out = p.stdout.decode("utf-8", "replace")
     i = out.find("{")
     if i < 0:
-        return {"err": out[-300:]}
-    return json.loads(out[i:out.rfind("}") + 1])
+        return {"err": (out + p.stderr.decode("utf-8", "replace"))[-300:] or "签名器没有输出"}
+    try:
+        data = json.loads(out[i:out.rfind("}") + 1])
+        if p.returncode != 0 or not isinstance(data, dict):
+            return {"err": "签名器执行失败"}
+        return data
+    except (ValueError, TypeError):
+        return {"err": "签名器返回了无效 JSON"}
 
 
 CDP_FETCH = os.path.join(PLUGIN, "tools", "cdp-fetch.mjs")
@@ -60,20 +70,36 @@ def page_fetch(rel):
     s = sign(rel)
     # 兼容「node 没输出任何 JSON」的情况：err 可能是空串，得连 signedUrl 一起判（Issue #2）
     if not s.get("err") and s.get("signedUrl"):
-        u = s["signedUrl"]
-        if not u.startswith("http"):
-            u = "https://www.douyin.com" + u
-        h = {"User-Agent": UA, "Accept": "application/json, text/plain, */*", "Referer": "https://www.douyin.com/",
-             "Origin": "https://www.douyin.com", "Cookie": COOKIE, **(s.get("headers") or {})}
-        r = httpx.get(u, headers=h, timeout=30, follow_redirects=True)
-        return r.json(), "signed"
+        try:
+            u = s["signedUrl"]
+            if not u.startswith("http"):
+                u = "https://www.douyin.com" + u
+            parsed = urllib.parse.urlparse(u)
+            if parsed.scheme != "https" or parsed.hostname != "www.douyin.com" or parsed.username or parsed.port not in (None, 443):
+                raise ValueError("签名 URL 的域名不正确")
+            h = {"User-Agent": UA, "Accept": "application/json, text/plain, */*", "Referer": "https://www.douyin.com/",
+                 "Origin": "https://www.douyin.com", "Cookie": COOKIE, **(s.get("headers") or {})}
+            r = httpx.get(u, headers=h, timeout=30, follow_redirects=False)
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, dict) or data.get("status_code") != 0:
+                raise ValueError("评论接口未接受签名")
+            return data, "signed"
+        except (httpx.HTTPError, ValueError) as e:
+            s = {"err": "签名请求失败: %s" % type(e).__name__}
     # 兜底：页面上下文里 fetch（页面自己的签名 SDK 是活的，不用 a_bogus）
     sys.stderr.write("[api-comments] 签名不可用（%s）→ 走无头浏览器兜底\n" % (s.get("err") or "无输出"))
-    p = subprocess.run([NODE, CDP_FETCH, "--path", rel], capture_output=True, cwd=PLUGIN,
-                       timeout=180, env=dict(os.environ, DOUYIN_HOME=HOME))
+    try:
+        p = subprocess.run([NODE, CDP_FETCH, "--path", rel], capture_output=True, cwd=PLUGIN,
+                           timeout=180, env=dict(os.environ, DOUYIN_HOME=HOME))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError("浏览器兜底进程不可用，请检查 DOUYIN_NODE / Node ≥22: %s" % type(e).__name__) from None
     body = p.stdout.decode("utf-8", "replace")
     try:
-        return json.loads(body), "cdp"
+        data = json.loads(body)
+        if p.returncode != 0 or not isinstance(data, dict) or data.get("status_code") != 0:
+            raise ValueError("浏览器接口未返回成功结果")
+        return data, "cdp"
     except Exception:
         tail = (body or p.stderr.decode("utf-8", "replace"))[:150].replace("\n", " ")
         raise RuntimeError("签名和兜底都不通：" + (tail or "无输出"))
@@ -107,4 +133,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(2)

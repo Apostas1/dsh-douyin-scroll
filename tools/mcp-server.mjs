@@ -28,11 +28,14 @@
  * ============================================================================
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { createInterface } from 'node:readline'
+import { resolveRecipient } from '../lib/recipients.mjs'
+import { scriptResult, lastJsonObject, redactDiagnostic } from '../lib/process-result.mjs'
+import { mergeDmMemory, dmContext, noteSent, addFacts, loadCommentMemory, noteMyComment, markSeen } from '../lib/memory.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
@@ -56,6 +59,7 @@ const pyEnv = (extra = {}) => ({
   PYTHONUTF8: '1',
   PYTHONIOENCODING: 'utf-8',
   DOUYIN_HOME: HOME,
+  DOUYIN_NODE: process.execPath,
   ...extra,
 })
 
@@ -68,6 +72,7 @@ const hasVenv = () => existsSync(venvPython())
 const PY = () => (hasVenv() ? venvPython() : (process.platform === 'win32' ? 'python' : 'python3'))
 
 const run = (cmd, args, timeout = 240_000) => {
+  mkdirSync(HOME, { recursive: true })
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     timeout,
@@ -82,20 +87,17 @@ const run = (cmd, args, timeout = 240_000) => {
   }
 }
 
-const runNode = (script, args = [], timeout = 240_000) => run(process.execPath, [join(ROOT, 'tools', script), ...args], timeout)
+const runNode = (script, args = [], timeout = 240_000) => {
+  const result = run(process.execPath, [join(ROOT, 'tools', script), ...args], timeout)
+  return { ...result, stdout: JSON.stringify(scriptResult(result, `${script} 执行失败或没有返回结果`)) }
+}
 const runPy = (script, args = [], timeout = 240_000) => run(PY(), [join(ROOT, 'tools', script), ...args], timeout)
 
 const readJson = (file, fallback = null) => {
-  try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return fallback }
+  try { return JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) } catch { return fallback }
 }
 
-const pickJson = (s) => {
-  const t = String(s || '')
-  const i = t.indexOf('{')
-  const j = t.lastIndexOf('}')
-  if (i < 0 || j <= i) return null
-  try { return JSON.parse(t.slice(i, j + 1)) } catch { return null }
-}
+const pickJson = lastJsonObject
 
 /** 等一会儿（异步，不占 CPU —— 别用 busy-wait，那会把宿主烤热） */
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)))
@@ -168,7 +170,7 @@ const TOOLS = [
       const r = runNode('doctor.mjs', ['--json'], 90_000)
       const j = pickJson(r.stdout)
       if (!j) return { ok: false, error: '体检脚本没返回可解析结果', stderr: String(r.stderr || '').slice(0, 300) }
-      return { ...j, hint: (j.must_fix || []).length ? '先把 must_fix 里的修掉' : '没有硬伤' }
+      return { ...j, hint: j.hint || ((j.must_fix || []).length ? '先把 must_fix 里的修掉' : '没有硬伤') }
     },
   },
   {
@@ -270,7 +272,8 @@ const TOOLS = [
       if (args?.raw) argv.push('--raw')
       const r = run(venvPython(), argv, 150_000)
       const j = pickJson(r.stdout)
-      if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
+      if (!j || r.status !== 0) return scriptResult(r, '没读到通知')
+      if (j.ok === false) return j
       return j
     },
   },
@@ -298,9 +301,10 @@ const TOOLS = [
       const bad = needLogin() || needSetup()
       if (bad) return bad
       const cfg = config()
-      const to = String(args?.to || cfg.dmTo || '').trim()
-      const toId = String(args?.to_id || cfg.dmToId || '').trim()
+      const { to, toId } = resolveRecipient(args, cfg)
       if (!to && !toId) return { ok: false, error: '不知道发给谁', hint: '传 to / to_id，或让使用者在设置里填「私信发给谁」+「稳定 ID」' }
+      if (!to) return { ok: false, error: '分享卡片需要收件人昵称和稳定 ID；请从会话列表选择联系人' }
+      if (toId && /^\d+$/.test(toId)) return { ok: false, error: '分享卡片的 to_id 必须是 sec_uid，不能填写数字 uid' }
       let ids = []
       if (args?.aweme_id) ids = [String(args.aweme_id).trim()]
       else {
@@ -327,10 +331,11 @@ const TOOLS = [
         const r = runNode('card-share.mjs', argv, 200_000)
         const j = pickJson(r.stdout) || { ok: false, aweme_id: ids[i], stderr: String(r.stderr || '').slice(0, 200) }
         sent.push(j)
-        if (!(j && j.ok)) break
+        if (j?.ok && j?.sent && (j.to_sec_uid || toId)) noteSent(HOME, j.to_sec_uid || toId, to, `[分享视频] ${ids[i]}`, 'card')
+        if (!(j && j.ok && j.sent)) break
         if (i < ids.length - 1) await sleep(2200)
       }
-      const okN = sent.filter((x) => x && x.sent).length
+      const okN = sent.filter((x) => x && x.ok && x.sent).length
       const reasonText = String(args?.reason || '').trim()
       let reason = null
       if (okN && reasonText) {
@@ -342,11 +347,12 @@ const TOOLS = [
         rArgs.push('--text', reasonText)
         const r3 = runNode('im-send.mjs', rArgs, 240_000)
         reason = pickJson(r3.stdout) || { ok: false, error: '理由那一条没返回可解析结果' }
+        if (reason?.sent && (reason.to_sec_uid || toId)) noteSent(HOME, reason.to_sec_uid || toId, to, reasonText)
       }
       return {
         ok: okN === ids.length && (!reason || reason.ok),
         sent: okN, total: ids.length, to,
-        results: sent.map((x) => ({ aweme_id: x.aweme_id, ok: !!x.ok, sent: !!x.sent, error: x.error })),
+        results: sent.map((x) => ({ aweme_id: x.aweme_id, ok: !!x.ok, sent: !!x.sent, error: x.error, hint: x.hint, detail: x.detail, exit_code: x.exit_code, stderr_tail: x.stderr_tail })),
         reason: reason || undefined,
         note: '卡片是否真的落地，请让使用者自己在抖音里看一眼（这个 MCP 版没做回读）',
       }
@@ -372,8 +378,7 @@ const TOOLS = [
       const bad = needLogin() || needSetup()
       if (bad) return bad
       const cfg = config()
-      const to = String(args?.to || cfg.dmTo || '').trim()
-      const toId = String(args?.to_id || cfg.dmToId || '').trim()
+      const { to, toId } = resolveRecipient(args, cfg)
       if (!to && !toId) return { ok: false, error: '不知道发给谁', hint: '传 to / to_id，或让使用者在设置里填私信对象' }
       const text = String(args?.text || '').trim()
       if (!text) return { ok: false, error: '正文为空' }
@@ -386,7 +391,9 @@ const TOOLS = [
       argv.push('--text', text)
       if (args?.dry) argv.push('--dry')
       const r = runNode('im-send.mjs', argv, 240_000)
-      return pickJson(r.stdout) || { ok: false, error: '发送器没返回可解析结果', stderr: String(r.stderr || '').slice(0, 300) }
+      const result = pickJson(r.stdout)
+      if (result?.sent && (result.to_sec_uid || toId)) noteSent(HOME, result.to_sec_uid || toId, result.to || to, text)
+      return result
     },
   },
   {
@@ -421,6 +428,7 @@ const TOOLS = [
       const text = String(args?.text || '').trim()
       const replyTo = String(args?.comment_id || '').trim()
       const rootCid = String(args?.root_comment_id || '').trim()
+      if (args?.mode !== undefined || args?.mention_name !== undefined) return { ok: false, error: 'MCP 普通回复不接受 mode / mention_name；真 @ 请用 douyin_comment_mention 的 name 参数' }
       if (!aweme) return { ok: false, error: '缺 aweme_id' }
       if (!text) return { ok: false, error: '正文是空的' }
       if (text.length > 500) return { ok: false, error: `正文太长（${text.length} 字）` }
@@ -450,6 +458,10 @@ const TOOLS = [
             + '先 douyin_notices / douyin_at_me 读一次拿 root_comment_id，再传进来。',
         }
       }
+      if (j.ok && j.cid) {
+        noteMyComment(HOME, aweme, { cid: j.cid, text })
+        if (replyTo) markSeen(HOME, aweme, [replyTo])
+      }
       // 核实"真的进了楼没有"（脚本发完会重读那一楼）
       if (j.ok && j.placement && j.placement.ok === false) {
         j.warning = j.placement.warn
@@ -477,8 +489,7 @@ const TOOLS = [
       const bad = needLogin() || needSetup()
       if (bad) return bad
       const cfg = config()
-      const to = String(args?.to || cfg.dmTo || '').trim()
-      const toId = String(args?.to_id || cfg.dmToId || '').trim()
+      const { to, toId } = resolveRecipient(args, cfg)
       if (!to && !toId) return { ok: false, error: '不知道读谁的会话' }
       const argv = ['--read']
       if (to) argv.push('--to', to)
@@ -488,11 +499,14 @@ const TOOLS = [
       if (!j) return { ok: false, error: '读不到会话', stderr: String(r.stderr || '').slice(0, 300) }
       if (!j.ok) return j
       const all = Array.isArray(j.messages) ? j.messages : []
+      const secUid = j.to_sec_uid || toId
+      if (secUid) mergeDmMemory(HOME, secUid, j.to || to, all)
       const limit = Math.max(1, Math.min(Number(args?.limit) || 30, 60))
       return {
         ok: true, to: j.to, to_sec_uid: j.to_sec_uid, count: j.count,
         mine: j.mine, them: j.them, unknown: j.unknown,
         messages: all.slice(-limit),
+        context: dmContext(HOME, secUid) || { note: '这个人以前没聊过（记忆里没有记录）' },
         their_latest: all.filter((m) => m.from === 'them').slice(-3).reverse(),
       }
     },
@@ -516,16 +530,21 @@ const TOOLS = [
       const argv = [join(ROOT, 'tools', 'notice-read.py'), '--raw']
       const r = run(venvPython(), argv, 150_000)
       const j = pickJson(r.stdout)
-      if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
-      const ats = (Array.isArray(j.items) ? j.items : []).filter((x) => x && (x.type === 45 || x.type === 46))
+      if (!j || r.status !== 0) return scriptResult(r, '没读到通知')
+      if (j.ok === false) return j
+      const ats = (Array.isArray(j.items) ? j.items : []).filter((x) => x && [31, 32, 45, 46].includes(x.type))
       const limit = Math.max(1, Math.min(Number(args?.limit) || 10, 30))
+      const visible = ats.filter(a => args?.include_seen || !loadCommentMemory(HOME, a.aweme_id)?.seen.includes(String(a.comment_id)))
       return {
         ok: true,
         at_n: ats.length,
-        list: ats.slice(0, limit).map((a) => ({
+        list: visible.slice(0, limit).map((a) => ({
           nickname: a.nickname || '', content: String(a.content || '').slice(0, 300),
           aweme_id: a.aweme_id || undefined, comment_id: a.comment_id || undefined,
           video_url: a.video_url || undefined,
+          root_comment_id: a.root_comment_id || undefined,
+          seen: loadCommentMemory(HOME, a.aweme_id)?.seen.includes(String(a.comment_id)) || false,
+          context: loadCommentMemory(HOME, a.aweme_id),
         })),
         hint: ats.length ? '要回：douyin_comment_reply { aweme_id, comment_id, text }，先给用户看草稿' : '最近没有新的 @',
       }
@@ -586,6 +605,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'douyin_remember',
+    title: '刷抖音 · 记录会话事实',
+    description: '把明确得知的事实记在本地；先读取该联系人的会话，不要编造事实。',
+    inputSchema: { type: 'object', properties: {
+      to_id: { type: 'string' }, facts: { type: 'array', items: { type: 'string' }, maxItems: 20 },
+    }, required: ['to_id', 'facts'], additionalProperties: false },
+    handler: args => {
+      if (!args?.to_id || !Array.isArray(args.facts)) return { ok: false, error: '需要 to_id 和 facts' }
+      const saved = addFacts(HOME, String(args.to_id), args.facts)
+      return saved ? { ok: true, facts: saved.facts } : { ok: false, error: '请先读取这个联系人的会话' }
+    },
+  },
+  {
     name: 'douyin_guide',
     title: '刷抖音 · 使用说明',
     description: '返回这个插件给别的 agent 看的使用说明（工具清单、安全红线、MCP 配置）。第一次接进来先读它。',
@@ -599,6 +631,27 @@ const TOOLS = [
     },
   },
 ]
+
+const BACKGROUND = process.env.DOUYIN_BACKGROUND === '1'
+const WRITES = new Set(['douyin_dm', 'douyin_share_card', 'douyin_comment_reply', 'douyin_comment_mention'])
+const availableTools = () => TOOLS.filter(t => !BACKGROUND || !WRITES.has(t.name) ||
+  (config().autoSend === true && (!t.name.startsWith('douyin_comment_') || process.env.DOUYIN_ALLOW_COMMENTS === '1')))
+
+function backgroundWriteError(name, args) {
+  if (!BACKGROUND || !WRITES.has(name)) return null
+  const cfg = config()
+  if (cfg.autoSend !== true) return '自动发送已关闭'
+  if (name === 'douyin_dm' || name === 'douyin_share_card') {
+    const target = resolveRecipient(args, cfg)
+    const peers = Array.isArray(cfg.dmPeers) && cfg.dmPeers.length ? cfg.dmPeers : [{ nick: cfg.dmTo, sec_uid: cfg.dmToId }]
+    if (!target.toId || !peers.some(p => p.sec_uid === target.toId && (!target.to || p.nick === target.to))) return '后台发送只允许设置里明确选中的联系人及其稳定 ID'
+  } else {
+    if (process.env.DOUYIN_ALLOW_COMMENTS !== '1') return '未授权后台评论'
+    if (name === 'douyin_comment_mention' && (!cfg.commentAtMe || !(cfg.atPeers || []).some(p => p.nick === args.name))) return '后台 @ 只允许设置里明确选中的人'
+    if (name === 'douyin_comment_reply' && !cfg.autoComment) return '自动评论已关闭'
+  }
+  return null
+}
 
 /* ─────────────────────────── JSON-RPC / MCP 传输 ─────────────────────────── */
 
@@ -636,7 +689,7 @@ const handleRequest = async (msg) => {
         protocolVersion: version,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-        instructions: '刷抖音插件（dsh-douyin-scroll）的 MCP 入口。第一次用先调 douyin_guide 读说明；发任何东西前必须先问使用者，得到同意才传 confirm:true。',
+        instructions: BACKGROUND ? '后台值班：只可在设置中明确授权的动作和联系人范围内发送；每个写调用仍需 confirm:true。' : '刷抖音插件（dsh-douyin-scroll）的 MCP 入口。第一次用先调 douyin_guide 读说明；发任何东西前必须先问使用者，得到同意才传 confirm:true。',
       })
     }
 
@@ -649,23 +702,25 @@ const handleRequest = async (msg) => {
 
     case 'tools/list':
       return reply(id, {
-        tools: TOOLS.map((t) => ({
+        tools: availableTools().map((t) => ({
           name: t.name,
           title: t.title,
-          description: t.description,
+          description: t.description + (BACKGROUND && WRITES.has(t.name) ? ' 后台模式：使用者已在设置中授予常设许可，限配置中的动作和联系人；授权范围内可用 confirm:true。' : ''),
           inputSchema: t.inputSchema,
         })),
       })
 
     case 'tools/call': {
       const name = String(params?.name || '')
-      const tool = TOOLS.find((t) => t.name === name)
+      const tool = availableTools().find((t) => t.name === name)
       if (!tool) return fail(id, -32602, `Unknown tool: ${name}`)
+      const denied = backgroundWriteError(name, params?.arguments || {})
+      if (denied) return reply(id, asContent({ ok: false, error: denied }))
       try {
         const value = await tool.handler(params?.arguments || {})
         return reply(id, asContent(value))
       } catch (e) {
-        return reply(id, asContent({ ok: false, error: String(e?.message ?? e) }))
+        return reply(id, asContent({ ok: false, error: redactDiagnostic(e?.message ?? e) }))
       }
     }
 

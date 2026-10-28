@@ -1011,13 +1011,13 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
                 h('div', { 'data-dy-title': '' }, '自动发送'),
                 h('div', { 'data-dy-sub': '' },
                   (cfg.autoSend
-                    ? '✅ 开着（默认）：插件自己跑一轮时，会把值得的视频发给你'
+                    ? '已授权自动发送：每轮会给下方选中的联系人发送卡片及理由，不再逐条询问'
                       + (cfg.autoComment ? '，也会发评论' : '') + '。'
-                    : '关着：插件自己跑一轮只写报告 + 弹通知，不往抖音发任何东西。'))),
+                    : '默认关闭：插件自己跑一轮只写报告 + 弹通知，不往抖音发任何东西。'))),
               h(Switch, {
                 on: Boolean(cfg.autoSend),
                 onChange: (v) => patch({ autoSend: v }, v
-                  ? '✅ 已打开自动发送'
+                  ? '已授权向所选联系人自动发送卡片及理由'
                   : '已关闭自动发送 —— 后台跑一轮只写报告'),
               })),
             h('div', { 'data-dy-row': '' },
@@ -1470,7 +1470,7 @@ button[data-dy-groupbtn][data-open]{color:var(--dsw-alias-label-secondary,#c9ccd
       /* ── 刷什么 ── */
               h('div', { 'data-dy-subblock': '' },
                 h('div', { 'data-dy-title': '' }, '刷什么'),
-                h('div', { 'data-dy-sub': '' }, '关注关键词，一行一个（留空 = 用内置默认那几组）'),
+                h('div', { 'data-dy-sub': '' }, '报告标注关键词，一行一个（不参与推荐流检索或过滤）'),
                 h('textarea', {
                   'data-dy-input': '', rows: 5, value: kwText,
                   placeholder: '搞笑\n美食\n猫',

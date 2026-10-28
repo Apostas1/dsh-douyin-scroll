@@ -27,6 +27,8 @@ const readIf = (p) => { try { return readFileSync(p, 'utf8') } catch { return ''
 const warn = (m) => { console.log(`  ⚠️  ${m}`) }
 
 console.log('dsh-douyin-scroll 本地预检\n')
+if (Number(process.versions.node.split('.')[0]) >= 22) ok('Node ≥22')
+else bad('需要 Node ≥22（CDP 使用内置 WebSocket）')
 
 /* ── 1. 必需文件 ── */
 console.log('1. 文件清单')
@@ -303,18 +305,19 @@ try {
   })()
   // 拿「实际生效的那份」来查：有本地私有配置就用它，否则用中性默认
   const activePersona = persona || personaDefault
+  const customPersona = Boolean(persona)
   // ① 必须有正反对照表（❌ 什么样 / ✅ 什么样），光有形容词没用
   if (/正反|❌[^\n]*✅|\|\s*❌/.test(activePersona)) {
     ok('人设里有正反对照（❌ 反例 / ✅ 正例）—— 比抽象形容词管用')
-  } else bad('人设只有抽象形容词（"软一点""别腻"）—— 模型学不会，写出来还是模板腔')
+  } else if (customPersona) bad('人设只有抽象形容词（"软一点""别腻"）—— 模型学不会，写出来还是模板腔')
   // ② 必须有"什么时候该收着"的边界，否则会一直卖弄
   if (/该收的时候收|收敛|不许.*稀释|别腻/.test(activePersona)) {
     ok('人设写明了什么时候该收着（讲风险 / 等结果时不许卖弄）')
-  } else bad('人设只有风格没有收敛 —— 讲红线、风险时也在耍宝就废了')
+  } else if (customPersona) bad('人设只有风格没有收敛 —— 讲红线、风险时也在耍宝就废了')
   // ③ 称呼边界：有个"只能叫某一个人"的概念（不管具体叫法）
   if (/只能叫|只属于|不许乱叫|只对.*一个/.test(activePersona)) {
     ok('人设写明了称呼边界（某种称呼只能对一个人用）')
-  } else bad('人设没说称呼边界 —— 会对着路人乱叫')
+  } else if (customPersona) bad('人设没说称呼边界 —— 会对着路人乱叫')
   /**
    * ⭐⭐ 4d-2b. **章程与私人口吻的隔离**
    *
@@ -351,13 +354,13 @@ try {
     const r = spawnSync('git', ['config', 'core.hooksPath'], { cwd: here, encoding: 'utf8', timeout: 15_000 })
     const hp = String(r.stdout || '').trim()
     if (hp === '.githooks') ok('core.hooksPath 指向 .githooks（hook 真的生效）')
-    else bad(`core.hooksPath 是 "${hp}" 不是 .githooks —— hook 装了也不跑`)
+    else warn(`维护者可设置 core.hooksPath；当前是 "${hp}" 不是 .githooks —— hook 装了也不跑`)
   } catch { warn('读不到 core.hooksPath（可能不是 git 仓库，或没装 git）') }
   // 文档里要写清版本号怎么用
   if (/不发版本|版本号只跟/.test(charter2) || /版本号只跟/.test(readFileSync(join(here, 'CHANGELOG.md'), 'utf8'))) {
     ok('文档写明了版本号怎么用（只跟"使用者能感觉到的变化"走）')
   } else warn('文档没写版本号规矩 —— 容易随手发版本')
-  if (/persona: douyin-scroll/.test(activePersona.split('\n')[0] || '')) ok('人设文件第一行有身份牌 persona: douyin-scroll')
+  if (/persona: (douyin-scroll|default)/.test(activePersona.split('\n')[0] || '')) ok('人设文件第一行有身份牌 persona: douyin-scroll')
   else bad('人设文件第一行缺身份牌 —— 插件会拒绝用它')
   if (!/cfg\.workspace/.test(idx)) ok('不再从 workspace 读外部 AGENTS.md（口子已封）')
   else bad('index.js 还在用 cfg.workspace —— 那正是"能读到别人插件设定"的口子')
@@ -834,7 +837,7 @@ try {
   else ok('没有用 document.cookie 判登录（HttpOnly 读不到，必须走 CDP）')
   // ⑥ profile 互斥要有明确提示
   // ⑥ profile 互斥要有明确提示（conflict 由 qr-login.mjs 产生，index.js 原样透传给面板）
-  if (/profile_in_use/.test(qr) && /conflict/.test(idx)) ok('后台无头浏览器占着 Chrome 配置时会明确提示（不用干等 60 秒）')
+  if (/profile_in_use/.test(readIf(join(here, 'lib/chrome.mjs'))) && /ensureChrome/.test(qr) && /conflict/.test(idx)) ok('后台无头浏览器占着 Chrome 配置时会明确提示（不用干等 60 秒）')
   else bad('profile 被占时没有明确提示 —— 用户会干等 60 秒看到"连不上"')
   // ⑦ 私信对象必须能"从会话里选"，不许让用户手填 sec_uid
   if (/--list/.test(ims) && /mode: 'list'/.test(ims)) ok('im-send.mjs 有 --list（列出会话里的人）')
@@ -1358,11 +1361,11 @@ try {
   const idx = readFileSync(join(here, 'index.js'), 'utf8')
   const cl = readFileSync(join(here, 'client.js'), 'utf8')
 
-  // ① 配置项：autoSend 默认**必须是 true**（2026-10-22 用户明确要求"默认就是要发消息"）
-  if (/autoSend:\s*z\.boolean\(\)\.default\(true\)/.test(idx)) ok('autoSend 配置项在，默认 true（用户要求：默认就发）')
-  else bad('autoSend 默认不是 true —— 用户要的是"默认就发消息"')
-  if (/autoSend:\s*true/.test(idx)) ok('DEFAULTS 里 autoSend = true')
-  else bad('DEFAULTS 里 autoSend 不是 true')
+  // ① 新安装默认只写报告，自动发送必须明确开启。
+  if (/autoSend:\s*z\.boolean\(\)\.default\(false\)/.test(idx)) ok('autoSend 默认 false，新安装不自动发送')
+  else bad('autoSend 必须默认关闭')
+  if (/autoSend:\s*false/.test(idx)) ok('DEFAULTS 里 autoSend = false')
+  else bad('DEFAULTS 里 autoSend 不是 false')
 
   // ② 提示词必须真的按这个开关分流
   if (/!cfg\.autoSend[\s\S]{0,400}?一个字都不要往抖音发/.test(idx)) {

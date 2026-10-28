@@ -28,9 +28,11 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, redactCookie } from './lib/state.mjs'
 import { saveCookie, readCookie, hasCredential, credentialInfo, clearCredential, cookiePath } from './lib/credential.mjs'
-import { sendWebhook, condense, maskUrl } from './lib/notify.mjs'
+import { sendWebhook, condense, maskUrl, configLogSummary } from './lib/notify.mjs'
 import { sendToast, toastSummary } from './lib/toast.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
+import { scriptRuntime, versionProbePassed } from './lib/dsh-runtime.mjs'
+import { lastJsonObject } from './lib/process-result.mjs'
 import {
   loadDmMemory, mergeDmMemory, noteSent, addFacts, dmContext,
   loadCommentMemory, noteMyComment, markSeen,
@@ -52,11 +54,11 @@ import { deliverToSession, makeUserMessage, pickClientTimeZone, relayLine } from
 //    逻辑在 lib/pet-tts.mjs，纯函数 + 依赖注入，有离线单测（tools/pet-tts-test.mjs）。
 
 export const name = 'douyin-scroll'
-export const inject = ['webServer', 'tools', 'settings']
+export const inject = ['tools', 'settings']
 /** 🔴 2026-10-24：她的对话要用 ctx.get('llm') 调一次真模型。
  *  不能放进 inject —— 那样没模型的环境整个插件都起不来；
  *  用 optional 取，取不到就退回本地小脑（不静默降级：状态里会标 brain:'local'）。 */
-export const optional = ['llm']
+export const optional = ['llm', 'webServer']
 
 /**
  * 🔴 每个字段都要 `.extra('volatile', true)`：DSH 的 settings.update() 只认 volatile 字段
@@ -102,20 +104,8 @@ export const Config = !z ? undefined : z.object({
   minComments: z.natural().default(3).extra('volatile', true),
   /** 自动评论并 @（默认关 —— 会拿用户的号说话） */
   autoComment: z.boolean().default(false).extra('volatile', true),
-  /**
-   * ⭐ **自动发送总开关**（2026-10-22 用户要求）
-   *
-   * 含义：**插件自己在后台跑一轮时**，允不允许它往外发东西
-   *      （私信 / 分享卡片 / 评论）。
-   *
-   * 🔴 2026-10-22 用户明确要求：**默认就是要发消息**。
-   *    之前默认 false 是我理解错了 —— 用户说"默认状态，刚下载的时候，
-   *    点了自己跑一轮，跟让它自己刷抖音，都不要确认，直接发送"。
-   *    ⇒ 现在默认 **true**。
-   *
-   * 仍然是**可关**的：面板上有明确开关，不想让它自动发就关掉。
-   */
-  autoSend: z.boolean().default(true).extra('volatile', true),
+  /** 后台发送必须由使用者在设置页明确开启；新安装只写报告。 */
+  autoSend: z.boolean().default(false).extra('volatile', true),
   /**
    * ⭐⭐ **在评论区 @ 你**（2026-10-22 用户要求，加在「自动发送」下面）
    *
@@ -129,7 +119,7 @@ export const Config = !z ? undefined : z.object({
    *   ② `commentSelfName` 填了（要 @ 的人 = 你自己）
    *   ③ 走的是 `comment-mention-ui.mjs`（真 UI 点选，sec_uid 才保得住）
    *
-   * ⚠️ 默认 **false** —— 这个跟 autoSend 不一样：
+   * ⚠️ 默认 **false**，需要独立授权：
    *    发私信是发给"你选的那个人"，而这个是**在别人的视频下面公开评论**，
    *    所有路人都看得到。默认开不合适，得你自己点开。
    */
@@ -249,7 +239,7 @@ export const Config = !z ? undefined : z.object({
   /** 日报形态：full / brief / off */
   reportLevel: z.string().default('full').extra('volatile', true),
   /** Python：指向 venv 里那个最好 */
-  pythonPath: z.string().default('python').extra('volatile', true),
+  pythonPath: z.string().default(process.platform === 'win32' ? 'python' : 'python3').extra('volatile', true),
   /** dsh 的 bin.js（不填就试自动探测） */
   dshBin: z.string().default('').extra('volatile', true),
   headlessProfile: z.string().default('headless').extra('volatile', true),
@@ -324,7 +314,7 @@ export function apply(ctx, config) {
     windows: [],
     keywords: [], channels: [], authors: [],
     minDescLen: 12, minComments: 3,
-    autoComment: false, autoSend: true, commentAtMe: false, atPeers: [], commentSelfName: '',
+    autoComment: false, autoSend: false, commentAtMe: false, atPeers: [], commentSelfName: '',
     commentExecutor: 'off', commentPerRun: 1, commentPerDay: 0,
     mentionName: '', httpCommentUrl: '',
     notifyMode: 'toast', webhookUrl: '', webhookPreset: 'custom',
@@ -338,7 +328,7 @@ export function apply(ctx, config) {
     //    🔴 2026-10-26 主人：「联动桌宠选项暂时不要出现」⇒ 默认还是 true（不影响老用户），
     //       但**面板上先不显示这个开关**（见 client.js 的 HIDE_PET_LINK）。
     petLinkTo: true,
-    reportLevel: 'full', pythonPath: 'python', dshBin: '', headlessProfile: 'headless',
+    reportLevel: 'full', pythonPath: process.platform === 'win32' ? 'python' : 'python3', dshBin: '', headlessProfile: 'headless',
     overlayMcp: true,
   }
   // ⭐ 哪些数组字段装的是**对象**（不能按字符串过滤）
@@ -817,8 +807,6 @@ export function apply(ctx, config) {
   }
   const resolveUv = async () => {
     if (await haveUv()) return 'uv'
-    const bundled = join(stateDir, 'bin', process.platform === 'win32' ? 'uv.exe' : 'uv')
-    if (existsSync(bundled)) return bundled
     appendInstall('这台机器上没有 uv —— 我下一份放进插件家目录（单文件、免管理员、约 15MB，只需要一次）…\n')
     try {
       const got = await ensureUv({ dir: join(stateDir, 'bin'), log: appendInstall })
@@ -931,7 +919,7 @@ export function apply(ctx, config) {
     const r = spawnSync(process.execPath, [f, ...args], {
       encoding: 'utf8',
       timeout,
-      env: pyEnv({ DOUYIN_HOME: stateDir }),
+      env: pyEnv({ DOUYIN_HOME: stateDir, DOUYIN_NODE: nodeExe() || process.execPath, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
       windowsHide: true,
     })
     return { status: r.status ?? -1, stdout: String(r.stdout || ''), stderr: String(r.stderr || r.error || '') }
@@ -949,19 +937,14 @@ export function apply(ctx, config) {
     const r = spawnSync(py, [f, ...args], {
       encoding: 'utf8',
       timeout,
-      env: pyEnv({ DOUYIN_HOME: stateDir }),
+      env: pyEnv({ DOUYIN_HOME: stateDir, DOUYIN_NODE: nodeExe() || process.execPath, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
       windowsHide: true,
     })
     return { status: r.status ?? -1, stdout: String(r.stdout || ''), stderr: String(r.stderr || r.error || '') }
   }
 
   /** 从脚本输出里抠出最后一个完整 JSON 对象 */
-  const pickJson = (s) => {
-    const t = String(s || '')
-    const i = t.indexOf('{'), j = t.lastIndexOf('}')
-    if (i < 0 || j <= i) return null
-    try { return JSON.parse(t.slice(i, j + 1)) } catch { return null }
-  }
+  const pickJson = lastJsonObject
 
   /**
    * ⭐⭐ 2026-10-23 新增：**发送闸 / 限流退避 / 三态回读**
@@ -1202,12 +1185,12 @@ export function apply(ctx, config) {
       if (!existsSync(cookiePath(stateDir))) {
         return { ok: false, error: '还没有 Cookie', hint: '先扫码登录（tools/qr-login.mjs start），或设置页粘贴 Cookie' }
       }
-      const venvPy = join(stateDir, '.venv', 'Scripts', 'python.exe')
+      const venvPy = venvPython()
       const py = existsSync(venvPy) ? venvPy : (cfg.pythonPath || 'python')
       const r = spawnSync(py, [script], {
         encoding: 'utf8',
         timeout: 240_000,
-        env: pyEnv({ DOUYIN_HOME: stateDir }),
+        env: pyEnv({ DOUYIN_HOME: stateDir, DOUYIN_NODE: nodeExe() || process.execPath, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
         windowsHide: true,
       })
       if (r.status !== 0) {
@@ -1488,14 +1471,14 @@ export function apply(ctx, config) {
       raw: { type: 'boolean', description: '连原始条目一起返回（默认 false）' },
     },
     async execute(args = {}) {
-      const venvPy = join(stateDir, '.venv', 'Scripts', 'python.exe')
+      const venvPy = venvPython()
       if (!existsSync(venvPy)) return { ok: false, error: '还没装运行环境', hint: '设置页点「装主依赖」' }
       if (!existsSync(cookiePath(stateDir))) return { ok: false, error: '还没有 Cookie', hint: '先扫码登录' }
       const argv = [join(pluginDir, 'tools', 'notice-read.py')]
       if (args.raw) argv.push('--raw')
       const r = spawnSync(venvPy, argv, {
         encoding: 'utf8', timeout: 150_000,
-        env: pyEnv({ DOUYIN_HOME: stateDir }), windowsHide: true,
+        env: pyEnv({ DOUYIN_HOME: stateDir, DOUYIN_NODE: nodeExe() || process.execPath, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }), windowsHide: true,
       })
       const j = pickJson(r.stdout)
       if (!j) return { ok: false, error: '没读到通知', stderr: String(r.stderr || '').slice(0, 300) }
@@ -2224,23 +2207,14 @@ export function apply(ctx, config) {
     return st.day === dayKey(now) ? Number(st.count || 0) : 0
   }
 
-  /**
-   * ⭐ 优先用**真正的 Node.js** 去跑 dsh，而不是 Electron 的 `process.execPath`。
-   *
-   * 🔴 2026-10-20 实测（桌面版真机上必现）：
-   *    用 `process.execPath`（Electron）+ `ELECTRON_RUN_AS_NODE=1` 起 dsh 会崩在启动阶段：
-   *      `unsupported Electron runtime fingerprint: Node 24.21.0, V8 15.2.124.28-electron.0
-   *       (supported Electron versions: 43.0.0, 44.0.0, 45.0.0-alpha.6)`
-   *    原因是 dsh 里有个 native addon（node-addon-require-builtin）按 Electron 大版本白名单校验，
-   *    这台机器的 Electron 版本不在白名单里 ⇒ **那一轮直接 code=1 挂掉**。
-   *    ⇒ 只要机器上有独立 node（开发机基本都有），就用它；没有才退回 Electron。
-   *    （这也是 bili-scroll「桌面版上自动跑会卡/失败」那类反馈的根因之一。）
-   */
+  // 普通脚本优先用 Node ≥22；asar 内入口必须用 Electron 的文件系统支持。
   const findNodeExe = () => {
     try {
-      const probe = spawnSync('node', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
+      const candidate = process.env.DOUYIN_NODE || 'node'
+      const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
       if (probe.status !== 0) return ''
-      if (!/^v\d+\./.test(String(probe.stdout || '').trim())) return ''
+      if (Number(/^v(\d+)\./.exec(String(probe.stdout || '').trim())?.[1] || 0) < 22) return ''
+      if (process.env.DOUYIN_NODE) return candidate
       const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['node'],
         { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
       const first = String(which.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0]
@@ -2255,9 +2229,9 @@ export function apply(ctx, config) {
 
   const resolveDsh = () => {
     // 运行时脚本用哪个解释器：有独立 node 就用它（见上面那段实测说明）
-    const jsRunner = () => nodeExe() || process.execPath
+    const runtimeFor = target => scriptRuntime(target, { node: nodeExe() })
     const explicit = String(cfg.dshBin || '').trim()
-    if (explicit && existsSync(explicit)) return { command: jsRunner(), args: [explicit], shell: false }
+    if (explicit && existsSync(explicit)) return runtimeFor(explicit)
 
     /**
      * ⭐⭐ 2026-10-23 重写（起因：使用者反馈「总是显示找不到 dsh：桌面版多半不是 NPM 全局安装的」）
@@ -2294,7 +2268,7 @@ export function apply(ctx, config) {
     } catch { /* 反推不到就继续猜 */ }
 
     // ② 桌面版标准安装位置：resources/app.asar/dsh/node_modules/@deepseek-ai/…
-    //    （asar 里的文件 Node 也能直接读，不需要解开 —— 这是别人机器上唯一必然存在的路径）
+    //    asar 内的文件必须由 Electron 运行，独立 Node 无法读取。
     const resPaths = [process.resourcesPath, process.env.DSH_RESOURCES].filter(Boolean)
     for (const rp of resPaths) {
       for (const rel of [
@@ -2334,29 +2308,29 @@ export function apply(ctx, config) {
     const isAsar = (p) => /\.asar[\\/]/i.test(String(p))
     const runnable = (p) => {
       try {
-        const r = spawnSync(jsRunner(), [p, '--version'], { encoding: 'utf8', windowsHide: true, timeout: 25_000 })
-        const out = `${r.stdout || ''}${r.stderr || ''}`
-        return r.status === 0 || /\d+\.\d+\.\d+/.test(out)
+        const runtime = runtimeFor(p)
+        const r = spawnSync(runtime.command, [...runtime.args, '--version'], { encoding: 'utf8', windowsHide: true, timeout: 25_000, env: { ...process.env, ...runtime.env } })
+        return versionProbePassed(r)
       } catch { return false }
     }
 
     // ① 真实存在（非 asar）的候选，直接返回
     for (const p of candidates) {
       if (!p || isAsar(p)) continue
-      try { if (existsSync(p)) return { command: jsRunner(), args: [p], shell: false } } catch { /* 下一个 */ }
+      try { if (existsSync(p)) return runtimeFor(p) } catch { /* 下一个 */ }
     }
     // ② asar 内的候选：真跑一次验证（Electron 宿主能跑）
     for (const p of candidates) {
       if (!p || !isAsar(p)) continue
       if (runnable(p)) {
         log(`dsh 入口（asar 内，已验证可跑）：${p}`)
-        return { command: jsRunner(), args: [p], shell: false }
+        return runtimeFor(p)
       }
     }
     // ③ 最后再兜一遍：非 asar 但 existsSync 没命中的（权限/符号链接怪情况）
     for (const p of candidates) {
       if (!p || isAsar(p)) continue
-      if (runnable(p)) return { command: jsRunner(), args: [p], shell: false }
+      if (runnable(p)) return runtimeFor(p)
     }
 
     /**
@@ -2492,6 +2466,8 @@ export function apply(ctx, config) {
             `        args: ['${posix(mcpServer)}']`,
             '        env:',
             `          DOUYIN_HOME: '${posix(stateDir)}'`,
+            "          DOUYIN_BACKGROUND: '1'",
+            `          DOUYIN_ALLOW_COMMENTS: '${cfg.autoComment || cfg.commentAtMe ? '1' : '0'}'`,
             '        # 发送类工具慢（要起无头浏览器），给足时间',
             '        toolCallTimeoutMs: 300000',
             '        failOnStartupError: false',
@@ -2628,7 +2604,7 @@ export function apply(ctx, config) {
       + `\n`
       /**
        * ⭐ 自动发送总开关（autoSend）—— 这一段是"后台跑一轮时到底能不能发东西"的唯一判据。
-       *    默认开（用户要求）；关掉就一个字都不许发。
+       *    默认关；使用者明确开启后才允许后台发送。
        */
       + (!cfg.autoSend
         ? `🔴 **自动发送关着**：**一个字都不要往抖音发** —— 不发私信、不发卡片、不发评论。`
@@ -2727,6 +2703,11 @@ export function apply(ctx, config) {
           : '上游模型这轮被限流（429），等额度恢复后再试。',
         fix: '要么等额度恢复，要么在「设置 → 模型」里换一个模型（插件会自动跟随桌面版当前模型）。这不是插件的问题。',
       }
+    }
+    if (/profile [^\n]+ does not exist/i.test(tail)) {
+      return { kind: 'profile_missing', title: '后台 profile 尚未创建',
+        detail: '当前 DSH 没有自动初始化后台 profile。',
+        fix: `运行 dsh plugin --profile ${cfg.headlessProfile || 'headless'} add link:<插件目录绝对路径>，然后重启 DSH。` }
     }
     // ② 找不到 dsh / 起不来
     if (/找不到 dsh|刷抖音起不来|spawn .* ENOENT/i.test(tail)) {
@@ -3021,6 +3002,11 @@ export function apply(ctx, config) {
       }
       refreshCfg()
       syncCollectorCfg()
+      const profileName = String(cfg.headlessProfile || 'headless')
+      if (!/^[A-Za-z0-9_-]+$/.test(profileName)) return { started: false, error: 'headless profile 名称只能包含字母、数字、下划线和连字符' }
+      if (!existsSync(join(dirname(stateDir), 'profiles', profileName))) {
+        log(`后台 profile ${profileName} 尚未初始化；若当前 DSH 不能自动初始化，请运行 dsh plugin --profile ${profileName} add link:<插件目录绝对路径>`)
+      }
       // ⭐ 手动触发也要过每日配额闸（bili-scroll 踩过：连点两次手动，一天从 20 条刷到 80 条）
       const quota = Number(cfg.perDay || 0)
       const picked = countPickedToday()
@@ -3059,7 +3045,7 @@ export function apply(ctx, config) {
             shell: dsh.shell,
             windowsHide: true,
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: pyEnv({ DOUYIN_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
+            env: pyEnv({ DOUYIN_DUTY_HOME: stateDir, DOUYIN_HOME: stateDir, ...dsh.env }),
           })
           /**
            * ⭐ 超时看门狗（2026-10-20 实测加）：那一轮**干完活之后可能不退出** ——
@@ -3429,7 +3415,7 @@ export function apply(ctx, config) {
     let c
     try {
       c = spawn(process.execPath, [f, ...args], {
-        env: pyEnv({ DOUYIN_HOME: stateDir }),
+        env: pyEnv({ DOUYIN_HOME: stateDir, DOUYIN_NODE: nodeExe() || process.execPath, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
@@ -4411,7 +4397,7 @@ export function apply(ctx, config) {
        *   （面板把 petOn 打开 = 「叫她回来」）。petOn 归 dsh-deskpet 了，
        *   pet-hide.json 也在它家里 —— 面板「叫她回来」调它自己的 /api/deskpet/show。 */
       const { clean, host } = await persistCfg(patch)
-      log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
+      log(`设置已更新字段：${configLogSummary(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
       petKeeperTick().catch((e) => log(`petKeeperTick（开关变更）异步出错：${e?.message ?? e}`))   // 联动状态变化立即反应（不等下一拍）
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
@@ -5229,7 +5215,9 @@ export function apply(ctx, config) {
       const force = String((await readBody(req))?.force || '') === '1'
       // 先确保后台无头浏览器不占着 profile —— 它和扫码窗口共用一个 user-data-dir
       if (force) {
-        runNodeTool('qr-login.mjs', ['close'], { timeout: 40_000 })
+        const closed = runNodeTool('qr-login.mjs', ['close'], { timeout: 40_000 })
+        const result = pickJson(closed.stdout)
+        if (closed.status !== 0 || !result?.ok) return sendJson(res, 200, result || { ok: false, error: '未能安全关闭插件浏览器' })
         await new Promise((r) => setTimeout(r, 1200))
       }
       const r = runNodeTool('qr-login.mjs', ['start'], { timeout: 120_000 })
@@ -5369,7 +5357,7 @@ export function apply(ctx, config) {
   }
 
   try {
-    ctx.effect(() => ctx.webServer.register({
+    if (ctx.webServer) ctx.effect(() => ctx.webServer.register({
       kind: 'prefix',
       path: '/api/douyin-duty',
       handler: async (req, res) => {

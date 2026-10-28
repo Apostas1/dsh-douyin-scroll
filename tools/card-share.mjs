@@ -31,7 +31,11 @@ const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode =
 
 if (!AID || !WHO) { out({ ok: false, error: '用法: card-share.mjs <aweme_id> <好友昵称>' }); process.exit(1) }
 
-const _c = await openPage()
+if (TOID && /^\d+$/.test(TOID)) { out({ ok: false, error: 'to-id 需要 sec_uid，不能是数字 uid' }); process.exit(1) }
+
+let _c
+try { _c = await openPage() }
+catch (error) { out({ ok: false, error: error.message, hint: '检查插件浏览器 profile 占用；使用 douyin_doctor 查看环境' }); process.exit(1) }
 const chromed = _c.status
 const { send, ev } = _c
 const mv = (x, y) => send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 })
@@ -182,7 +186,10 @@ try {
       toast: (document.body.innerText||'').indexOf('已发送')>=0 || (document.body.innerText||'').indexOf('发送成功')>=0
     });
   })()`)
-  out({ ok: true, sent: true, aweme_id: AID, to: WHO, panel, btn: b, chrome: chromed, after: JSON.parse(after) })
+  const receipt = JSON.parse(after)
+  out({ ok: receipt.toast === true, sent: receipt.toast === true, pending: !receipt.toast,
+    aweme_id: AID, to: WHO, to_sec_uid: target.sec_uid, chrome: chromed, after: receipt,
+    ...(!receipt.toast ? { error: '已点击分享，但未看到发送成功提示', hint: '请先在抖音核对是否收到，勿直接重试以免重复发送' } : {}) })
 } catch (e) {
   out({ ok: false, error: String(e?.message ?? e) })
 } finally {

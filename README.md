@@ -1,5 +1,35 @@
 # dsh-douyin-scroll ｜ 刷抖音
 
+> 本 fork 包含安全性与可移植性修复，基于上游 0.5.4；尚未发布 npm 新版本。
+> 现存 issue 的逐项处理和验证边界见 [ISSUE-TRIAGE.md](ISSUE-TRIAGE.md)。
+
+使用本 fork 时先 clone，再用本地绝对路径安装（Node ≥22）：
+
+```bash
+git clone https://github.com/Apostas1/dsh-douyin-scroll.git
+cd dsh-douyin-scroll
+node selfcheck.mjs
+npm test
+# 把 <插件目录绝对路径> 换成上面 clone 的目录；已有桌面版使用 desktop，Web 版使用 web。
+dsh plugin --profile desktop add "link:<插件目录绝对路径>"
+# 后台轮次需 headless profile；首次安装可用此命令创建并加入插件。
+dsh plugin --profile headless add "link:<插件目录绝对路径>"
+```
+
+安装后重启 DSH。下方保留的 npm / 上游 GitHub 安装方式对应上游版本，不包含本 fork 修复。
+Python 回归检查：`python3 -m unittest discover -s tests -p 'test_*.py'`（Windows 可用 `python`）。
+
+升级注意：
+
+- 新安装默认只生成报告；自动发送需在设置里明确开启，评论和 @ 仍有独立开关。已有明确保存的开关值会保留。
+- 浏览器复用与关闭都需验证完整的插件 profile 路径。旧版启动且缺少 `--enable-automation` 的浏览器无法验证，
+  请手动关闭该插件浏览器后重新扫码；不要删除 profile，也不要结束所有 Chrome / Edge 进程。
+- 可用 `DOUYIN_NODE` 指定 Node ≥22 的可执行文件，`DOUYIN_BROWSER` 指定浏览器。macOS/Linux 使用 `.venv/bin/python`。
+- 自动安装 uv 固定到官方 0.13.6，六个平台/架构分别固定 SHA-256；校验失败时停止安装。
+  无法访问 GitHub 时，请自行安装 uv 并加入 PATH，再点安装依赖。
+- 分享卡片未观察到成功提示时会返回 `pending`，请先核对收件情况再重试。
+
+
 > [!WARNING]
 > **用之前先想清楚（风险自担）**
 > - 这个插件会把**你自己的抖音登录凭证（Cookie）**交给本机脚本，替你调用抖音的接口。这不是抖音官方功能 —— 属于**个人学习性质的自动化**，可能违反抖音的用户协议，**账号风险由你自己承担**。

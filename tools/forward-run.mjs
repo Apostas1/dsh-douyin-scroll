@@ -15,12 +15,13 @@
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { sendToast } from '../lib/toast.mjs'
 import { homeDir } from '../lib/paths.mjs'
 
 const HOME = homeDir()
-const VENV_PY = join(HOME, '.venv', 'Scripts', 'python.exe')
-const SCRIPT = new URL('./forward-pick.py', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+const VENV_PY = join(HOME, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
+const SCRIPT = fileURLToPath(new URL('./forward-pick.py', import.meta.url))
 
 const argv = process.argv.slice(2)
 const noToast = argv.includes('--no-toast')
@@ -35,7 +36,7 @@ function run() {
     windowsHide: true,
   })
   if (r.status !== 0) {
-    throw new Error('forward-pick.py 失败: ' + (r.stderr || r.error || `exit ${r.status}`).slice(0, 500))
+    throw new Error('forward-pick.py 失败: ' + String(r.stderr || r.error || `exit ${r.status}`).slice(0, 500))
   }
   return r.stdout || ''
 }

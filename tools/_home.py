@@ -17,7 +17,21 @@ tools/_home.py —— Python 脚本**唯一**的家目录来源
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from pathlib import Path
+
+
+def configure_stdio() -> None:
+    """CLI and MCP both use UTF-8, including Windows consoles containing emoji."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+configure_stdio()
 
 
 def home_dir(create: bool = True) -> Path:
@@ -47,4 +61,9 @@ def plugin_dir() -> Path:
 
 
 def node_bin() -> str:
-    return os.environ.get("DOUYIN_NODE") or "node"
+    return (os.environ.get("DOUYIN_NODE") or "").strip() or shutil.which("node") or "node"
+
+
+def python_bin() -> str:
+    candidate = home_dir() / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return str(candidate) if candidate.is_file() else sys.executable
