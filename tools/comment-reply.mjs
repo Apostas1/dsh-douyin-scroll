@@ -84,9 +84,9 @@ try {
     btn = await findReplyBtn()
     if (btn) break
   }
-  if (!btn) { out({ ok: false, error: '没找到那条评论的「回复」按钮', needle: NEEDLE }); await c?.close(); process.exit(1) }
+  if (!btn) { out({ ok: false, error: '没找到那条评论的「回复」按钮', needle: NEEDLE }); process.exit(1) }
   const b = JSON.parse(btn)
-  if (DRY) { out({ ok: true, dry: true, btn: b, textLen: TEXT.length }); await c.close(); process.exit(0) }
+  if (DRY) { out({ ok: true, dry: true, btn: b, textLen: TEXT.length }); c.close(); process.exit(0) }
 
   // 3) 点回复
   await click(b.x, b.y)
@@ -104,7 +104,7 @@ try {
     });
     return best?JSON.stringify(best):'';
   })()`)
-  if (!ed) { out({ ok: false, error: '点了回复但没出现输入框', btn: b }); await c?.close(); process.exit(1) }
+  if (!ed) { out({ ok: false, error: '点了回复但没出现输入框', btn: b }); process.exit(1) }
   const e2 = JSON.parse(ed)
   await click(e2.x, e2.y)
   await sleep(400)
@@ -116,7 +116,7 @@ try {
     var s=eds.map(function(e){return String(e.innerText||e.value||'')}).join('|');
     return s.replace(/[\\u200b\\r]/g,'').slice(0,300);
   })()`)
-  if (!String(typed).trim()) { out({ ok: false, error: '正文没进输入框', ph: e2.ph }); await c?.close(); process.exit(1) }
+  if (!String(typed).trim()) { out({ ok: false, error: '正文没进输入框', ph: e2.ph }); process.exit(1) }
 
   // 5) 找「发送」按钮，找不到就回车
   const sbtn = await ev(`(function(){
@@ -152,5 +152,5 @@ try {
   out({ ok: a.appeared, sent: a.appeared, aweme_id: AID, to_comment: NEEDLE.slice(0, 20), text: TEXT.slice(0, 120), usedSendBtn: !!sbtn, after: a })
 } catch (e) {
   out({ ok: false, error: String(e?.message ?? e) })
-} finally { await c.close() }
+} finally { c.close() }
 process.exit(process.exitCode || 0)

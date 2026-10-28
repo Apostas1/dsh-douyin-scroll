@@ -179,5 +179,5 @@ try {
 } catch (e) {
   out({ ok: false, phase: 'error', error: String(e?.message ?? e) })
 } finally {
-  try { await c.close() } catch { /* 已经关了 */ }
+  try { c.close() } catch { /* 已经关了 */ }
 }

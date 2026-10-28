@@ -141,7 +141,7 @@ async function main() {
       items: sel.slice(0, LIMIT),
     })
   } finally {
-    await c.close()
+    c.close()
     await sleep(200)
   }
 }

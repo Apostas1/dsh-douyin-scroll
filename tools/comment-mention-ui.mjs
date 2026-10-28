@@ -46,9 +46,8 @@ const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode =
 
 if (!AWEME || !NAME) { out({ ok: false, error: '用法: comment-mention-ui.mjs --aweme <id> --name <昵称> [--text 正文] [--reply-cid <cid> | --reply-text <片段>] [--dry]' }); process.exit(1) }
 
-let c
 try {
-  c = await openPage()
+  const c = await openPage()
   const chromed = c.status
 
   const mv = (x, y) => c.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 })
@@ -104,7 +103,7 @@ try {
         }
       }
       if (!hit) {
-        await c.close()
+        c.close()
         out({ ok: false, error: `评论区里找不到含「${REPLY_TEXT}」的那条评论（滚了 12 屏）`, code: 'reply_target_not_found' })
         process.exit(1)
       }
@@ -133,7 +132,7 @@ try {
         await sleep(1800)
         replyInfo = { reply_by_text: REPLY_TEXT, reply_button: rb }
       } else {
-        await c.close()
+        c.close()
         out({ ok: false, error: `找到「${REPLY_TEXT}」那条评论了，但没找到它下面的「回复」按钮`, code: 'reply_button_not_found' })
         process.exit(1)
       }
@@ -197,7 +196,7 @@ try {
       }
     }
     if (!found) {
-      await c.close()
+      c.close()
       out({ ok: false, error: `评论区里找不到 cid=${REPLY_CID} 这条评论（可能被删了 / 或者滚得不够深）`, code: 'reply_target_not_found' })
       process.exit(1)
     }
@@ -251,7 +250,7 @@ try {
       return '';
     })()`))
     if (!replyBtn) {
-      await c.close()
+      c.close()
       out({ ok: false, error: '找到了那条评论，但没找到「回复」按钮', code: 'reply_button_not_found' })
       process.exit(1)
     }
@@ -269,7 +268,7 @@ try {
     var r=e.getBoundingClientRect();
     return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});
   })()`))
-  if (!box.x) { out({ ok: false, error: '找不到 #comment-input-container' }); await c?.close(); process.exit(1) }
+  if (!box.x) { out({ ok: false, error: '找不到 #comment-input-container' }); process.exit(1) }
   await click(box.x, box.y)
   await sleep(1500)
 
@@ -280,7 +279,7 @@ try {
     var r=e.getBoundingClientRect();
     return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});
   })()`))
-  if (!ed.x) { out({ ok: false, error: '评论编辑器没展开（.public-DraftEditor-content 不存在）' }); await c?.close(); process.exit(1) }
+  if (!ed.x) { out({ ok: false, error: '评论编辑器没展开（.public-DraftEditor-content 不存在）' }); process.exit(1) }
   await click(ed.x, ed.y)
   await sleep(400)
 
@@ -317,7 +316,7 @@ try {
     rows.sort(function(a,b){ return a.w-b.w; });
     return JSON.stringify(rows[0]||{});
   })()`))
-  if (!row.x) { out({ ok: false, error: '@ 弹层里没找到这个名字（可能没互关 / 昵称不对）' }); await c?.close(); process.exit(1) }
+  if (!row.x) { out({ ok: false, error: '@ 弹层里没找到这个名字（可能没互关 / 昵称不对）' }); process.exit(1) }
 
   // 真实鼠标点选那一行
   await click(row.x, row.y)
@@ -358,7 +357,7 @@ try {
 
   if (DRY) {
     out({ ok: true, dry: true, popup_row: row, editor_html: editorHtml, chrome: chromed })
-    await c.close(); await sleep(200)
+    c.close(); await sleep(200)
     throw { __done: true }
   }
 
@@ -378,16 +377,14 @@ try {
     }
     return '{}';
   })()`))
-  if (!btn.x) { out({ ok: false, error: '找不到发布箭头', editor_html: editorHtml }); await c?.close(); process.exit(1) }
+  if (!btn.x) { out({ ok: false, error: '找不到发布箭头', editor_html: editorHtml }); process.exit(1) }
   await click(btn.x, btn.y)
   await sleep(4000)
 
   const editorAfter = await c.ev(`(function(){ var e=document.querySelector('.public-DraftEditor-content'); return e ? String(e.innerText||'').slice(0,60) : '(gone)'; })()`)
-  await c.close()
+  c.close()
   await sleep(200)   // 等 WebSocket 真正关掉再退出（别的工具踩过 libuv 断言）
   out({ ok: true, published: true, aweme_id: AWEME, mention: NAME, ...(replyInfo || {}), popup_row: row, editor_html: editorHtml, editor_after: editorAfter, chrome: chromed })
 } catch (e) {
   if (!(e && e.__done)) out({ ok: false, error: String(e?.message ?? e) })
-} finally {
-  await c?.close().catch(() => {})
 }

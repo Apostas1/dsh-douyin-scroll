@@ -12,7 +12,7 @@
  * 输出一行 JSON：{ ok, http, status_code, error? }
  * ⚠️ ok 判据：接口 200 且 status_code=0。删没删真掉，用 api-comments.py 回读 cid 消失为准。
  */
-import { openPage, sleep, waitForPageSigner } from '../lib/chrome.mjs'
+import { openPage, sleep } from '../lib/chrome.mjs'
 
 const argv = process.argv.slice(2)
 const argOf = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? (argv[i + 1] ?? '') : d }
@@ -24,15 +24,18 @@ const out = (o) => { console.log(JSON.stringify(o, null, 1)); process.exitCode =
 
 if (!AWEME || !CID) { out({ ok: false, error: '用法: comment-delete.mjs --aweme <id> --cid <cid>' }); process.exit(1) }
 
-let c
 try {
-  c = await openPage({ url: `https://www.douyin.com/video/${encodeURIComponent(AWEME)}` })
+  const c = await openPage()
   const chromed = c.status
-  await waitForPageSigner(c)
+  const cur = String(await c.ev('location.href'))
+  if (!cur.includes('douyin.com')) {
+    await c.send('Page.navigate', { url: 'https://www.douyin.com/' })
+    await sleep(6000)
+  }
 
   if (DRY) {
     out({ ok: true, dry: true, aweme_id: AWEME, cid: CID, chrome: chromed })
-    await c.close()
+    c.close()
     await sleep(200)
     throw { __done: true }
   }
@@ -85,7 +88,7 @@ try {
   })()`
 
   const raw = await c.ev(js)
-  await c.close()
+  c.close()
   await sleep(200)
 
   let res
@@ -93,6 +96,4 @@ try {
   out({ ...res, aweme_id: AWEME, cid: CID, chrome: chromed })
 } catch (e) {
   if (!(e && e.__done)) out({ ok: false, error: String(e?.message ?? e) })
-} finally {
-  await c?.close().catch(() => {})
 }
